@@ -73,6 +73,8 @@ class ImageCanvas(QGraphicsView):
         self._polygon_item = None
         self._brush_preview = None
         self._stamp_preview = None
+        self._label_array = None      # int16 label image (pixel = ROI index+1)
+        self._color_lut = None        # (N+1, 4) uint8 RGBA lookup table
 
         self._tool = None
         self._active_layer = None
@@ -215,30 +217,74 @@ class ImageCanvas(QGraphicsView):
     # ROI overlay display
     # ------------------------------------------------------------------
 
+    def _build_label_and_lut(self):
+        """Build label array and color LUT from current ROI state."""
+        h, w = self.layer_stack.image_layer.shape[:2]
+        gof = self.layer_stack._global_opacity_factor
+        rois = self.layer_stack.roi_layers
+
+        labels = np.zeros((h, w), dtype=np.int16)
+        # Entry 0 = transparent (no ROI)
+        lut = np.zeros((len(rois) + 1, 4), dtype=np.uint8)
+
+        has_outline = False
+        for i, roi in enumerate(rois):
+            if not roi.visible:
+                continue
+            idx = i + 1
+            fill_mode = getattr(roi, 'fill_mode', 'solid')
+            painted = roi.mask > 0
+            labels[painted] = idx
+            r, g, b = roi.color
+            effective_opacity = int(roi.opacity * gof)
+            lut[idx] = [r, g, b, effective_opacity]
+            if fill_mode in ('outline', 'both'):
+                has_outline = True
+
+        self._label_array = labels
+        self._color_lut = lut
+        return has_outline
+
     def refresh_overlays(self):
         if self.layer_stack.image_layer is None:
             for item in self._roi_items.values():
                 self._scene.removeItem(item)
             self._roi_items.clear()
+            self._label_array = None
             return
 
-        h, w = self.layer_stack.image_layer.shape[:2]
-        combined = np.zeros((h, w, 4), dtype=np.uint8)
-        gof = self.layer_stack._global_opacity_factor
+        has_outline = self._build_label_and_lut()
+        self._apply_lut_to_combined(has_outline)
 
-        for roi in self.layer_stack.roi_layers:
-            if not roi.visible:
-                continue
-            fill_mode = getattr(roi, 'fill_mode', 'solid')
-            effective_opacity = int(roi.opacity * gof)
-            _composite_roi(combined, roi.mask, roi.color, effective_opacity, fill_mode)
+    def refresh_overlays_lut_only(self):
+        """Re-render from existing label array with updated colors/opacity.
 
-        combined = np.ascontiguousarray(combined)
+        Much faster than refresh_overlays() when only colors/visibility changed.
+        """
+        if self._label_array is None or '_combined' not in self._roi_items:
+            self.refresh_overlays()
+            return
+        self._rebuild_lut()
+        self._apply_lut_to_combined(has_outline=False)
+
+    def _apply_lut_to_combined(self, has_outline=False):
+        if has_outline:
+            h, w = self.layer_stack.image_layer.shape[:2]
+            combined = np.zeros((h, w, 4), dtype=np.uint8)
+            gof = self.layer_stack._global_opacity_factor
+            for roi in self.layer_stack.roi_layers:
+                if not roi.visible:
+                    continue
+                fill_mode = getattr(roi, 'fill_mode', 'solid')
+                effective_opacity = int(roi.opacity * gof)
+                _composite_roi(combined, roi.mask, roi.color, effective_opacity, fill_mode)
+            combined = np.ascontiguousarray(combined)
+        else:
+            combined = np.ascontiguousarray(self._color_lut[self._label_array])
 
         if '_combined' in self._roi_items:
             self._roi_items['_combined'].set_rgba(combined)
         else:
-            # Remove any legacy per-ROI items
             for item in self._roi_items.values():
                 self._scene.removeItem(item)
             self._roi_items.clear()
@@ -250,21 +296,19 @@ class ImageCanvas(QGraphicsView):
     def refresh_active_overlay(self, layer):
         """Update only the specified ROI layer's overlay.
 
-        With combined rendering, we re-composite the dirty region of the
-        combined RGBA array instead of maintaining per-ROI items.
+        Uses label array + LUT for fast dirty-rect updates.
         """
         if layer is None or not hasattr(layer, 'mask'):
             return
 
         dirty = layer.dirty_rect
-        if '_combined' not in self._roi_items:
+        if '_combined' not in self._roi_items or self._label_array is None:
             layer.clear_dirty()
             self.refresh_overlays()
             return
 
         item = self._roi_items['_combined']
         rgba = item.rgba
-        gof = self.layer_stack._global_opacity_factor
 
         if dirty is not None:
             dx, dy, dw, dh = dirty
@@ -273,23 +317,53 @@ class ImageCanvas(QGraphicsView):
             x2 = min(w, dx + dw)
             y2 = min(h, dy + dh)
             if x2 > x1 and y2 > y1:
-                # Re-composite just the dirty region across all layers
-                region = rgba[y1:y2, x1:x2]
-                region[:] = 0
-                for roi in self.layer_stack.roi_layers:
-                    if not roi.visible:
+                # Find this layer's index
+                try:
+                    roi_idx = self.layer_stack.roi_layers.index(layer) + 1
+                except ValueError:
+                    layer.clear_dirty()
+                    return
+
+                # Update label array in dirty region
+                label_region = self._label_array[y1:y2, x1:x2]
+                mask_region = layer.mask[y1:y2, x1:x2]
+                # Clear old labels for this ROI
+                label_region[label_region == roi_idx] = 0
+                # Set new labels where painted
+                painted = mask_region > 0
+                label_region[painted] = roi_idx
+
+                # Re-apply higher-index ROIs that may overlap
+                rois = self.layer_stack.roi_layers
+                for i in range(roi_idx, len(rois)):
+                    r = rois[i]
+                    if not r.visible:
                         continue
-                    fill_mode = getattr(roi, 'fill_mode', 'solid')
-                    effective_opacity = int(roi.opacity * gof)
-                    _composite_roi_region(
-                        region, roi.mask, roi.color,
-                        effective_opacity, fill_mode, x1, y1, x2, y2,
-                    )
+                    r_painted = r.mask[y1:y2, x1:x2] > 0
+                    label_region[r_painted] = i + 1
+
+                # Rebuild LUT (colors may have changed)
+                self._rebuild_lut()
+
+                # Fast LUT lookup for dirty region
+                rgba[y1:y2, x1:x2] = self._color_lut[label_region]
                 item.update_region(x1, y1, x2 - x1, y2 - y1)
             layer.clear_dirty()
         else:
             layer.clear_dirty()
             self.refresh_overlays()
+
+    def _rebuild_lut(self):
+        """Rebuild color LUT from current ROI state."""
+        gof = self.layer_stack._global_opacity_factor
+        rois = self.layer_stack.roi_layers
+        lut = np.zeros((len(rois) + 1, 4), dtype=np.uint8)
+        for i, roi in enumerate(rois):
+            if not roi.visible:
+                continue
+            r, g, b = roi.color
+            lut[i + 1] = [r, g, b, int(roi.opacity * gof)]
+        self._color_lut = lut
 
     # ------------------------------------------------------------------
     # Brush cursor preview
