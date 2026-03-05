@@ -216,76 +216,80 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     def refresh_overlays(self):
-        for item in self._roi_items.values():
-            self._scene.removeItem(item)
-        self._roi_items.clear()
+        if self.layer_stack.image_layer is None:
+            for item in self._roi_items.values():
+                self._scene.removeItem(item)
+            self._roi_items.clear()
+            return
 
+        h, w = self.layer_stack.image_layer.shape[:2]
+        combined = np.zeros((h, w, 4), dtype=np.uint8)
         gof = self.layer_stack._global_opacity_factor
-        for i, roi in enumerate(self.layer_stack.roi_layers):
+
+        for roi in self.layer_stack.roi_layers:
             if not roi.visible:
                 continue
             fill_mode = getattr(roi, 'fill_mode', 'solid')
             effective_opacity = int(roi.opacity * gof)
-            rgba = _mask_to_rgba(roi.mask, roi.color, effective_opacity, fill_mode)
-            item = ROIOverlayItem(rgba)
-            item.setZValue(i + 1)
+            _composite_roi(combined, roi.mask, roi.color, effective_opacity, fill_mode)
+
+        combined = np.ascontiguousarray(combined)
+
+        if '_combined' in self._roi_items:
+            self._roi_items['_combined'].set_rgba(combined)
+        else:
+            # Remove any legacy per-ROI items
+            for item in self._roi_items.values():
+                self._scene.removeItem(item)
+            self._roi_items.clear()
+            item = ROIOverlayItem(combined)
+            item.setZValue(1)
             self._scene.addItem(item)
-            self._roi_items[id(roi)] = item
+            self._roi_items['_combined'] = item
 
     def refresh_active_overlay(self, layer):
         """Update only the specified ROI layer's overlay.
 
-        Uses dirty-rect tracking to modify only changed pixels in the
-        numpy-backed RGBA array — no full-image conversion needed.
+        With combined rendering, we re-composite the dirty region of the
+        combined RGBA array instead of maintaining per-ROI items.
         """
         if layer is None or not hasattr(layer, 'mask'):
             return
-        if not layer.visible:
-            roi_id = id(layer)
-            if roi_id in self._roi_items:
-                self._scene.removeItem(self._roi_items.pop(roi_id))
+
+        dirty = layer.dirty_rect
+        if '_combined' not in self._roi_items:
+            layer.clear_dirty()
+            self.refresh_overlays()
             return
 
-        roi_id = id(layer)
-        dirty = layer.dirty_rect
-        fill_mode = getattr(layer, 'fill_mode', 'solid')
+        item = self._roi_items['_combined']
+        rgba = item.rgba
+        gof = self.layer_stack._global_opacity_factor
 
-        # Fast path: update dirty rect directly in the numpy RGBA array
-        if (dirty is not None
-                and roi_id in self._roi_items
-                and fill_mode == "solid"):
-            item = self._roi_items[roi_id]
-            rgba = item.rgba
+        if dirty is not None:
             dx, dy, dw, dh = dirty
             h, w = layer.mask.shape
             x1, y1 = max(0, dx), max(0, dy)
             x2 = min(w, dx + dw)
             y2 = min(h, dy + dh)
             if x2 > x1 and y2 > y1:
-                r, g, b = layer.color
+                # Re-composite just the dirty region across all layers
                 region = rgba[y1:y2, x1:x2]
-                mask_region = layer.mask[y1:y2, x1:x2]
                 region[:] = 0
-                region[mask_region > 0] = [r, g, b, layer.opacity]
+                for roi in self.layer_stack.roi_layers:
+                    if not roi.visible:
+                        continue
+                    fill_mode = getattr(roi, 'fill_mode', 'solid')
+                    effective_opacity = int(roi.opacity * gof)
+                    _composite_roi_region(
+                        region, roi.mask, roi.color,
+                        effective_opacity, fill_mode, x1, y1, x2, y2,
+                    )
                 item.update_region(x1, y1, x2 - x1, y2 - y1)
             layer.clear_dirty()
-            return
-
-        # Full refresh (first time, outline mode, or no dirty rect)
-        rgba = _mask_to_rgba(layer.mask, layer.color, layer.opacity, fill_mode)
-
-        if roi_id in self._roi_items:
-            self._roi_items[roi_id].set_rgba(rgba)
         else:
-            item = ROIOverlayItem(rgba)
-            try:
-                idx = self.layer_stack.roi_layers.index(layer)
-            except ValueError:
-                idx = 0
-            item.setZValue(idx + 1)
-            self._scene.addItem(item)
-            self._roi_items[roi_id] = item
-        layer.clear_dirty()
+            layer.clear_dirty()
+            self.refresh_overlays()
 
     # ------------------------------------------------------------------
     # Brush cursor preview
@@ -601,25 +605,54 @@ def _compute_edge(mask):
     return edge
 
 
-def _mask_to_rgba(mask, color, opacity=128, fill_mode="solid"):
-    """Return an RGBA numpy array for the given mask and color."""
-    h, w = mask.shape
+def _composite_roi(combined, mask, color, opacity, fill_mode="solid"):
+    """Composite a single ROI onto the combined RGBA array (in-place).
+
+    Later ROIs paint over earlier ones where they have pixels.
+    """
     r, g, b = color
-    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+    painted = mask > 0
+    if not np.any(painted):
+        return
 
     if fill_mode == "outline":
         edge = _compute_edge(mask)
-        overlay[edge] = [r, g, b, opacity]
+        combined[edge] = [r, g, b, opacity]
     elif fill_mode == "both":
-        # Fill + outline: fill at half opacity, edge at full
-        filled = mask > 0
         fill_alpha = max(1, opacity // 2)
-        overlay[filled] = [r, g, b, fill_alpha]
+        combined[painted] = [r, g, b, fill_alpha]
         edge = _compute_edge(mask)
-        overlay[edge] = [r, g, b, min(255, opacity)]
+        combined[edge] = [r, g, b, min(255, opacity)]
     else:
-        overlay[mask > 0] = [r, g, b, opacity]
+        combined[painted] = [r, g, b, opacity]
 
+
+def _composite_roi_region(region, mask, color, opacity, fill_mode,
+                          x1, y1, x2, y2):
+    """Composite a single ROI onto a sub-region of the combined array."""
+    r, g, b = color
+    mask_region = mask[y1:y2, x1:x2]
+    painted = mask_region > 0
+    if not np.any(painted):
+        return
+
+    if fill_mode == "outline":
+        edge = _compute_edge(mask_region)
+        region[edge] = [r, g, b, opacity]
+    elif fill_mode == "both":
+        fill_alpha = max(1, opacity // 2)
+        region[painted] = [r, g, b, fill_alpha]
+        edge = _compute_edge(mask_region)
+        region[edge] = [r, g, b, min(255, opacity)]
+    else:
+        region[painted] = [r, g, b, opacity]
+
+
+def _mask_to_rgba(mask, color, opacity=128, fill_mode="solid"):
+    """Return an RGBA numpy array for the given mask and color."""
+    h, w = mask.shape
+    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+    _composite_roi(overlay, mask, color, opacity, fill_mode)
     return np.ascontiguousarray(overlay)
 
 

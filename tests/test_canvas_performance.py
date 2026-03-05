@@ -112,7 +112,11 @@ class TestCanvasOverlays:
         roi = c.layer_stack.roi_layers[0]
         roi.visible = False
         c.refresh_overlays()
-        assert len(c._roi_items) == 0
+        # Combined overlay should have no visible pixels
+        if '_combined' in c._roi_items:
+            assert not np.any(c._roi_items['_combined'].rgba[:, :, 3] > 0)
+        else:
+            assert len(c._roi_items) == 0
 
 
 # =====================================================================
