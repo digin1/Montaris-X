@@ -11,7 +11,7 @@ from montaris.core.undo import UndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
 from montaris.core.roi_transform import (
     get_mask_bbox, compute_handles, apply_affine_to_mask,
-    make_scale_matrix, make_rotation_matrix,
+    apply_affine_inplace, make_scale_matrix, make_rotation_matrix,
 )
 
 HANDLE_HIT_RADIUS = 12
@@ -206,25 +206,33 @@ class TransformTool(BaseTool):
         affected = [l for l, _ in getattr(self, '_hidden_layers', [])]
         self._remove_previews(canvas, re_render=False)
 
-        # Rasterize: apply the final transform to the actual mask data
+        # Rasterize: apply the final transform to the actual mask data (in-place)
         M = getattr(self, '_current_matrix', None)
         if M is not None:
             for lid, (l, snap) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
-                l.mask[:] = apply_affine_to_mask(snap, M, l.mask.shape)
+                apply_affine_inplace(l.mask, snap, M)
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
-            diff = snap != l.mask
-            if diff.any():
-                ys, xs = np.where(diff)
-                y1, y2 = ys.min(), ys.max() + 1
-                x1, x2 = xs.min(), xs.max() + 1
+            # Diff only the union of old + new bounding boxes
+            old_bb = get_mask_bbox(snap)
+            new_bb = get_mask_bbox(l.mask)
+            if old_bb is None and new_bb is None:
+                continue
+            bbs = [b for b in (old_bb, new_bb) if b is not None]
+            y1 = min(b[0] for b in bbs)
+            y2 = max(b[1] for b in bbs)
+            x1 = min(b[2] for b in bbs)
+            x2 = max(b[3] for b in bbs)
+            region_old = snap[y1:y2, x1:x2]
+            region_new = l.mask[y1:y2, x1:x2]
+            if not np.array_equal(region_old, region_new):
                 cmd = UndoCommand(
                     l, (y1, y2, x1, x2),
-                    snap[y1:y2, x1:x2],
-                    l.mask[y1:y2, x1:x2],
+                    region_old.copy(),
+                    region_new.copy(),
                 )
                 commands.append(cmd)
 

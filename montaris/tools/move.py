@@ -115,15 +115,23 @@ class MoveTool(BaseTool):
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
-            diff = snap != l.mask
-            if diff.any():
-                ys, xs = np.where(diff)
-                y1, y2 = ys.min(), ys.max() + 1
-                x1, x2 = xs.min(), xs.max() + 1
+            # Diff only the union of old + new bounding boxes
+            old_bb = get_mask_bbox(snap)
+            new_bb = get_mask_bbox(l.mask)
+            if old_bb is None and new_bb is None:
+                continue
+            bbs = [b for b in (old_bb, new_bb) if b is not None]
+            y1 = min(b[0] for b in bbs)
+            y2 = max(b[1] for b in bbs)
+            x1 = min(b[2] for b in bbs)
+            x2 = max(b[3] for b in bbs)
+            region_old = snap[y1:y2, x1:x2]
+            region_new = l.mask[y1:y2, x1:x2]
+            if not np.array_equal(region_old, region_new):
                 cmd = UndoCommand(
                     l, (y1, y2, x1, x2),
-                    snap[y1:y2, x1:x2],
-                    l.mask[y1:y2, x1:x2],
+                    region_old.copy(),
+                    region_new.copy(),
                 )
                 commands.append(cmd)
 
