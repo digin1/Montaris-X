@@ -49,6 +49,10 @@ jobs:
         run: |
           pyinstaller --name montaris-x --onefile --windowed --hidden-import montaris --collect-all montaris montaris/__main__.py
 
+      - name: Sign macOS binary (ad-hoc)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - dist/montaris-x
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
