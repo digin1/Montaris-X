@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
+    QWidget, QVBoxLayout, QHBoxLayout, QSlider,
     QPushButton, QFormLayout,
 )
 from PySide6.QtCore import Signal, Qt
@@ -16,10 +16,6 @@ class AdjustmentsPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-
-        header = QLabel("Adjustments")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
 
         form = QFormLayout()
 

@@ -31,7 +31,7 @@ class HelpModal(QDialog):
 
         # Tools
         from montaris.tools import TOOL_REGISTRY
-        tools_text = "Available Tools:\n\n"
+        tools_text = ""
         for name, (_, _, shortcut, category) in TOOL_REGISTRY.items():
             tools_text += f"  [{shortcut}] {name} ({category})\n"
         tools_text += "\nBrush Size: [ / ] keys or slider\n"
@@ -42,7 +42,6 @@ class HelpModal(QDialog):
 
         # Keyboard Shortcuts
         shortcuts_text = (
-            "Keyboard Shortcuts:\n\n"
             "File:\n"
             "  Ctrl+O         Open Image\n"
             "  Ctrl+Shift+O   Load ROI Set\n"
@@ -75,7 +74,6 @@ class HelpModal(QDialog):
 
         # File Formats
         formats_text = (
-            "Supported File Formats:\n\n"
             "Images:\n"
             "  TIFF (.tif, .tiff) — including 16/32-bit scientific\n"
             "  PNG (.png)\n"

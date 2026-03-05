@@ -17,10 +17,6 @@ class DisplayPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        header = QLabel("Display")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
-
         # Mode selector
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Mode:"))

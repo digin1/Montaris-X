@@ -18,10 +18,6 @@ class ToolPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        header = QLabel("Tools")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
-
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(False)
 

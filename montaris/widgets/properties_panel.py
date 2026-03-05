@@ -13,10 +13,6 @@ class PropertiesPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        header = QLabel("Properties")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
-
         form = QFormLayout()
 
         self.name_label = QLabel("-")
