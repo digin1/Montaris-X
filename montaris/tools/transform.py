@@ -76,6 +76,7 @@ class TransformTool(BaseTool):
         return (y1_min, y2_max, x1_min, x2_max)
 
     def on_press(self, pos, layer, canvas):
+        import time as _time
         if layer is None or not hasattr(layer, 'mask'):
             return
         self._canvas = canvas
@@ -83,6 +84,7 @@ class TransformTool(BaseTool):
         # Check if clicking on a handle
         handle = self._hit_test_handle(pos)
         if handle:
+            _t0 = _time.perf_counter()
             self._active_handle = handle
             self._start_pos = pos
             self._dragging = True
@@ -91,14 +93,19 @@ class TransformTool(BaseTool):
             bbox = self._compute_union_bbox(self._target_layers)
             if bbox is not None:
                 self._bbox = bbox
+            _t1 = _time.perf_counter()
             self._snapshots = {
                 id(l): (l, l.mask.copy()) for l in self._target_layers
             }
+            _t2 = _time.perf_counter()
             # Create preview pixmaps and erase from overlays
             self._create_previews(canvas)
+            _t3 = _time.perf_counter()
+            print(f"[TRANSFORM press-handle] bbox={_t1-_t0:.3f}s snap={_t2-_t1:.3f}s preview={_t3-_t2:.3f}s total={_t3-_t0:.3f}s")
             return
 
         # First click: show handles — component-aware (D.14)
+        _t0 = _time.perf_counter()
         self._target_layers = self._get_target_layers(layer, canvas)
         self._component_mask = None
 
@@ -109,21 +116,29 @@ class TransformTool(BaseTool):
             h, w = layer.mask.shape
             if 0 <= iy < h and 0 <= ix < w and layer.mask[iy, ix] > 0:
                 from montaris.core.components import get_component_at
+                _tc0 = _time.perf_counter()
                 comp = get_component_at(layer.mask, ix, iy)
+                _tc1 = _time.perf_counter()
                 if comp is not None:
                     total = np.count_nonzero(layer.mask)
                     comp_px = np.count_nonzero(comp)
+                    _tc2 = _time.perf_counter()
+                    print(f"[TRANSFORM press-comp] component={_tc1-_tc0:.3f}s count={_tc2-_tc1:.3f}s")
                     if comp_px < total:
                         self._component_mask = comp
                         ys, xs = np.where(comp)
                         bbox = (ys.min(), ys.max() + 1, xs.min(), xs.max() + 1)
                         self._show_handles(bbox, canvas)
+                        _t1 = _time.perf_counter()
+                        print(f"[TRANSFORM press-comp] total={_t1-_t0:.3f}s")
                         return
 
         bbox = self._compute_union_bbox(self._target_layers)
         if bbox is None:
             return
         self._show_handles(bbox, canvas)
+        _t1 = _time.perf_counter()
+        print(f"[TRANSFORM press-show] total={_t1-_t0:.3f}s")
 
     def on_move(self, pos, layer, canvas):
         self._canvas = canvas
@@ -198,14 +213,16 @@ class TransformTool(BaseTool):
             item.setTransform(qt_t)
 
     def on_release(self, pos, layer, canvas):
+        import time as _time
         if not self._dragging or not self._snapshots:
             return
         self._dragging = False
+        _t0 = _time.perf_counter()
 
         # Remove preview items (don't re-render yet — mask not updated)
         affected = [l for l, _ in getattr(self, '_hidden_layers', [])]
         self._remove_previews(canvas, re_render=False)
-        canvas.flash_progress()
+        _t1 = _time.perf_counter()
 
         # Rasterize: apply the final transform to the actual mask data (in-place)
         M = getattr(self, '_current_matrix', None)
@@ -215,6 +232,7 @@ class TransformTool(BaseTool):
                     continue
                 apply_affine_inplace(l.mask, snap, M)
                 l.invalidate_bbox()
+        _t2 = _time.perf_counter()
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
@@ -237,6 +255,7 @@ class TransformTool(BaseTool):
                     region_new.copy(),
                 )
                 commands.append(cmd)
+        _t3 = _time.perf_counter()
 
         if commands:
             if len(commands) == 1:
@@ -256,11 +275,15 @@ class TransformTool(BaseTool):
                 canvas._refresh_roi_item(l, idx)
             except ValueError:
                 pass
+        _t4 = _time.perf_counter()
 
         # Refresh handles to new position
         bbox = self._compute_union_bbox(self._target_layers)
         if bbox:
             self._show_handles(bbox, canvas)
+        _t5 = _time.perf_counter()
+        canvas.flash_progress()
+        print(f"[TRANSFORM release] preview_rm={_t1-_t0:.3f}s affine={_t2-_t1:.3f}s undo={_t3-_t2:.3f}s render={_t4-_t3:.3f}s handles={_t5-_t4:.3f}s total={_t5-_t0:.3f}s")
 
     def on_key_press(self, key, canvas):
         # Escape: cancel transform, restore snapshots
