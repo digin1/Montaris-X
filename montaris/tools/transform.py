@@ -1,7 +1,7 @@
 import math
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF
-from PySide6.QtGui import QPen, QColor, QBrush, QTransform, QImage, QPixmap
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QTimer
+from PySide6.QtGui import QPen, QColor, QBrush, QTransform
 from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
     QGraphicsPixmapItem,
@@ -221,7 +221,12 @@ class TransformTool(BaseTool):
         _t0 = _time.perf_counter()
 
         affected = [l for l, _ in self._hidden_layers]
-        # Keep preview transforms visible while we rasterize (no visual glitch)
+
+        # Show progress bar immediately
+        from PySide6.QtWidgets import QApplication
+        canvas._progress_bar.setRange(0, 0)
+        canvas._progress_bar.show()
+        QApplication.processEvents()
 
         # Rasterize: apply the final transform to the actual mask data
         M = getattr(self, '_current_matrix', None)
@@ -265,24 +270,31 @@ class TransformTool(BaseTool):
         self._snapshots.clear()
         self._start_pos = None
         self._current_matrix = None
-
-        # Rebuild ROI items (replaces old transformed items in scene)
         self._preview_items.clear()
         self._hidden_layers = []
-        for l in affected:
-            try:
-                idx = canvas.layer_stack.roi_layers.index(l)
-                canvas._refresh_roi_item(l, idx)
-            except ValueError:
-                pass
-        _t3 = _time.perf_counter()
 
-        canvas._update_selection_highlights()
+        # Show handles immediately (fast)
         bbox = self._compute_union_bbox(self._target_layers)
         if bbox:
             self._show_handles(bbox, canvas)
-        _t4 = _time.perf_counter()
-        print(f"[TRANSFORM release] affine={_t1-_t0:.3f}s undo={_t2-_t1:.3f}s render={_t3-_t2:.3f}s handles={_t4-_t3:.3f}s total={_t4-_t0:.3f}s")
+        _t3 = _time.perf_counter()
+        print(f"[TRANSFORM release] affine={_t1-_t0:.3f}s undo={_t2-_t1:.3f}s handles={_t3-_t2:.3f}s sync_total={_t3-_t0:.3f}s")
+
+        # Defer expensive visual rebuild to next frame (render + highlights)
+        def _deferred_rebuild():
+            _tr0 = _time.perf_counter()
+            for l in affected:
+                try:
+                    idx = canvas.layer_stack.roi_layers.index(l)
+                    canvas._refresh_roi_item(l, idx)
+                except ValueError:
+                    pass
+            canvas._update_selection_highlights()
+            canvas._progress_bar.hide()
+            _tr1 = _time.perf_counter()
+            print(f"[TRANSFORM deferred] render+highlights={_tr1-_tr0:.3f}s")
+
+        QTimer.singleShot(0, _deferred_rebuild)
 
     def on_key_press(self, key, canvas):
         # Escape: cancel transform, restore snapshots

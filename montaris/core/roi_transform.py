@@ -65,34 +65,63 @@ def apply_affine_to_mask(mask, matrix, output_shape=None):
 def apply_affine_inplace(dest, snap, matrix):
     """Transform snap and write result into dest in-place.
 
-    Uses forward mapping on non-zero pixels only — much faster than
-    inverse-mapping the entire bbox for sparse binary masks.
+    Uses Pillow's C-accelerated affine transform on the bbox crop only.
     """
+    from PIL import Image
+
     h, w = dest.shape
     src_bbox = get_mask_bbox(snap)
     if src_bbox is None:
         return
     sy1, sy2, sx1, sx2 = src_bbox
-    # Zero only the source region
     dest[sy1:sy2, sx1:sx2] = 0
 
     crop = snap[sy1:sy2, sx1:sx2]
-    ys, xs = np.where(crop > 0)
-    if len(ys) == 0:
+
+    M3 = np.array([
+        [matrix[0, 0], matrix[0, 1], matrix[0, 2]],
+        [matrix[1, 0], matrix[1, 1], matrix[1, 2]],
+        [0, 0, 1],
+    ], dtype=np.float64)
+
+    try:
+        M_inv = np.linalg.inv(M3)
+    except np.linalg.LinAlgError:
         return
 
-    # Forward-map only the non-zero pixels
-    abs_x = (xs + sx1).astype(np.float64)
-    abs_y = (ys + sy1).astype(np.float64)
+    # Forward-transform source bbox corners to find output region
+    corners = np.array([
+        [sx1, sy1, 1], [sx2, sy1, 1],
+        [sx1, sy2, 1], [sx2, sy2, 1],
+    ], dtype=np.float64).T
+    dst_corners = M3 @ corners
+    ox1 = max(0, int(np.floor(dst_corners[0].min())))
+    ox2 = min(w, int(np.ceil(dst_corners[0].max())))
+    oy1 = max(0, int(np.floor(dst_corners[1].min())))
+    oy2 = min(h, int(np.ceil(dst_corners[1].max())))
 
-    new_x = matrix[0, 0] * abs_x + matrix[0, 1] * abs_y + matrix[0, 2]
-    new_y = matrix[1, 0] * abs_x + matrix[1, 1] * abs_y + matrix[1, 2]
+    if ox2 <= ox1 or oy2 <= oy1:
+        return
 
-    new_xi = np.round(new_x).astype(np.int64)
-    new_yi = np.round(new_y).astype(np.int64)
+    out_w, out_h = ox2 - ox1, oy2 - oy1
 
-    valid = (new_xi >= 0) & (new_xi < w) & (new_yi >= 0) & (new_yi < h)
-    dest[new_yi[valid], new_xi[valid]] = crop[ys[valid], xs[valid]]
+    # Pillow inverse affine: map output pixel (ox, oy) → crop pixel (cx, cy)
+    pil_data = (
+        M_inv[0, 0], M_inv[0, 1],
+        M_inv[0, 0] * ox1 + M_inv[0, 1] * oy1 + M_inv[0, 2] - sx1,
+        M_inv[1, 0], M_inv[1, 1],
+        M_inv[1, 0] * ox1 + M_inv[1, 1] * oy1 + M_inv[1, 2] - sy1,
+    )
+
+    pil_img = Image.fromarray(crop)
+    result_img = pil_img.transform(
+        (out_w, out_h), Image.AFFINE, pil_data, resample=Image.NEAREST,
+    )
+    result_arr = np.asarray(result_img)
+
+    out_region = dest[oy1:oy2, ox1:ox2]
+    nz = result_arr > 0
+    out_region[nz] = result_arr[nz]
 
 
 def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):
