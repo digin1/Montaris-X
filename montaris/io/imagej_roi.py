@@ -18,6 +18,7 @@ ROI_RECT = 1
 ROI_OVAL = 2
 ROI_LINE = 3
 ROI_FREEHAND = 7
+ROI_TRACED = 8
 ROI_POINT = 10
 
 MAGIC = b'Iout'
@@ -66,7 +67,7 @@ def read_imagej_roi(path_or_bytes):
     x_coords = None
     y_coords = None
 
-    if roi_type in (ROI_POLYGON, ROI_FREEHAND) and n_coords > 0:
+    if roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
         x_coords = np.array(
             [struct.unpack('>h', buf.read(2))[0] for _ in range(n_coords)],
             dtype=np.int32
@@ -129,7 +130,7 @@ def write_imagej_roi(roi_dict, path):
     buf.write(b'\x00' * (64 - current))
 
     # Coordinates (relative to top-left)
-    if roi_type in (ROI_POLYGON, ROI_FREEHAND) and n_coords > 0:
+    if roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
         for x in x_coords:
             buf.write(struct.pack('>h', int(x) - left))
         for y in y_coords:
@@ -166,7 +167,7 @@ def write_imagej_roi_bytes(roi_dict):
     current = buf.tell()
     buf.write(b'\x00' * (64 - current))
 
-    if roi_type in (ROI_POLYGON, ROI_FREEHAND) and n_coords > 0:
+    if roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
         for x in x_coords:
             buf.write(struct.pack('>h', int(x) - left))
         for y in y_coords:
@@ -266,7 +267,7 @@ def imagej_roi_to_mask(roi_dict, width, height):
             ellipse = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2 <= 1.0
             mask[ellipse] = 255
 
-    elif roi_type in (ROI_POLYGON, ROI_FREEHAND):
+    elif roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED):
         x_coords = roi_dict.get('x_coords')
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
@@ -277,34 +278,44 @@ def imagej_roi_to_mask(roi_dict, width, height):
 
 
 def _fill_polygon(mask, x_coords, y_coords):
-    """Fill a polygon in a mask using ray casting."""
+    """Fill a polygon in a mask using vectorized scanline algorithm."""
     h, w = mask.shape
     n = len(x_coords)
     min_y = max(0, int(y_coords.min()))
     max_y = min(h - 1, int(y_coords.max()))
-    min_x = max(0, int(x_coords.min()))
-    max_x = min(w - 1, int(x_coords.max()))
 
-    if min_y > max_y or min_x > max_x:
-        return  # polygon entirely outside mask
+    if min_y > max_y:
+        return
 
-    yy, xx = np.mgrid[min_y:max_y + 1, min_x:max_x + 1]
-    points_x = xx.ravel()
-    points_y = yy.ravel()
+    # Build edge arrays (each edge: y0, y1, x0, x1)
+    x0 = x_coords.astype(np.float64)
+    y0 = y_coords.astype(np.float64)
+    x1 = np.roll(x0, -1)
+    y1 = np.roll(y0, -1)
 
-    inside = np.zeros(len(points_x), dtype=bool)
-    j = n - 1
-    for i in range(n):
-        xi, yi = float(x_coords[i]), float(y_coords[i])
-        xj, yj = float(x_coords[j]), float(y_coords[j])
-        cond1 = (yi > points_y) != (yj > points_y)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            slope = (xj - xi) * (points_y - yi) / (yj - yi) + xi
-        cond2 = points_x < slope
-        inside ^= (cond1 & cond2)
-        j = i
+    # Filter out horizontal edges
+    non_horiz = y0 != y1
+    x0, y0, x1, y1 = x0[non_horiz], y0[non_horiz], x1[non_horiz], y1[non_horiz]
 
-    mask_y = points_y[inside]
-    mask_x = points_x[inside]
-    if len(mask_y) > 0:
-        mask[mask_y, mask_x] = 255
+    # Ensure y0 <= y1 for each edge
+    swap = y0 > y1
+    x0[swap], x1[swap] = x1[swap].copy(), x0[swap].copy()
+    y0[swap], y1[swap] = y1[swap].copy(), y0[swap].copy()
+
+    # Precompute inverse slopes
+    inv_slope = (x1 - x0) / (y1 - y0)
+
+    for y in range(min_y, max_y + 1):
+        # Find edges that cross this scanline: y0 <= y < y1
+        active = (y0 <= y) & (y < y1)
+        if not np.any(active):
+            continue
+        # Compute x-intersections
+        x_cross = x0[active] + (y - y0[active]) * inv_slope[active]
+        x_cross.sort()
+        # Fill between pairs
+        for k in range(0, len(x_cross) - 1, 2):
+            xs = max(0, int(np.ceil(x_cross[k])))
+            xe = min(w, int(np.floor(x_cross[k + 1])) + 1)
+            if xs < xe:
+                mask[y, xs:xe] = 255
