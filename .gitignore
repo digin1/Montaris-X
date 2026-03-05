@@ -14,3 +14,4 @@ venv/
 *.png
 uv.lock
 tasks/
+testimages/
