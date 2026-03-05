@@ -105,6 +105,9 @@ class TestCanvasOverlays:
 
     def test_refresh_overlays(self, canvas_with_image):
         c = canvas_with_image
+        roi = c.layer_stack.roi_layers[0]
+        roi.mask[10:20, 10:20] = 255
+        c.refresh_overlays()
         assert len(c._roi_items) == 1
 
     def test_refresh_overlays_after_hide(self, canvas_with_image):
@@ -112,11 +115,8 @@ class TestCanvasOverlays:
         roi = c.layer_stack.roi_layers[0]
         roi.visible = False
         c.refresh_overlays()
-        # Combined overlay should have no visible pixels
-        if '_combined' in c._roi_items:
-            assert not np.any(c._roi_items['_combined'].rgba[:, :, 3] > 0)
-        else:
-            assert len(c._roi_items) == 0
+        # Hidden ROI should have no pixmap item
+        assert id(roi) not in c._roi_items
 
 
 # =====================================================================
@@ -174,6 +174,7 @@ class TestSmallImageRegression:
         assert app.canvas._image_item is not None
         # Add ROI
         roi = ROILayer("ROI 1", 120, 100)
+        roi.mask[10:20, 10:20] = 255
         app.layer_stack.add_roi(roi)
         app.canvas.set_active_layer(roi)
         app.canvas.refresh_overlays()

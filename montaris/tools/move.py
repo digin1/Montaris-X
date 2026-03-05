@@ -89,8 +89,9 @@ class MoveTool(BaseTool):
             return
         self._moving = False
 
-        # Remove previews and restore visibility
-        self._remove_previews(canvas)
+        # Remove preview items (don't re-render yet — mask not updated)
+        affected = [l for l, _ in self._hidden_layers]
+        self._remove_previews(canvas, re_render=False)
 
         # Rasterize the final position
         dx = pos.x() - self._start_pos.x()
@@ -137,7 +138,13 @@ class MoveTool(BaseTool):
         self._start_pos = None
         self._component_mask = None
 
-        canvas.refresh_overlays()
+        # Re-render only the affected ROI items (mask now updated)
+        for l in affected:
+            try:
+                idx = canvas.layer_stack.roi_layers.index(l)
+                canvas._refresh_roi_item(l, idx)
+            except ValueError:
+                pass
 
     def _create_previews(self, canvas):
         """Create preview pixmaps for live move preview."""
@@ -154,10 +161,11 @@ class MoveTool(BaseTool):
                 continue
             by1, by2, bx1, bx2 = bbox
 
-            # Hide ROI from combined overlay
-            was_visible = l.visible
-            l.visible = False
-            self._hidden_layers.append((l, was_visible))
+            # Directly remove this ROI's pixmap item from scene
+            rid = id(l)
+            if rid in canvas._roi_items:
+                scene.removeItem(canvas._roi_items.pop(rid))
+            self._hidden_layers.append((l, True))
 
             # Build tight RGBA
             bh, bw = by2 - by1, bx2 - bx1
@@ -181,16 +189,19 @@ class MoveTool(BaseTool):
             self._preview_items.append(item)
             self._preview_offsets.append((bx1, by1))
 
-        canvas.refresh_overlays()
-
-    def _remove_previews(self, canvas):
-        """Remove preview items and restore visibility."""
+    def _remove_previews(self, canvas, re_render=True):
+        """Remove preview items. If re_render, also rebuild affected ROI items."""
         scene = canvas.scene()
         for item in self._preview_items:
             scene.removeItem(item)
         self._preview_items.clear()
-        for l, was_visible in self._hidden_layers:
-            l.visible = was_visible
+        if re_render:
+            for l, _ in self._hidden_layers:
+                try:
+                    idx = canvas.layer_stack.roi_layers.index(l)
+                    canvas._refresh_roi_item(l, idx)
+                except ValueError:
+                    pass
         self._hidden_layers = []
         self._preview_rgba_buffers = []
         self._preview_offsets = []

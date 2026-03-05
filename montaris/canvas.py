@@ -1,58 +1,13 @@
 import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QGraphicsItem, QLabel,
+    QGraphicsEllipseItem, QLabel,
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import (
     QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush,
 )
 from montaris.core.selection import SelectionModel
-
-
-# ------------------------------------------------------------------
-# ROI overlay item — paints from a numpy-backed QImage (no QPixmap COW)
-# ------------------------------------------------------------------
-
-class ROIOverlayItem(QGraphicsItem):
-    """Scene item that renders an RGBA overlay from a numpy array.
-
-    The numpy array is modified in-place by the tools and the QImage
-    wrapping it reflects the changes immediately (shared memory).
-    Calling ``update_region()`` schedules a repaint of just the dirty
-    rectangle, which is very cheap.
-    """
-
-    def __init__(self, rgba_array, parent=None):
-        super().__init__(parent)
-        self._rgba = rgba_array
-        h, w = rgba_array.shape[:2]
-        self._w = w
-        self._h = h
-        self._image = QImage(rgba_array.data, w, h, w * 4,
-                             QImage.Format_RGBA8888)
-
-    def set_rgba(self, rgba_array):
-        h, w = rgba_array.shape[:2]
-        self._rgba = rgba_array
-        self._w = w
-        self._h = h
-        self._image = QImage(rgba_array.data, w, h, w * 4,
-                             QImage.Format_RGBA8888)
-        self.update()
-
-    @property
-    def rgba(self):
-        return self._rgba
-
-    def boundingRect(self):
-        return QRectF(0, 0, self._w, self._h)
-
-    def paint(self, painter, option, widget=None):
-        painter.drawImage(0, 0, self._image)
-
-    def update_region(self, x, y, w, h):
-        self.update(QRectF(x, y, w, h))
 
 
 # ------------------------------------------------------------------
@@ -69,12 +24,10 @@ class ImageCanvas(QGraphicsView):
         self.setScene(self._scene)
 
         self._image_item = None       # QGraphicsPixmapItem for the image
-        self._roi_items = {}          # id(roi) -> ROIOverlayItem
+        self._roi_items = {}          # id(roi) -> QGraphicsPixmapItem (tight bbox)
         self._polygon_item = None
         self._brush_preview = None
         self._stamp_preview = None
-        self._label_array = None      # int16 label image (pixel = ROI index+1)
-        self._color_lut = None        # (N+1, 4) uint8 RGBA lookup table
 
         self._tool = None
         self._active_layer = None
@@ -214,156 +167,94 @@ class ImageCanvas(QGraphicsView):
         self._scene.setSceneRect(QRectF(-w, -h, w * 3, h * 3))
 
     # ------------------------------------------------------------------
-    # ROI overlay display
+    # ROI overlay display — per-ROI QGraphicsPixmapItem (tight bbox)
     # ------------------------------------------------------------------
 
-    def _build_label_and_lut(self):
-        """Build label array and color LUT from current ROI state."""
-        h, w = self.layer_stack.image_layer.shape[:2]
-        gof = self.layer_stack._global_opacity_factor
-        rois = self.layer_stack.roi_layers
-
-        labels = np.zeros((h, w), dtype=np.int16)
-        # Entry 0 = transparent (no ROI)
-        lut = np.zeros((len(rois) + 1, 4), dtype=np.uint8)
-
-        has_outline = False
-        for i, roi in enumerate(rois):
-            if not roi.visible:
-                continue
-            idx = i + 1
-            fill_mode = getattr(roi, 'fill_mode', 'solid')
-            painted = roi.mask > 0
-            labels[painted] = idx
-            r, g, b = roi.color
-            effective_opacity = int(roi.opacity * gof)
-            lut[idx] = [r, g, b, effective_opacity]
-            if fill_mode in ('outline', 'both'):
-                has_outline = True
-
-        self._label_array = labels
-        self._color_lut = lut
-        return has_outline
-
     def refresh_overlays(self):
+        """Rebuild all ROI pixmap items from current mask/color state."""
         if self.layer_stack.image_layer is None:
             for item in self._roi_items.values():
                 self._scene.removeItem(item)
             self._roi_items.clear()
-            self._label_array = None
             return
 
-        has_outline = self._build_label_and_lut()
-        self._apply_lut_to_combined(has_outline)
+        gof = self.layer_stack._global_opacity_factor
+        current_ids = {id(r) for r in self.layer_stack.roi_layers}
+
+        # Remove stale items (deleted ROIs)
+        for rid in list(self._roi_items.keys()):
+            if rid not in current_ids:
+                self._scene.removeItem(self._roi_items.pop(rid))
+
+        for i, roi in enumerate(self.layer_stack.roi_layers):
+            self._refresh_roi_item(roi, i, gof)
 
     def refresh_overlays_lut_only(self):
-        """Re-render from existing label array with updated colors/opacity.
-
-        Much faster than refresh_overlays() when only colors/visibility changed.
-        """
-        if self._label_array is None or '_combined' not in self._roi_items:
-            self.refresh_overlays()
-            return
-        self._rebuild_lut()
-        self._apply_lut_to_combined(has_outline=False)
-
-    def _apply_lut_to_combined(self, has_outline=False):
-        if has_outline:
-            h, w = self.layer_stack.image_layer.shape[:2]
-            combined = np.zeros((h, w, 4), dtype=np.uint8)
-            gof = self.layer_stack._global_opacity_factor
-            for roi in self.layer_stack.roi_layers:
-                if not roi.visible:
-                    continue
-                fill_mode = getattr(roi, 'fill_mode', 'solid')
-                effective_opacity = int(roi.opacity * gof)
-                _composite_roi(combined, roi.mask, roi.color, effective_opacity, fill_mode)
-            combined = np.ascontiguousarray(combined)
-        else:
-            combined = np.ascontiguousarray(self._color_lut[self._label_array])
-
-        if '_combined' in self._roi_items:
-            self._roi_items['_combined'].set_rgba(combined)
-        else:
-            for item in self._roi_items.values():
-                self._scene.removeItem(item)
-            self._roi_items.clear()
-            item = ROIOverlayItem(combined)
-            item.setZValue(1)
-            self._scene.addItem(item)
-            self._roi_items['_combined'] = item
+        """Re-render all ROI pixmaps (for color/opacity changes)."""
+        self.refresh_overlays()
 
     def refresh_active_overlay(self, layer):
-        """Update only the specified ROI layer's overlay.
-
-        Uses label array + LUT for fast dirty-rect updates.
-        """
+        """Re-render only the specified ROI layer's pixmap item."""
         if layer is None or not hasattr(layer, 'mask'):
             return
+        layer.clear_dirty()
+        try:
+            index = self.layer_stack.roi_layers.index(layer)
+        except ValueError:
+            return
+        self._refresh_roi_item(layer, index)
 
-        dirty = layer.dirty_rect
-        if '_combined' not in self._roi_items or self._label_array is None:
-            layer.clear_dirty()
-            self.refresh_overlays()
+    def _refresh_roi_item(self, roi, index, gof=None):
+        """Create or update the QGraphicsPixmapItem for a single ROI."""
+        if gof is None:
+            gof = self.layer_stack._global_opacity_factor
+
+        rid = id(roi)
+
+        # Remove old item
+        if rid in self._roi_items:
+            self._scene.removeItem(self._roi_items.pop(rid))
+
+        if not roi.visible:
             return
 
-        item = self._roi_items['_combined']
-        rgba = item.rgba
+        from montaris.core.roi_transform import get_mask_bbox
+        bbox = get_mask_bbox(roi.mask)
+        if bbox is None:
+            return
 
-        if dirty is not None:
-            dx, dy, dw, dh = dirty
-            h, w = layer.mask.shape
-            x1, y1 = max(0, dx), max(0, dy)
-            x2 = min(w, dx + dw)
-            y2 = min(h, dy + dh)
-            if x2 > x1 and y2 > y1:
-                # Find this layer's index
-                try:
-                    roi_idx = self.layer_stack.roi_layers.index(layer) + 1
-                except ValueError:
-                    layer.clear_dirty()
-                    return
+        y1, y2, x1, x2 = bbox
+        bh, bw = y2 - y1, x2 - x1
+        r, g, b = roi.color
+        effective_opacity = int(roi.opacity * gof)
+        fill_mode = getattr(roi, 'fill_mode', 'solid')
 
-                # Update label array in dirty region
-                label_region = self._label_array[y1:y2, x1:x2]
-                mask_region = layer.mask[y1:y2, x1:x2]
-                # Clear old labels for this ROI
-                label_region[label_region == roi_idx] = 0
-                # Set new labels where painted
-                painted = mask_region > 0
-                label_region[painted] = roi_idx
+        rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+        mask_crop = roi.mask[y1:y2, x1:x2]
 
-                # Re-apply higher-index ROIs that may overlap
-                rois = self.layer_stack.roi_layers
-                for i in range(roi_idx, len(rois)):
-                    r = rois[i]
-                    if not r.visible:
-                        continue
-                    r_painted = r.mask[y1:y2, x1:x2] > 0
-                    label_region[r_painted] = i + 1
-
-                # Rebuild LUT (colors may have changed)
-                self._rebuild_lut()
-
-                # Fast LUT lookup for dirty region
-                rgba[y1:y2, x1:x2] = self._color_lut[label_region]
-                item.update_region(x1, y1, x2 - x1, y2 - y1)
-            layer.clear_dirty()
+        if fill_mode == 'outline':
+            edge = _compute_edge(mask_crop)
+            rgba[edge] = [r, g, b, effective_opacity]
+        elif fill_mode == 'both':
+            fill_alpha = max(1, effective_opacity // 2)
+            painted = mask_crop > 0
+            rgba[painted] = [r, g, b, fill_alpha]
+            edge = _compute_edge(mask_crop)
+            rgba[edge] = [r, g, b, min(255, effective_opacity)]
         else:
-            layer.clear_dirty()
-            self.refresh_overlays()
+            painted = mask_crop > 0
+            rgba[painted] = [r, g, b, effective_opacity]
 
-    def _rebuild_lut(self):
-        """Rebuild color LUT from current ROI state."""
-        gof = self.layer_stack._global_opacity_factor
-        rois = self.layer_stack.roi_layers
-        lut = np.zeros((len(rois) + 1, 4), dtype=np.uint8)
-        for i, roi in enumerate(rois):
-            if not roi.visible:
-                continue
-            r, g, b = roi.color
-            lut[i + 1] = [r, g, b, int(roi.opacity * gof)]
-        self._color_lut = lut
+        rgba = np.ascontiguousarray(rgba)
+        qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
+        pixmap = QPixmap.fromImage(qimg)
+
+        item = QGraphicsPixmapItem(pixmap)
+        item.setOffset(x1, y1)
+        item.setZValue(1 + index * 0.001)
+        item.setAcceptedMouseButtons(Qt.NoButton)
+        self._scene.addItem(item)
+        self._roi_items[rid] = item
 
     # ------------------------------------------------------------------
     # Brush cursor preview

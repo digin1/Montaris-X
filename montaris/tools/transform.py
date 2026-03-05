@@ -202,8 +202,9 @@ class TransformTool(BaseTool):
             return
         self._dragging = False
 
-        # Remove preview items
-        self._remove_previews(canvas)
+        # Remove preview items (don't re-render yet — mask not updated)
+        affected = [l for l, _ in getattr(self, '_hidden_layers', [])]
+        self._remove_previews(canvas, re_render=False)
 
         # Rasterize: apply the final transform to the actual mask data
         M = getattr(self, '_current_matrix', None)
@@ -238,7 +239,13 @@ class TransformTool(BaseTool):
         self._start_pos = None
         self._current_matrix = None
 
-        canvas.refresh_overlays()
+        # Re-render only the affected ROI items (mask now updated)
+        for l in affected:
+            try:
+                idx = canvas.layer_stack.roi_layers.index(l)
+                canvas._refresh_roi_item(l, idx)
+            except ValueError:
+                pass
 
         # Refresh handles to new position
         bbox = self._compute_union_bbox(self._target_layers)
@@ -255,7 +262,6 @@ class TransformTool(BaseTool):
             self._snapshots.clear()
             self._start_pos = None
             self._current_matrix = None
-            canvas.refresh_overlays()
             canvas._update_selection_highlights()
             # Refresh handles
             if self._target_layers:
@@ -294,8 +300,7 @@ class TransformTool(BaseTool):
     def _create_previews(self, canvas):
         """Create QGraphicsPixmapItems for live preview from tight bbox.
 
-        Hides source ROIs via visibility flag instead of zeroing masks.
-        Does NOT call refresh_overlays — just hides the overlay contribution.
+        Directly removes source ROI items from the scene (no full rebuild).
         """
         self._remove_previews(canvas)
         self._preview_rgba_buffers = []  # prevent GC of numpy backing
@@ -303,10 +308,11 @@ class TransformTool(BaseTool):
         scene = canvas.scene()
 
         for lid, (l, snap) in self._snapshots.items():
-            # Hide this ROI from the combined overlay
-            was_visible = l.visible
-            l.visible = False
-            self._hidden_layers.append((l, was_visible))
+            # Directly remove this ROI's pixmap item from scene
+            rid = id(l)
+            if rid in canvas._roi_items:
+                scene.removeItem(canvas._roi_items.pop(rid))
+            self._hidden_layers.append((l, True))
 
             # Compute tight bounding box of painted pixels
             from montaris.core.roi_transform import get_mask_bbox
@@ -327,24 +333,25 @@ class TransformTool(BaseTool):
             qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
             pixmap = QPixmap.fromImage(qimg)
             item = QGraphicsPixmapItem(pixmap)
-            item.setOffset(bx1, by1)  # position within scene coords
+            item.setOffset(bx1, by1)
             item.setZValue(900)
             item.setAcceptedMouseButtons(Qt.NoButton)
             scene.addItem(item)
             self._preview_items.append(item)
 
-        # Quick overlay refresh — just update the combined item with hidden ROIs
-        canvas.refresh_overlays()
-
-    def _remove_previews(self, canvas):
-        """Remove preview pixmap items and restore ROI visibility."""
+    def _remove_previews(self, canvas, re_render=True):
+        """Remove preview pixmap items. If re_render, rebuild affected ROI items."""
         scene = canvas.scene()
         for item in self._preview_items:
             scene.removeItem(item)
         self._preview_items.clear()
-        # Restore visibility
-        for l, was_visible in getattr(self, '_hidden_layers', []):
-            l.visible = was_visible
+        if re_render:
+            for l, _ in getattr(self, '_hidden_layers', []):
+                try:
+                    idx = canvas.layer_stack.roi_layers.index(l)
+                    canvas._refresh_roi_item(l, idx)
+                except ValueError:
+                    pass
         self._hidden_layers = []
         self._preview_rgba_buffers = []
 
