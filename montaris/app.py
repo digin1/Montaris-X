@@ -154,6 +154,7 @@ class MontarisApp(QMainWindow):
         self.layer_panel.visibility_changed.connect(self.canvas.refresh_overlays)
         self.layer_panel.roi_added.connect(self._on_roi_added)
         self.layer_panel.roi_removed.connect(self._on_roi_removed)
+        self.layer_panel.all_cleared.connect(self._on_all_cleared)
 
     def _setup_menus(self):
         menubar = self.menuBar()
@@ -463,6 +464,13 @@ class MontarisApp(QMainWindow):
         # Clean stale reference from selection
         if removed and self.canvas._selection.contains(removed):
             self.canvas._selection.remove(removed)
+        self.canvas.set_active_layer(None)
+        self.canvas.refresh_overlays()
+        self.layer_panel.refresh()
+        self.properties_panel.set_layer(None)
+
+    def _on_all_cleared(self):
+        self.canvas._selection.clear()
         self.canvas.set_active_layer(None)
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()

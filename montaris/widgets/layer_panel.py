@@ -104,6 +104,7 @@ class LayerPanel(QWidget):
     visibility_changed = Signal()
     roi_added = Signal()
     roi_removed = Signal(int)
+    all_cleared = Signal()
 
     def __init__(self, layer_stack, parent=None):
         super().__init__(parent)
@@ -469,8 +470,9 @@ class LayerPanel(QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        for idx in range(len(self.layer_stack.roi_layers) - 1, -1, -1):
-            self.roi_removed.emit(idx)
+        self.layer_stack.roi_layers.clear()
+        self.layer_stack._color_index = 0
+        self.all_cleared.emit()
 
     def _duplicate_selected(self):
         row = self.list_widget.currentRow()
