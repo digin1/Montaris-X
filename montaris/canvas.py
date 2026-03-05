@@ -111,44 +111,45 @@ class ImageCanvas(QGraphicsView):
                 self._selection.remove(l)
 
     def _update_selection_highlights(self):
-        """Draw dashed outlines around selected ROI bounding boxes."""
+        """Draw actual ROI boundary outline for selected layers."""
         scene = self._scene
         for item in self._selection_highlight_items:
             scene.removeItem(item)
         self._selection_highlight_items.clear()
 
-        pen = QPen(QColor(255, 255, 0, 200), 2)
-        pen.setCosmetic(True)
-        pen.setStyle(Qt.DashLine)
-
         for layer in self._selection.layers:
             if not hasattr(layer, 'mask'):
                 continue
-            bbox = layer.get_bbox()  # cached
+            bbox = layer.get_bbox()
             if bbox is None:
                 continue
             y1, y2, x1, x2 = bbox
-            rect_item = scene.addRect(
-                QRectF(x1, y1, x2 - x1, y2 - y1), pen
-            )
-            rect_item.setZValue(998)
-            self._selection_highlight_items.append(rect_item)
+            bh, bw = y2 - y1, x2 - x1
+            mask_crop = layer.mask[y1:y2, x1:x2]
+            edge = _compute_edge(mask_crop)
+            rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+            rgba[edge] = [255, 255, 0, 200]
+            rgba = np.ascontiguousarray(rgba)
+            qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg)
+            item = QGraphicsPixmapItem(pixmap)
+            item.setOffset(x1, y1)
+            item.setZValue(998)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(item)
+            self._selection_highlight_items.append(item)
 
     def _pulse_selection(self):
         """Brief opacity boost on selection change (G.23)."""
         if not self._selection_highlight_items:
             return
+        # Flash brighter by replacing pixmaps temporarily
         for item in self._selection_highlight_items:
-            pen = item.pen()
-            pen.setColor(QColor(255, 255, 100, 255))
-            item.setPen(pen)
+            item.setOpacity(1.0)
 
         def _restore():
-            pen = QPen(QColor(255, 255, 0, 200), 2)
-            pen.setCosmetic(True)
-            pen.setStyle(Qt.DashLine)
             for item in self._selection_highlight_items:
-                item.setPen(pen)
+                item.setOpacity(0.8)
 
         if self._pulse_timer is not None:
             self._pulse_timer.stop()
