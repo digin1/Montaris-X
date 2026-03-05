@@ -454,7 +454,8 @@ class TransformTool(BaseTool):
             self._bbox_item = None
         self._bbox = None
         self._hovered_handle = None
-        self._remove_previews(canvas)
+        if self._preview_items:
+            self._remove_previews(canvas)
 
     def cursor(self):
         return Qt.SizeAllCursor
