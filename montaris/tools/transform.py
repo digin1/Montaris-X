@@ -331,50 +331,22 @@ class TransformTool(BaseTool):
         return None
 
     def _create_previews(self, canvas):
-        """Create QGraphicsPixmapItems for live preview from tight bbox.
-
-        Directly removes source ROI items from the scene (no full rebuild).
-        """
+        """Reuse existing ROI pixmap items as live preview (zero rebuild cost)."""
         self._remove_previews(canvas)
-        self._preview_rgba_buffers = []  # prevent GC of numpy backing
         self._hidden_layers = []
-        scene = canvas.scene()
 
         # Hide selection highlights during drag
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
 
         for lid, (l, snap) in self._snapshots.items():
-            # Directly remove this ROI's pixmap item from scene
             rid = id(l)
             if rid in canvas._roi_items:
-                scene.removeItem(canvas._roi_items.pop(rid))
+                # Steal the existing pixmap item — no rebuild needed
+                item = canvas._roi_items.pop(rid)
+                item.setZValue(900)
+                self._preview_items.append(item)
             self._hidden_layers.append((l, True))
-
-            # Compute tight bounding box of painted pixels
-            from montaris.core.roi_transform import get_mask_bbox
-            bbox = get_mask_bbox(snap)
-            if bbox is None:
-                continue
-            by1, by2, bx1, bx2 = bbox
-
-            # Extract tight RGBA region
-            r, g, b = l.color
-            bh, bw = by2 - by1, bx2 - bx1
-            rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
-            mask_crop = snap[by1:by2, bx1:bx2]
-            rgba[mask_crop > 0] = [r, g, b, l.opacity]
-            rgba = np.ascontiguousarray(rgba)
-            self._preview_rgba_buffers.append(rgba)
-
-            qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
-            pixmap = QPixmap.fromImage(qimg)
-            item = QGraphicsPixmapItem(pixmap)
-            item.setOffset(bx1, by1)
-            item.setZValue(900)
-            item.setAcceptedMouseButtons(Qt.NoButton)
-            scene.addItem(item)
-            self._preview_items.append(item)
 
     def _remove_previews(self, canvas, re_render=True):
         """Remove preview pixmap items. If re_render, rebuild affected ROI items."""
@@ -392,7 +364,6 @@ class TransformTool(BaseTool):
             # Rebuild selection highlights at new positions
             canvas._update_selection_highlights()
         self._hidden_layers = []
-        self._preview_rgba_buffers = []
 
     def _show_handles(self, bbox, canvas):
         self._clear_handles(canvas)

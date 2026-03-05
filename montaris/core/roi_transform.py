@@ -118,26 +118,23 @@ def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):
     if dx2 <= dx1 or dy2 <= dy1:
         return
 
+    # Use only the bbox crop as scipy input (much smaller than full mask).
     # scipy affine_transform uses (row, col) convention.
-    # M_inv maps output (x, y) -> input (x, y).  Convert to (row, col):
-    #   out_row = dy1 + r, out_col = dx1 + c
-    #   M_inv maps (out_col, out_row, 1) -> (in_col, in_row)
-    # scipy wants: input_coord = matrix @ output_coord + offset
-    # where output_coord is (row, col) within the sub-region.
-    # input_row = M_inv[1,0]*(dx1+c) + M_inv[1,1]*(dy1+r) + M_inv[1,2]
-    # input_col = M_inv[0,0]*(dx1+c) + M_inv[0,1]*(dy1+r) + M_inv[0,2]
+    # M_inv maps output (x, y) -> input (x, y).
+    # Offset into crop: subtract (sy1, sx1) from full-mask coordinates.
     scipy_matrix = np.array([
         [M_inv[1, 1], M_inv[1, 0]],
         [M_inv[0, 1], M_inv[0, 0]],
     ], dtype=np.float64)
     scipy_offset = np.array([
-        M_inv[1, 0] * dx1 + M_inv[1, 1] * dy1 + M_inv[1, 2],
-        M_inv[0, 0] * dx1 + M_inv[0, 1] * dy1 + M_inv[0, 2],
+        M_inv[1, 0] * dx1 + M_inv[1, 1] * dy1 + M_inv[1, 2] - sy1,
+        M_inv[0, 0] * dx1 + M_inv[0, 1] * dy1 + M_inv[0, 2] - sx1,
     ], dtype=np.float64)
 
+    crop = np.ascontiguousarray(mask[sy1:sy2, sx1:sx2])
     rh, rw = dy2 - dy1, dx2 - dx1
     region = scipy_affine(
-        mask, scipy_matrix, offset=scipy_offset,
+        crop, scipy_matrix, offset=scipy_offset,
         output_shape=(rh, rw), order=0, mode='constant', cval=0,
     )
     # Merge into result (don't overwrite existing non-zero pixels with zero)

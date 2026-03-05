@@ -1,6 +1,5 @@
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -19,7 +18,7 @@ class MoveTool(BaseTool):
         self._target_layers = []
         self._component_mask = None  # If moving a single component
         self._preview_items = []
-        self._preview_rgba_buffers = []
+
         self._hidden_layers = []
         self._preview_offsets = []  # (bx1, by1) per preview item
 
@@ -159,51 +158,26 @@ class MoveTool(BaseTool):
         canvas._update_selection_highlights()
 
     def _create_previews(self, canvas):
-        """Create preview pixmaps for live move preview."""
+        """Reuse existing ROI pixmap items as live preview (zero rebuild cost)."""
         self._remove_previews(canvas)
-        self._preview_rgba_buffers = []
         self._preview_offsets = []
         self._hidden_layers = []
-        scene = canvas.scene()
 
         # Hide selection highlights during drag
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
 
         for lid, (l, snap) in self._snapshots.items():
-            source = self._component_mask if self._component_mask is not None else snap
-            bbox = get_mask_bbox(source.astype(np.uint8) if source.dtype == bool else source)
-            if bbox is None:
-                continue
-            by1, by2, bx1, bx2 = bbox
-
-            # Directly remove this ROI's pixmap item from scene
             rid = id(l)
             if rid in canvas._roi_items:
-                scene.removeItem(canvas._roi_items.pop(rid))
+                # Steal the existing pixmap item — no rebuild needed
+                item = canvas._roi_items.pop(rid)
+                item.setZValue(900)
+                self._preview_items.append(item)
+                # Read the current offset for move delta calculation
+                off = item.offset()
+                self._preview_offsets.append((off.x(), off.y()))
             self._hidden_layers.append((l, True))
-
-            # Build tight RGBA
-            bh, bw = by2 - by1, bx2 - bx1
-            r, g, b = l.color
-            rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
-            if self._component_mask is not None:
-                mask_crop = self._component_mask[by1:by2, bx1:bx2]
-            else:
-                mask_crop = snap[by1:by2, bx1:bx2]
-            rgba[mask_crop > 0] = [r, g, b, l.opacity]
-            rgba = np.ascontiguousarray(rgba)
-            self._preview_rgba_buffers.append(rgba)
-
-            qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
-            pixmap = QPixmap.fromImage(qimg)
-            item = QGraphicsPixmapItem(pixmap)
-            item.setOffset(bx1, by1)
-            item.setZValue(900)
-            item.setAcceptedMouseButtons(Qt.NoButton)
-            scene.addItem(item)
-            self._preview_items.append(item)
-            self._preview_offsets.append((bx1, by1))
 
     def _remove_previews(self, canvas, re_render=True):
         """Remove preview items. If re_render, also rebuild affected ROI items."""
@@ -221,7 +195,7 @@ class MoveTool(BaseTool):
             # Rebuild selection highlights at new positions
             canvas._update_selection_highlights()
         self._hidden_layers = []
-        self._preview_rgba_buffers = []
+
         self._preview_offsets = []
 
     def cursor(self):
