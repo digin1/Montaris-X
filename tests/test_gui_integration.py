@@ -304,11 +304,10 @@ class TestTransformToolGUI:
         tool._dragging = True
         tool._target_layers = [roi1]
         tool._snapshots = {id(roi1): (roi1, original.copy())}
-        # Scale up
+        # Scale up — preview only, mask rasterized on release
         tool.on_move(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
-        assert roi1.mask.sum() > original.sum()
-        # Release
         tool.on_release(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
+        assert roi1.mask.sum() > original.sum()
         assert app.undo_stack.can_undo
 
     def test_rotate(self, app_two_rois):
@@ -325,6 +324,7 @@ class TestTransformToolGUI:
         tool._target_layers = [roi1]
         tool._snapshots = {id(roi1): (roi1, original.copy())}
         tool.on_move(QPointF(rot.x + 10, rot.y), roi1, app.canvas)
+        tool.on_release(QPointF(rot.x + 10, rot.y), roi1, app.canvas)
         assert not np.array_equal(roi1.mask, original)
 
     def test_escape_cancels(self, app_two_rois):
@@ -341,8 +341,7 @@ class TestTransformToolGUI:
         tool._target_layers = [roi1]
         tool._snapshots = {id(roi1): (roi1, original.copy())}
         tool.on_move(QPointF(br.x + 20, br.y + 20), roi1, app.canvas)
-        assert not np.array_equal(roi1.mask, original)
-        # Escape
+        # Escape restores original mask
         tool.on_key_press(Qt.Key_Escape, app.canvas)
         assert np.array_equal(roi1.mask, original)
 

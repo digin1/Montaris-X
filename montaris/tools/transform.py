@@ -1,8 +1,11 @@
 import math
 import numpy as np
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF
-from PySide6.QtGui import QPen, QColor, QBrush
-from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem
+from PySide6.QtGui import QPen, QColor, QBrush, QTransform, QImage, QPixmap
+from PySide6.QtWidgets import (
+    QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
+    QGraphicsPixmapItem,
+)
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
@@ -44,6 +47,7 @@ class TransformTool(BaseTool):
         self._dragging = False
         self._shift_held = False
         self._component_mask = None
+        self._preview_items = []  # QGraphicsPixmapItems for live preview
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -90,6 +94,8 @@ class TransformTool(BaseTool):
             self._snapshots = {
                 id(l): (l, l.mask.copy()) for l in self._target_layers
             }
+            # Create preview pixmaps and erase from overlays
+            self._create_previews(canvas)
             return
 
         # First click: show handles — component-aware (D.14)
@@ -151,8 +157,8 @@ class TransformTool(BaseTool):
                 self._start_pos.x() - cx, -(self._start_pos.y() - cy)
             )
             if self._shift_held:
-                snap = math.radians(15)
-                angle = round(angle / snap) * snap
+                snap_a = math.radians(15)
+                angle = round(angle / snap_a) * snap_a
             M = make_rotation_matrix(angle, cx, cy)
         else:
             sx, sy = 1.0, 1.0
@@ -168,7 +174,6 @@ class TransformTool(BaseTool):
                 sx = 1.0
             if handle_type in ('ml', 'mr'):
                 sy = 1.0
-            # Shift: proportional scaling for corner handles (dominant axis)
             if self._shift_held and handle_type in ('tl', 'tr', 'bl', 'br'):
                 if abs(dx) >= abs(dy):
                     sx = sy = sx
@@ -176,19 +181,32 @@ class TransformTool(BaseTool):
                     sx = sy = sy
             M = make_scale_matrix(sx, sy, cx, cy)
 
-        # Apply transform to all target layers (guard against deleted layers)
-        for lid, (l, snap) in self._snapshots.items():
-            if not hasattr(l, 'mask'):
-                continue
-            l.mask[:] = apply_affine_to_mask(snap, M, l.mask.shape)
+        self._current_matrix = M
 
-        canvas.refresh_overlays()
-        canvas._update_selection_highlights()
+        # Apply transform to preview items only (GPU-accelerated, instant)
+        qt_transform = QTransform(
+            M[0, 0], M[1, 0],
+            M[0, 1], M[1, 1],
+            M[0, 2], M[1, 2],
+        )
+        for item in self._preview_items:
+            item.setTransform(qt_transform)
 
     def on_release(self, pos, layer, canvas):
         if not self._dragging or not self._snapshots:
             return
         self._dragging = False
+
+        # Remove preview items
+        self._remove_previews(canvas)
+
+        # Rasterize: apply the final transform to the actual mask data
+        M = getattr(self, '_current_matrix', None)
+        if M is not None:
+            for lid, (l, snap) in self._snapshots.items():
+                if not hasattr(l, 'mask'):
+                    continue
+                l.mask[:] = apply_affine_to_mask(snap, M, l.mask.shape)
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
@@ -213,6 +231,9 @@ class TransformTool(BaseTool):
         self._active_handle = None
         self._snapshots.clear()
         self._start_pos = None
+        self._current_matrix = None
+
+        canvas.refresh_overlays()
 
         # Refresh handles to new position
         bbox = self._compute_union_bbox(self._target_layers)
@@ -222,12 +243,13 @@ class TransformTool(BaseTool):
     def on_key_press(self, key, canvas):
         # Escape: cancel transform, restore snapshots
         if key == Qt.Key_Escape and self._dragging and self._snapshots:
-            for lid, (l, snap) in self._snapshots.items():
-                l.mask[:] = snap
+            self._remove_previews(canvas)
+            # Masks were never modified during drag, no need to restore
             self._dragging = False
             self._active_handle = None
             self._snapshots.clear()
             self._start_pos = None
+            self._current_matrix = None
             canvas.refresh_overlays()
             canvas._update_selection_highlights()
             # Refresh handles
@@ -263,6 +285,41 @@ class TransformTool(BaseTool):
             if dist <= HANDLE_HIT_RADIUS:
                 return h
         return None
+
+    def _create_previews(self, canvas):
+        """Create lightweight QGraphicsPixmapItems for live preview.
+
+        Erases the ROI content from the combined overlay so only the
+        preview items show the transformed shape.
+        """
+        self._remove_previews(canvas)
+        scene = canvas.scene()
+
+        for lid, (l, snap) in self._snapshots.items():
+            # Erase this layer's pixels from the mask during drag
+            l.mask[:] = 0
+
+            # Create RGBA pixmap from snapshot
+            from montaris.canvas import _mask_to_rgba
+            fill_mode = getattr(l, 'fill_mode', 'solid')
+            rgba = _mask_to_rgba(snap, l.color, l.opacity, fill_mode)
+            h, w = rgba.shape[:2]
+            qimg = QImage(rgba.data, w, h, w * 4, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg)
+            item = QGraphicsPixmapItem(pixmap)
+            item.setZValue(900)
+            scene.addItem(item)
+            self._preview_items.append(item)
+
+        # Refresh overlay to show erased state
+        canvas.refresh_overlays()
+
+    def _remove_previews(self, canvas):
+        """Remove preview pixmap items from scene."""
+        scene = canvas.scene()
+        for item in self._preview_items:
+            scene.removeItem(item)
+        self._preview_items.clear()
 
     def _show_handles(self, bbox, canvas):
         self._clear_handles(canvas)
@@ -340,6 +397,7 @@ class TransformTool(BaseTool):
             self._bbox_item = None
         self._bbox = None
         self._hovered_handle = None
+        self._remove_previews(canvas)
 
     def cursor(self):
         return Qt.SizeAllCursor

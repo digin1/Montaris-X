@@ -291,10 +291,9 @@ class TestMultiSelectionTransform:
         tool._dragging = True
         tool._target_layers = [layer]
         tool._snapshots = {id(layer): (layer, original.copy())}
-        # Move handle
+        # Move handle (preview only, mask not rasterized yet)
         tool.on_move(QPointF(corner.x + 10, corner.y + 10), layer, app.canvas)
-        assert not np.array_equal(layer.mask, original)
-        # Escape should restore
+        # Escape should restore mask to original
         tool.on_key_press(Qt.Key_Escape, app.canvas)
         assert np.array_equal(layer.mask, original)
 
