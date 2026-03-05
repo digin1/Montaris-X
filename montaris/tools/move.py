@@ -158,8 +158,10 @@ class MoveTool(BaseTool):
         canvas._update_selection_highlights()
 
     def _create_previews(self, canvas):
-        """Reuse existing ROI pixmap items as live preview (zero rebuild cost)."""
-        self._remove_previews(canvas)
+        """Use existing ROI pixmap items as live preview (zero scene changes)."""
+        for item in self._preview_items:
+            item.setOffset(self._preview_offsets[self._preview_items.index(item)] if self._preview_offsets else item.offset())
+        self._preview_items.clear()
         self._preview_offsets = []
         self._hidden_layers = []
 
@@ -170,20 +172,18 @@ class MoveTool(BaseTool):
         for lid, (l, snap) in self._snapshots.items():
             rid = id(l)
             if rid in canvas._roi_items:
-                # Steal the existing pixmap item — no rebuild needed
-                item = canvas._roi_items.pop(rid)
-                item.setZValue(900)
+                item = canvas._roi_items[rid]
                 self._preview_items.append(item)
-                # Read the current offset for move delta calculation
                 off = item.offset()
                 self._preview_offsets.append((off.x(), off.y()))
             self._hidden_layers.append((l, True))
 
     def _remove_previews(self, canvas, re_render=True):
-        """Remove preview items. If re_render, also rebuild affected ROI items."""
-        scene = canvas.scene()
-        for item in self._preview_items:
-            scene.removeItem(item)
+        """Reset preview offsets. If re_render, also rebuild affected ROI items."""
+        for i, item in enumerate(self._preview_items):
+            if i < len(self._preview_offsets):
+                bx1, by1 = self._preview_offsets[i]
+                item.setOffset(bx1, by1)
         self._preview_items.clear()
         if re_render:
             for l, _ in self._hidden_layers:
@@ -192,10 +192,8 @@ class MoveTool(BaseTool):
                     canvas._refresh_roi_item(l, idx)
                 except ValueError:
                     pass
-            # Rebuild selection highlights at new positions
             canvas._update_selection_highlights()
         self._hidden_layers = []
-
         self._preview_offsets = []
 
     def cursor(self):

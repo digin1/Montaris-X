@@ -47,7 +47,8 @@ class TransformTool(BaseTool):
         self._dragging = False
         self._shift_held = False
         self._component_mask = None
-        self._preview_items = []  # QGraphicsPixmapItems for live preview
+        self._preview_items = []  # references to ROI items for live preview
+        self._hidden_layers = []
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -219,12 +220,10 @@ class TransformTool(BaseTool):
         self._dragging = False
         _t0 = _time.perf_counter()
 
-        # Remove preview items (don't re-render yet — mask not updated)
-        affected = [l for l, _ in getattr(self, '_hidden_layers', [])]
-        self._remove_previews(canvas, re_render=False)
-        _t1 = _time.perf_counter()
+        affected = [l for l, _ in self._hidden_layers]
+        # Keep preview transforms visible while we rasterize (no visual glitch)
 
-        # Rasterize: apply the final transform to the actual mask data (in-place)
+        # Rasterize: apply the final transform to the actual mask data
         M = getattr(self, '_current_matrix', None)
         if M is not None:
             for lid, (l, snap) in self._snapshots.items():
@@ -232,11 +231,10 @@ class TransformTool(BaseTool):
                     continue
                 apply_affine_inplace(l.mask, snap, M)
                 l.invalidate_bbox()
-        _t2 = _time.perf_counter()
+        _t1 = _time.perf_counter()
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
-            # Diff only the union of old + new bounding boxes
             old_bb = get_mask_bbox(snap)
             new_bb = get_mask_bbox(l.mask)
             if old_bb is None and new_bb is None:
@@ -255,7 +253,7 @@ class TransformTool(BaseTool):
                     region_new.copy(),
                 )
                 commands.append(cmd)
-        _t3 = _time.perf_counter()
+        _t2 = _time.perf_counter()
 
         if commands:
             if len(commands) == 1:
@@ -268,22 +266,23 @@ class TransformTool(BaseTool):
         self._start_pos = None
         self._current_matrix = None
 
-        # Re-render only the affected ROI items (mask now updated)
+        # Rebuild ROI items (replaces old transformed items in scene)
+        self._preview_items.clear()
+        self._hidden_layers = []
         for l in affected:
             try:
                 idx = canvas.layer_stack.roi_layers.index(l)
                 canvas._refresh_roi_item(l, idx)
             except ValueError:
                 pass
-        _t4 = _time.perf_counter()
+        _t3 = _time.perf_counter()
 
-        # Refresh handles to new position
+        canvas._update_selection_highlights()
         bbox = self._compute_union_bbox(self._target_layers)
         if bbox:
             self._show_handles(bbox, canvas)
-        _t5 = _time.perf_counter()
-        canvas.flash_progress()
-        print(f"[TRANSFORM release] preview_rm={_t1-_t0:.3f}s affine={_t2-_t1:.3f}s undo={_t3-_t2:.3f}s render={_t4-_t3:.3f}s handles={_t5-_t4:.3f}s total={_t5-_t0:.3f}s")
+        _t4 = _time.perf_counter()
+        print(f"[TRANSFORM release] affine={_t1-_t0:.3f}s undo={_t2-_t1:.3f}s render={_t3-_t2:.3f}s handles={_t4-_t3:.3f}s total={_t4-_t0:.3f}s")
 
     def on_key_press(self, key, canvas):
         # Escape: cancel transform, restore snapshots
@@ -331,8 +330,10 @@ class TransformTool(BaseTool):
         return None
 
     def _create_previews(self, canvas):
-        """Reuse existing ROI pixmap items as live preview (zero rebuild cost)."""
-        self._remove_previews(canvas)
+        """Use existing ROI pixmap items as live preview (zero scene changes)."""
+        for item in self._preview_items:
+            item.resetTransform()
+        self._preview_items.clear()
         self._hidden_layers = []
 
         # Hide selection highlights during drag
@@ -342,17 +343,14 @@ class TransformTool(BaseTool):
         for lid, (l, snap) in self._snapshots.items():
             rid = id(l)
             if rid in canvas._roi_items:
-                # Steal the existing pixmap item — no rebuild needed
-                item = canvas._roi_items.pop(rid)
-                item.setZValue(900)
-                self._preview_items.append(item)
+                # Reference existing item — no pop, no z-change, no scene modification
+                self._preview_items.append(canvas._roi_items[rid])
             self._hidden_layers.append((l, True))
 
     def _remove_previews(self, canvas, re_render=True):
-        """Remove preview pixmap items. If re_render, rebuild affected ROI items."""
-        scene = canvas.scene()
+        """Reset preview transforms. If re_render, rebuild affected ROI items."""
         for item in self._preview_items:
-            scene.removeItem(item)
+            item.resetTransform()
         self._preview_items.clear()
         if re_render:
             for l, _ in getattr(self, '_hidden_layers', []):
@@ -361,7 +359,6 @@ class TransformTool(BaseTool):
                     canvas._refresh_roi_item(l, idx)
                 except ValueError:
                     pass
-            # Rebuild selection highlights at new positions
             canvas._update_selection_highlights()
         self._hidden_layers = []
 

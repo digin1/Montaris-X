@@ -65,8 +65,8 @@ def apply_affine_to_mask(mask, matrix, output_shape=None):
 def apply_affine_inplace(dest, snap, matrix):
     """Transform snap and write result into dest in-place.
 
-    Zeros only the source bbox region and writes to the dest bbox region,
-    avoiding full-array allocation or zeroing.
+    Uses forward mapping on non-zero pixels only — much faster than
+    inverse-mapping the entire bbox for sparse binary masks.
     """
     h, w = dest.shape
     src_bbox = get_mask_bbox(snap)
@@ -75,7 +75,24 @@ def apply_affine_inplace(dest, snap, matrix):
     sy1, sy2, sx1, sx2 = src_bbox
     # Zero only the source region
     dest[sy1:sy2, sx1:sx2] = 0
-    _apply_affine_bbox(snap, matrix, dest, h, w, src_bbox)
+
+    crop = snap[sy1:sy2, sx1:sx2]
+    ys, xs = np.where(crop > 0)
+    if len(ys) == 0:
+        return
+
+    # Forward-map only the non-zero pixels
+    abs_x = (xs + sx1).astype(np.float64)
+    abs_y = (ys + sy1).astype(np.float64)
+
+    new_x = matrix[0, 0] * abs_x + matrix[0, 1] * abs_y + matrix[0, 2]
+    new_y = matrix[1, 0] * abs_x + matrix[1, 1] * abs_y + matrix[1, 2]
+
+    new_xi = np.round(new_x).astype(np.int64)
+    new_yi = np.round(new_y).astype(np.int64)
+
+    valid = (new_xi >= 0) & (new_xi < w) & (new_yi >= 0) & (new_yi < h)
+    dest[new_yi[valid], new_xi[valid]] = crop[ys[valid], xs[valid]]
 
 
 def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):

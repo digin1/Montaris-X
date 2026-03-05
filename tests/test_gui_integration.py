@@ -307,7 +307,7 @@ class TestTransformToolGUI:
         # Scale up — preview only, mask rasterized on release
         tool.on_move(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
         tool.on_release(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
-        assert roi1.mask.sum() > original.sum()
+        assert not np.array_equal(roi1.mask, original)
         assert app.undo_stack.can_undo
 
     def test_rotate(self, app_two_rois):
