@@ -205,6 +205,7 @@ class TransformTool(BaseTool):
         # Remove preview items (don't re-render yet — mask not updated)
         affected = [l for l, _ in getattr(self, '_hidden_layers', [])]
         self._remove_previews(canvas, re_render=False)
+        canvas.flash_progress()
 
         # Rasterize: apply the final transform to the actual mask data (in-place)
         M = getattr(self, '_current_matrix', None)
@@ -316,6 +317,10 @@ class TransformTool(BaseTool):
         self._hidden_layers = []
         scene = canvas.scene()
 
+        # Hide selection highlights during drag
+        for item in canvas._selection_highlight_items:
+            item.setVisible(False)
+
         for lid, (l, snap) in self._snapshots.items():
             # Directly remove this ROI's pixmap item from scene
             rid = id(l)
@@ -361,6 +366,8 @@ class TransformTool(BaseTool):
                     canvas._refresh_roi_item(l, idx)
                 except ValueError:
                     pass
+            # Rebuild selection highlights at new positions
+            canvas._update_selection_highlights()
         self._hidden_layers = []
         self._preview_rgba_buffers = []
 

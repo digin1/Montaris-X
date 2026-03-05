@@ -92,6 +92,7 @@ class MoveTool(BaseTool):
         # Remove preview items (don't re-render yet — mask not updated)
         affected = [l for l, _ in self._hidden_layers]
         self._remove_previews(canvas, re_render=False)
+        canvas.flash_progress()
 
         # Rasterize the final position
         dx = pos.x() - self._start_pos.x()
@@ -155,6 +156,7 @@ class MoveTool(BaseTool):
                 canvas._refresh_roi_item(l, idx)
             except ValueError:
                 pass
+        canvas._update_selection_highlights()
 
     def _create_previews(self, canvas):
         """Create preview pixmaps for live move preview."""
@@ -163,6 +165,10 @@ class MoveTool(BaseTool):
         self._preview_offsets = []
         self._hidden_layers = []
         scene = canvas.scene()
+
+        # Hide selection highlights during drag
+        for item in canvas._selection_highlight_items:
+            item.setVisible(False)
 
         for lid, (l, snap) in self._snapshots.items():
             source = self._component_mask if self._component_mask is not None else snap
@@ -212,6 +218,8 @@ class MoveTool(BaseTool):
                     canvas._refresh_roi_item(l, idx)
                 except ValueError:
                     pass
+            # Rebuild selection highlights at new positions
+            canvas._update_selection_highlights()
         self._hidden_layers = []
         self._preview_rgba_buffers = []
         self._preview_offsets = []

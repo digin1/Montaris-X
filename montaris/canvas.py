@@ -76,6 +76,9 @@ class ImageCanvas(QGraphicsView):
             "QProgressBar::chunk { background: #00b4ff; }"
         )
         self._progress_bar.hide()
+        self._progress_hide_timer = QTimer(self)
+        self._progress_hide_timer.setSingleShot(True)
+        self._progress_hide_timer.timeout.connect(self._progress_bar.hide)
 
     # ------------------------------------------------------------------
     # Tool / layer management
@@ -233,6 +236,12 @@ class ImageCanvas(QGraphicsView):
 
         if show_progress:
             self._progress_bar.hide()
+
+    def flash_progress(self):
+        """Show a brief progress flash to indicate rasterization."""
+        self._progress_bar.setRange(0, 0)  # indeterminate mode
+        self._progress_bar.show()
+        self._progress_hide_timer.start(300)
 
     def refresh_overlays_lut_only(self):
         """Re-render all ROI pixmaps (for color/opacity changes)."""
