@@ -2,6 +2,7 @@ import importlib
 
 TOOL_REGISTRY = {
     'Hand': ('montaris.tools.hand', 'HandTool', 'H', 'Navigate'),
+    'Select': ('montaris.tools.select', 'SelectTool', 'Q', 'Navigate'),
     'Brush': ('montaris.tools.brush', 'BrushTool', 'B', 'Drawing'),
     'Eraser': ('montaris.tools.eraser', 'EraserTool', 'E', 'Drawing'),
     'Polygon': ('montaris.tools.polygon', 'PolygonTool', 'P', 'Drawing'),

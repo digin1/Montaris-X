@@ -1,16 +1,30 @@
 import math
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF
 from PySide6.QtGui import QPen, QColor, QBrush
+from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
+from montaris.core.multi_undo import CompoundUndoCommand
 from montaris.core.roi_transform import (
     get_mask_bbox, compute_handles, apply_affine_to_mask,
     make_scale_matrix, make_rotation_matrix,
 )
 
-HANDLE_SIZE = 8
 HANDLE_HIT_RADIUS = 12
+
+# Cursor map per handle type
+_HANDLE_CURSORS = {
+    'tl': Qt.SizeFDiagCursor,
+    'br': Qt.SizeFDiagCursor,
+    'tr': Qt.SizeBDiagCursor,
+    'bl': Qt.SizeBDiagCursor,
+    'tm': Qt.SizeVerCursor,
+    'bm': Qt.SizeVerCursor,
+    'ml': Qt.SizeHorCursor,
+    'mr': Qt.SizeHorCursor,
+    'rotate': Qt.CrossCursor,
+}
 
 
 class TransformTool(BaseTool):
@@ -18,39 +32,107 @@ class TransformTool(BaseTool):
 
     def __init__(self, app):
         super().__init__(app)
-        self.apply_to_all = False
         self._active_handle = None
+        self._hovered_handle = None
         self._start_pos = None
         self._bbox = None
-        self._snapshot = None
+        self._snapshots = {}  # id(layer) -> (layer, snapshot)
+        self._target_layers = []
         self._handle_items = []
         self._bbox_item = None
         self._canvas = None
-        self._layer = None
+        self._dragging = False
+        self._shift_held = False
+        self._component_mask = None
+
+    def _get_target_layers(self, layer, canvas):
+        """Return selected layers if in selection, else [layer]."""
+        sel = canvas._selection.layers
+        if sel and layer in sel:
+            return sel
+        return [layer]
+
+    def _compute_union_bbox(self, layers):
+        """Compute union bounding box across all target layers."""
+        y1_min, y2_max, x1_min, x2_max = None, None, None, None
+        for l in layers:
+            bbox = get_mask_bbox(l.mask)
+            if bbox is None:
+                continue
+            y1, y2, x1, x2 = bbox
+            if y1_min is None:
+                y1_min, y2_max, x1_min, x2_max = y1, y2, x1, x2
+            else:
+                y1_min = min(y1_min, y1)
+                y2_max = max(y2_max, y2)
+                x1_min = min(x1_min, x1)
+                x2_max = max(x2_max, x2)
+        if y1_min is None:
+            return None
+        return (y1_min, y2_max, x1_min, x2_max)
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not hasattr(layer, 'mask'):
             return
         self._canvas = canvas
-        self._layer = layer
 
         # Check if clicking on a handle
         handle = self._hit_test_handle(pos)
         if handle:
             self._active_handle = handle
             self._start_pos = pos
-            self._snapshot = layer.mask.copy()
+            self._dragging = True
+            self._target_layers = self._get_target_layers(layer, canvas)
+            # Recompute bbox for current selection (may have changed via Ctrl+click)
+            bbox = self._compute_union_bbox(self._target_layers)
+            if bbox is not None:
+                self._bbox = bbox
+            self._snapshots = {
+                id(l): (l, l.mask.copy()) for l in self._target_layers
+            }
             return
 
-        # First click: show handles around mask bbox
-        bbox = get_mask_bbox(layer.mask)
+        # First click: show handles — component-aware (D.14)
+        self._target_layers = self._get_target_layers(layer, canvas)
+        self._component_mask = None
+
+        # If single layer and clicking on painted pixel, detect component
+        if (len(self._target_layers) == 1
+                and hasattr(layer, 'mask')):
+            ix, iy = int(pos.x()), int(pos.y())
+            h, w = layer.mask.shape
+            if 0 <= iy < h and 0 <= ix < w and layer.mask[iy, ix] > 0:
+                from montaris.core.components import get_component_at
+                comp = get_component_at(layer.mask, ix, iy)
+                if comp is not None:
+                    total = np.count_nonzero(layer.mask)
+                    comp_px = np.count_nonzero(comp)
+                    if comp_px < total:
+                        self._component_mask = comp
+                        ys, xs = np.where(comp)
+                        bbox = (ys.min(), ys.max() + 1, xs.min(), xs.max() + 1)
+                        self._show_handles(bbox, canvas)
+                        return
+
+        bbox = self._compute_union_bbox(self._target_layers)
         if bbox is None:
             return
-        self._bbox = bbox
         self._show_handles(bbox, canvas)
 
     def on_move(self, pos, layer, canvas):
-        if self._active_handle is None or self._snapshot is None:
+        self._canvas = canvas
+
+        # Update shift state from keyboard modifiers
+        # (Qt provides modifiers on mouse events via QApplication)
+        from PySide6.QtWidgets import QApplication
+        self._shift_held = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+
+        # Hover feedback when not dragging
+        if not self._dragging:
+            self._update_hover(pos, canvas)
+            return
+
+        if self._active_handle is None or not self._snapshots:
             return
 
         dx = pos.x() - self._start_pos.x()
@@ -65,13 +147,14 @@ class TransformTool(BaseTool):
         handle_type = self._active_handle.handle_type
 
         if handle_type == 'rotate':
-            # Compute rotation angle
             angle = math.atan2(pos.x() - cx, -(pos.y() - cy)) - math.atan2(
                 self._start_pos.x() - cx, -(self._start_pos.y() - cy)
             )
+            if self._shift_held:
+                snap = math.radians(15)
+                angle = round(angle / snap) * snap
             M = make_rotation_matrix(angle, cx, cy)
         else:
-            # Scale based on handle movement
             sx, sy = 1.0, 1.0
             if 'l' in handle_type:
                 sx = max(0.1, (bw - dx) / bw)
@@ -85,42 +168,91 @@ class TransformTool(BaseTool):
                 sx = 1.0
             if handle_type in ('ml', 'mr'):
                 sy = 1.0
+            # Shift: proportional scaling for corner handles (dominant axis)
+            if self._shift_held and handle_type in ('tl', 'tr', 'bl', 'br'):
+                if abs(dx) >= abs(dy):
+                    sx = sy = sx
+                else:
+                    sx = sy = sy
             M = make_scale_matrix(sx, sy, cx, cy)
 
-        # Apply transform (preview)
-        if self.apply_to_all:
-            for roi in self._canvas.layer_stack.roi_layers:
-                roi.mask[:] = apply_affine_to_mask(self._snapshot, M, roi.mask.shape)
-        else:
-            layer.mask[:] = apply_affine_to_mask(self._snapshot, M, layer.mask.shape)
+        # Apply transform to all target layers (guard against deleted layers)
+        for lid, (l, snap) in self._snapshots.items():
+            if not hasattr(l, 'mask'):
+                continue
+            l.mask[:] = apply_affine_to_mask(snap, M, l.mask.shape)
 
         canvas.refresh_overlays()
+        canvas._update_selection_highlights()
 
     def on_release(self, pos, layer, canvas):
-        if self._active_handle is None or self._snapshot is None or layer is None:
+        if not self._dragging or not self._snapshots:
             return
+        self._dragging = False
 
-        diff = self._snapshot != layer.mask
-        if diff.any():
-            ys, xs = np.where(diff)
-            y1, y2 = ys.min(), ys.max() + 1
-            x1, x2 = xs.min(), xs.max() + 1
-            cmd = UndoCommand(
-                layer, (y1, y2, x1, x2),
-                self._snapshot[y1:y2, x1:x2],
-                layer.mask[y1:y2, x1:x2],
-            )
-            self.app.undo_stack.push(cmd)
+        commands = []
+        for lid, (l, snap) in self._snapshots.items():
+            diff = snap != l.mask
+            if diff.any():
+                ys, xs = np.where(diff)
+                y1, y2 = ys.min(), ys.max() + 1
+                x1, x2 = xs.min(), xs.max() + 1
+                cmd = UndoCommand(
+                    l, (y1, y2, x1, x2),
+                    snap[y1:y2, x1:x2],
+                    l.mask[y1:y2, x1:x2],
+                )
+                commands.append(cmd)
+
+        if commands:
+            if len(commands) == 1:
+                self.app.undo_stack.push(commands[0])
+            else:
+                self.app.undo_stack.push(CompoundUndoCommand(commands))
 
         self._active_handle = None
-        self._snapshot = None
+        self._snapshots.clear()
         self._start_pos = None
 
         # Refresh handles to new position
-        bbox = get_mask_bbox(layer.mask)
+        bbox = self._compute_union_bbox(self._target_layers)
         if bbox:
-            self._bbox = bbox
             self._show_handles(bbox, canvas)
+
+    def on_key_press(self, key, canvas):
+        # Escape: cancel transform, restore snapshots
+        if key == Qt.Key_Escape and self._dragging and self._snapshots:
+            for lid, (l, snap) in self._snapshots.items():
+                l.mask[:] = snap
+            self._dragging = False
+            self._active_handle = None
+            self._snapshots.clear()
+            self._start_pos = None
+            canvas.refresh_overlays()
+            canvas._update_selection_highlights()
+            # Refresh handles
+            if self._target_layers:
+                bbox = self._compute_union_bbox(self._target_layers)
+                if bbox:
+                    self._show_handles(bbox, canvas)
+            return True  # consumed
+
+    def _update_hover(self, pos, canvas):
+        """Hit-test handles and change cursor on hover."""
+        if not self._bbox:
+            return
+        handles = compute_handles(self._bbox)
+        for h in handles:
+            dist = math.hypot(pos.x() - h.x, pos.y() - h.y)
+            if dist <= HANDLE_HIT_RADIUS:
+                if self._hovered_handle != h.handle_type:
+                    self._hovered_handle = h.handle_type
+                    cursor = _HANDLE_CURSORS.get(h.handle_type, Qt.SizeAllCursor)
+                    canvas.setCursor(cursor)
+                return
+        if self._hovered_handle is not None:
+            self._hovered_handle = None
+            canvas.setCursor(self.cursor())
 
     def _hit_test_handle(self, pos):
         if not self._bbox:
@@ -134,6 +266,7 @@ class TransformTool(BaseTool):
 
     def _show_handles(self, bbox, canvas):
         self._clear_handles(canvas)
+        self._bbox = bbox
         y1, y2, x1, x2 = bbox
         scene = canvas.scene()
 
@@ -146,7 +279,6 @@ class TransformTool(BaseTool):
         )
         self._bbox_item.setZValue(999)
 
-        # Handles
         handles = compute_handles(bbox)
         handle_pen = QPen(QColor(255, 255, 255), 1)
         handle_pen.setCosmetic(True)
@@ -154,14 +286,49 @@ class TransformTool(BaseTool):
         rotate_brush = QBrush(QColor(255, 180, 0))
 
         for h in handles:
-            brush = rotate_brush if h.handle_type == 'rotate' else handle_brush
-            item = scene.addEllipse(
-                QRectF(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2,
-                       HANDLE_SIZE, HANDLE_SIZE),
-                handle_pen, brush
-            )
-            item.setZValue(1000)
-            self._handle_items.append(item)
+            if h.handle_type == 'rotate':
+                # Circle handle for rotation
+                r = 5
+                item = scene.addEllipse(
+                    QRectF(h.x - r, h.y - r, r * 2, r * 2),
+                    handle_pen, rotate_brush,
+                )
+                item.setZValue(1000)
+                self._handle_items.append(item)
+                # Line connecting rotate handle to bbox top center
+                cx = (x1 + x2) / 2
+                line_pen = QPen(QColor(255, 180, 0), 1)
+                line_pen.setCosmetic(True)
+                line_item = scene.addLine(QLineF(cx, y1, cx, h.y + r), line_pen)
+                line_item.setZValue(999)
+                self._handle_items.append(line_item)
+            elif h.handle_type in ('tl', 'tr', 'bl', 'br'):
+                # 8x8 square for corner handles
+                s = 4
+                item = scene.addRect(
+                    QRectF(h.x - s, h.y - s, s * 2, s * 2),
+                    handle_pen, handle_brush,
+                )
+                item.setZValue(1000)
+                self._handle_items.append(item)
+            elif h.handle_type in ('tm', 'bm'):
+                # 10x6 rect for top/bottom mid handles
+                w_h, h_h = 5, 3
+                item = scene.addRect(
+                    QRectF(h.x - w_h, h.y - h_h, w_h * 2, h_h * 2),
+                    handle_pen, handle_brush,
+                )
+                item.setZValue(1000)
+                self._handle_items.append(item)
+            elif h.handle_type in ('ml', 'mr'):
+                # 6x10 rect for left/right mid handles
+                w_h, h_h = 3, 5
+                item = scene.addRect(
+                    QRectF(h.x - w_h, h.y - h_h, w_h * 2, h_h * 2),
+                    handle_pen, handle_brush,
+                )
+                item.setZValue(1000)
+                self._handle_items.append(item)
 
     def _clear_handles(self, canvas):
         scene = canvas.scene()
@@ -171,6 +338,8 @@ class TransformTool(BaseTool):
         if self._bbox_item:
             scene.removeItem(self._bbox_item)
             self._bbox_item = None
+        self._bbox = None
+        self._hovered_handle = None
 
     def cursor(self):
         return Qt.SizeAllCursor

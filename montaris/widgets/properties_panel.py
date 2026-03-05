@@ -35,7 +35,7 @@ class PropertiesPanel(QWidget):
         form.addRow("Opacity:", self.opacity_slider)
 
         self.fill_mode_combo = QComboBox()
-        self.fill_mode_combo.addItems(["Solid", "Outline"])
+        self.fill_mode_combo.addItems(["Solid", "Outline", "Both"])
         self.fill_mode_combo.currentTextChanged.connect(self._on_fill_mode_changed)
         form.addRow("Fill:", self.fill_mode_combo)
 

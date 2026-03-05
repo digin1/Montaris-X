@@ -10,6 +10,8 @@ class StampTool(BaseTool):
     def __init__(self, app):
         super().__init__(app)
         self.size = 20
+        self.width = 20
+        self.height = 20
         self._stamping = False
         self._last_pos = None
         self._snapshot = None
@@ -50,13 +52,15 @@ class StampTool(BaseTool):
 
     def _stamp(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
-        half = self.size // 2
-        h, w = layer.mask.shape
+        sw, sh = self.width, self.height
+        half_w = sw // 2
+        half_h = sh // 2
+        mh, mw = layer.mask.shape
 
-        y1 = max(0, cy - half)
-        y2 = min(h, cy - half + self.size)
-        x1 = max(0, cx - half)
-        x2 = min(w, cx - half + self.size)
+        y1 = max(0, cy - half_h)
+        y2 = min(mh, cy - half_h + sh)
+        x1 = max(0, cx - half_w)
+        x2 = min(mw, cx - half_w + sw)
 
         if y1 < y2 and x1 < x2:
             layer.mask[y1:y2, x1:x2] = 255
@@ -66,7 +70,8 @@ class StampTool(BaseTool):
         x1, y1 = p1.x(), p1.y()
         x2, y2 = p2.x(), p2.y()
         dist = max(abs(x2 - x1), abs(y2 - y1))
-        steps = max(1, int(dist / max(1, self.size // 3)))
+        step_size = max(1, min(self.width, self.height) // 3)
+        steps = max(1, int(dist / step_size))
         for i in range(steps + 1):
             t = i / max(1, steps)
             x = x1 + (x2 - x1) * t

@@ -1,12 +1,13 @@
 import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QGraphicsItem,
+    QGraphicsEllipseItem, QGraphicsItem, QLabel,
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import (
     QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush,
 )
+from montaris.core.selection import SelectionModel
 
 
 # ------------------------------------------------------------------
@@ -71,12 +72,19 @@ class ImageCanvas(QGraphicsView):
         self._roi_items = {}          # id(roi) -> ROIOverlayItem
         self._polygon_item = None
         self._brush_preview = None
+        self._stamp_preview = None
 
         self._tool = None
         self._active_layer = None
         self._is_panning = False
         self._last_pan_pos = None
         self._space_held = False
+
+        # Multi-selection
+        self._selection = SelectionModel(self)
+        self._selection_highlight_items = []
+        self._selection.changed.connect(self._on_selection_changed)
+        self.layer_stack.changed.connect(self._clean_stale_selection)
 
         self.setRenderHint(QPainter.SmoothPixmapTransform, False)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
@@ -87,17 +95,99 @@ class ImageCanvas(QGraphicsView):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
+        # HUD overlay (E.23)
+        self._hud_label = QLabel(self)
+        self._hud_label.setStyleSheet(
+            "QLabel { color: #ddd; background: rgba(0,0,0,150);"
+            " padding: 2px 6px; font-size: 11px; }"
+        )
+        self._hud_label.move(6, 6)
+        self._hud_label.setText("I: (-, -)  Z: 100%")
+        self._hud_label.show()
+
+        # Selection pulse timer (G.23)
+        self._pulse_timer = None
+
     # ------------------------------------------------------------------
     # Tool / layer management
     # ------------------------------------------------------------------
 
     def set_tool(self, tool):
+        # Clean up old tool's scene items (e.g. transform handles)
+        old = self._tool
+        if old is not None and hasattr(old, '_clear_handles'):
+            old._clear_handles(self)
         self._tool = tool
         self.hide_brush_preview()
+        self._hide_stamp_preview()
         self._update_cursor()
 
     def set_active_layer(self, layer):
         self._active_layer = layer
+
+    def _on_selection_changed(self, layers):
+        """Sync _active_layer to primary selection and update highlights."""
+        primary = self._selection.primary
+        if primary is not None:
+            self._active_layer = primary
+        self._update_selection_highlights()
+        self._pulse_selection()
+
+    def _clean_stale_selection(self):
+        """Remove layers from selection that are no longer in the layer stack."""
+        current_rois = set(id(r) for r in self.layer_stack.roi_layers)
+        stale = [l for l in self._selection.layers if id(l) not in current_rois]
+        if stale:
+            for l in stale:
+                self._selection.remove(l)
+
+    def _update_selection_highlights(self):
+        """Draw dashed outlines around selected ROI bounding boxes."""
+        scene = self._scene
+        for item in self._selection_highlight_items:
+            scene.removeItem(item)
+        self._selection_highlight_items.clear()
+
+        from montaris.core.roi_transform import get_mask_bbox
+        pen = QPen(QColor(255, 255, 0, 200), 2)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+
+        for layer in self._selection.layers:
+            if not hasattr(layer, 'mask'):
+                continue
+            bbox = get_mask_bbox(layer.mask)
+            if bbox is None:
+                continue
+            y1, y2, x1, x2 = bbox
+            rect_item = scene.addRect(
+                QRectF(x1, y1, x2 - x1, y2 - y1), pen
+            )
+            rect_item.setZValue(998)
+            self._selection_highlight_items.append(rect_item)
+
+    def _pulse_selection(self):
+        """Brief opacity boost on selection change (G.23)."""
+        if not self._selection_highlight_items:
+            return
+        for item in self._selection_highlight_items:
+            pen = item.pen()
+            pen.setColor(QColor(255, 255, 100, 255))
+            item.setPen(pen)
+
+        def _restore():
+            pen = QPen(QColor(255, 255, 0, 200), 2)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.DashLine)
+            for item in self._selection_highlight_items:
+                item.setPen(pen)
+
+        if self._pulse_timer is not None:
+            self._pulse_timer.stop()
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setSingleShot(True)
+        self._pulse_timer.timeout.connect(_restore)
+        self._pulse_timer.start(200)
 
     # ------------------------------------------------------------------
     # Image display — single QGraphicsPixmapItem (no tile pyramid)
@@ -130,11 +220,13 @@ class ImageCanvas(QGraphicsView):
             self._scene.removeItem(item)
         self._roi_items.clear()
 
+        gof = self.layer_stack._global_opacity_factor
         for i, roi in enumerate(self.layer_stack.roi_layers):
             if not roi.visible:
                 continue
             fill_mode = getattr(roi, 'fill_mode', 'solid')
-            rgba = _mask_to_rgba(roi.mask, roi.color, roi.opacity, fill_mode)
+            effective_opacity = int(roi.opacity * gof)
+            rgba = _mask_to_rgba(roi.mask, roi.color, effective_opacity, fill_mode)
             item = ROIOverlayItem(rgba)
             item.setZValue(i + 1)
             self._scene.addItem(item)
@@ -208,6 +300,14 @@ class ImageCanvas(QGraphicsView):
             self._brush_preview.setBrush(QBrush(Qt.NoBrush))
             self._brush_preview.setZValue(2000)
             self._scene.addItem(self._brush_preview)
+        # Match brush preview to active ROI color (C.6)
+        if self._active_layer and hasattr(self._active_layer, 'color'):
+            r, g, b = self._active_layer.color
+            pen = QPen(QColor(r, g, b, 200), 1)
+        else:
+            pen = QPen(QColor(255, 255, 255, 180), 1)
+        pen.setCosmetic(True)
+        self._brush_preview.setPen(pen)
         self._brush_preview.setRect(cx - radius, cy - radius,
                                     radius * 2, radius * 2)
         self._brush_preview.setVisible(True)
@@ -249,6 +349,12 @@ class ImageCanvas(QGraphicsView):
     def reset_zoom(self):
         self.resetTransform()
 
+    def zoom_in(self):
+        self.scale(1.25, 1.25)
+
+    def zoom_out(self):
+        self.scale(1 / 1.25, 1 / 1.25)
+
     # ------------------------------------------------------------------
     # Event overrides
     # ------------------------------------------------------------------
@@ -263,8 +369,14 @@ class ImageCanvas(QGraphicsView):
             self.setCursor(Qt.OpenHandCursor)
             return
 
+        handled = False
         if self._tool:
-            self._tool.on_key_press(event.key(), self)
+            handled = self._tool.on_key_press(event.key(), self) or False
+
+        # Escape: clear selection (only if tool didn't consume the event)
+        if event.key() == Qt.Key_Escape and not handled:
+            self._selection.clear()
+            return
 
         if event.key() == Qt.Key_BracketLeft:
             self._adjust_brush_size(-2)
@@ -290,6 +402,19 @@ class ImageCanvas(QGraphicsView):
             self.setCursor(Qt.ClosedHandCursor)
             return
 
+        # Ctrl+click: toggle ROI selection (empty space clears)
+        if (event.button() == Qt.LeftButton
+                and event.modifiers() & Qt.ControlModifier):
+            scene_pos = self.mapToScene(event.position().toPoint())
+            hit = SelectionModel.hit_test(
+                scene_pos.x(), scene_pos.y(), self.layer_stack.roi_layers
+            )
+            if hit is not None:
+                self._selection.toggle(hit)
+            else:
+                self._selection.clear()
+            return
+
         if self._tool and event.button() == Qt.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
             self._tool.on_press(scene_pos, self._active_layer, self)
@@ -304,6 +429,14 @@ class ImageCanvas(QGraphicsView):
         if img and 0 <= ix < img.data.shape[1] and 0 <= iy < img.data.shape[0]:
             val = img.data[iy, ix]
             self.cursor_moved.emit(ix, iy, str(val))
+        # Update HUD (E.23, E.24)
+        zoom = self.transform().m11()
+        ds = getattr(self.parent(), '_downsample_factor', 1) if self.parent() else 1
+        hud_text = f"I: ({ix}, {iy})  Z: {zoom:.0%}"
+        if ds > 1:
+            hud_text += f"  DS: {ds}x"
+        self._hud_label.setText(hud_text)
+        self._hud_label.adjustSize()
 
         self._update_brush_cursor(scene_pos)
 
@@ -352,6 +485,17 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     def _update_brush_cursor(self, scene_pos):
+        # Stamp tool: show rect preview (C.20)
+        if (self._tool and hasattr(self._tool, 'width')
+                and hasattr(self._tool, 'height') and not self._is_panning):
+            sw, sh = self._tool.width, self._tool.height
+            self._show_stamp_preview(scene_pos.x(), scene_pos.y(), sw, sh)
+            self.hide_brush_preview()
+            return
+
+        # Hide stamp preview if not stamp tool
+        self._hide_stamp_preview()
+
         if self._tool and hasattr(self._tool, 'size') and not self._is_panning:
             zoom = self.transform().m11()
             if zoom > 0 and getattr(self._tool, 'zoom_compensated', False):
@@ -361,6 +505,23 @@ class ImageCanvas(QGraphicsView):
             self.show_brush_preview(scene_pos.x(), scene_pos.y(), radius)
         else:
             self.hide_brush_preview()
+
+    def _show_stamp_preview(self, cx, cy, w, h):
+        from PySide6.QtWidgets import QGraphicsRectItem
+        if self._stamp_preview is None:
+            self._stamp_preview = QGraphicsRectItem()
+            pen = QPen(QColor(255, 255, 255, 180), 1)
+            pen.setCosmetic(True)
+            self._stamp_preview.setPen(pen)
+            self._stamp_preview.setBrush(QBrush(Qt.NoBrush))
+            self._stamp_preview.setZValue(2000)
+            self._scene.addItem(self._stamp_preview)
+        self._stamp_preview.setRect(cx - w / 2, cy - h / 2, w, h)
+        self._stamp_preview.setVisible(True)
+
+    def _hide_stamp_preview(self):
+        if self._stamp_preview is not None:
+            self._stamp_preview.setVisible(False)
 
     def _update_cursor(self):
         if self._space_held:
@@ -379,7 +540,7 @@ class ImageCanvas(QGraphicsView):
         main_win = self.parent()
         if main_win and hasattr(main_win, 'tool_panel'):
             slider = main_win.tool_panel.size_slider
-            slider.setValue(max(1, min(100, slider.value() + delta)))
+            slider.setValue(max(1, min(500, slider.value() + delta)))
 
 
 # ------------------------------------------------------------------
@@ -425,29 +586,40 @@ def numpy_to_qimage(array):
     raise ValueError(f"Unsupported array shape: {array.shape}")
 
 
+def _compute_edge(mask):
+    """Return boolean edge array for mask > 0 pixels."""
+    filled = mask > 0
+    edge = np.zeros_like(filled)
+    edge[0, :] |= filled[0, :]
+    edge[1:, :] |= filled[1:, :] & ~filled[:-1, :]
+    edge[-1, :] |= filled[-1, :]
+    edge[:-1, :] |= filled[:-1, :] & ~filled[1:, :]
+    edge[:, 0] |= filled[:, 0]
+    edge[:, 1:] |= filled[:, 1:] & ~filled[:, :-1]
+    edge[:, -1] |= filled[:, -1]
+    edge[:, :-1] |= filled[:, :-1] & ~filled[:, 1:]
+    return edge
+
+
 def _mask_to_rgba(mask, color, opacity=128, fill_mode="solid"):
     """Return an RGBA numpy array for the given mask and color."""
-    if fill_mode == "outline":
-        h, w = mask.shape
-        filled = mask > 0
-        edge = np.zeros_like(filled)
-        edge[0, :] |= filled[0, :]
-        edge[1:, :] |= filled[1:, :] & ~filled[:-1, :]
-        edge[-1, :] |= filled[-1, :]
-        edge[:-1, :] |= filled[:-1, :] & ~filled[1:, :]
-        edge[:, 0] |= filled[:, 0]
-        edge[:, 1:] |= filled[:, 1:] & ~filled[:, :-1]
-        edge[:, -1] |= filled[:, -1]
-        edge[:, :-1] |= filled[:, :-1] & ~filled[:, 1:]
-        overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        r, g, b = color
-        overlay[edge] = [r, g, b, opacity]
-        return np.ascontiguousarray(overlay)
-
     h, w = mask.shape
-    overlay = np.zeros((h, w, 4), dtype=np.uint8)
     r, g, b = color
-    overlay[mask > 0] = [r, g, b, opacity]
+    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+
+    if fill_mode == "outline":
+        edge = _compute_edge(mask)
+        overlay[edge] = [r, g, b, opacity]
+    elif fill_mode == "both":
+        # Fill + outline: fill at half opacity, edge at full
+        filled = mask > 0
+        fill_alpha = max(1, opacity // 2)
+        overlay[filled] = [r, g, b, fill_alpha]
+        edge = _compute_edge(mask)
+        overlay[edge] = [r, g, b, min(255, opacity)]
+    else:
+        overlay[mask > 0] = [r, g, b, opacity]
+
     return np.ascontiguousarray(overlay)
 
 

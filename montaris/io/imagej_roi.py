@@ -139,6 +139,42 @@ def write_imagej_roi(roi_dict, path):
         f.write(buf.getvalue())
 
 
+def write_imagej_roi_bytes(roi_dict):
+    """Write a single ImageJ ROI to bytes (for ZIP export)."""
+    buf = io.BytesIO()
+
+    roi_type = roi_dict.get('type', ROI_RECT)
+    top = roi_dict['top']
+    left = roi_dict['left']
+    bottom = roi_dict['bottom']
+    right = roi_dict['right']
+    x_coords = roi_dict.get('x_coords')
+    y_coords = roi_dict.get('y_coords')
+    n_coords = len(x_coords) if x_coords is not None else 0
+
+    buf.write(MAGIC)
+    buf.write(struct.pack('>H', VERSION))
+    buf.write(struct.pack('B', roi_type))
+    buf.write(b'\x00')
+
+    buf.write(struct.pack('>h', top))
+    buf.write(struct.pack('>h', left))
+    buf.write(struct.pack('>h', bottom))
+    buf.write(struct.pack('>h', right))
+    buf.write(struct.pack('>H', n_coords))
+
+    current = buf.tell()
+    buf.write(b'\x00' * (64 - current))
+
+    if roi_type in (ROI_POLYGON, ROI_FREEHAND) and n_coords > 0:
+        for x in x_coords:
+            buf.write(struct.pack('>h', int(x) - left))
+        for y in y_coords:
+            buf.write(struct.pack('>h', int(y) - top))
+
+    return buf.getvalue()
+
+
 def mask_to_imagej_roi(mask, name=""):
     """Convert a binary mask to an ImageJ ROI dict (freehand contour).
 

@@ -33,17 +33,19 @@ class UndoStack:
 
     def undo(self):
         if self._index >= 0:
-            self._stack[self._index].undo()
+            cmd = self._stack[self._index]
+            cmd.undo()
             self._index -= 1
-            return True
-        return False
+            return cmd
+        return None
 
     def redo(self):
         if self._index < len(self._stack) - 1:
             self._index += 1
-            self._stack[self._index].redo()
-            return True
-        return False
+            cmd = self._stack[self._index]
+            cmd.redo()
+            return cmd
+        return None
 
     def clear(self):
         self._stack.clear()

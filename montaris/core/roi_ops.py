@@ -53,6 +53,48 @@ def compute_overlap_map(roi_layers):
     return overlap
 
 
+def auto_fit_rois(roi_layers, image_w, image_h):
+    """Shift or resize ROI masks that extend outside the image bounds.
+
+    Returns:
+        Number of ROIs that were modified.
+    """
+    count = 0
+    for roi in roi_layers:
+        h, w = roi.mask.shape
+        if h != image_h or w != image_w:
+            # Resize mask to match image dimensions
+            from PIL import Image
+            img = Image.fromarray(roi.mask)
+            img = img.resize((image_w, image_h), Image.NEAREST)
+            roi.mask = np.array(img)
+            count += 1
+            continue
+        # Check if content is out of bounds (shouldn't happen if sizes match)
+        ys, xs = np.where(roi.mask > 0)
+        if len(ys) == 0:
+            continue
+        # Compute shift needed
+        dy = 0
+        dx = 0
+        if ys.min() < 0:
+            dy = -ys.min()
+        if xs.min() < 0:
+            dx = -xs.min()
+        if ys.max() >= image_h:
+            dy = image_h - 1 - ys.max()
+        if xs.max() >= image_w:
+            dx = image_w - 1 - xs.max()
+        if dy != 0 or dx != 0:
+            new_mask = np.zeros_like(roi.mask)
+            new_ys = np.clip(ys + dy, 0, image_h - 1)
+            new_xs = np.clip(xs + dx, 0, image_w - 1)
+            new_mask[new_ys, new_xs] = roi.mask[ys, xs]
+            roi.mask = new_mask
+            count += 1
+    return count
+
+
 def find_overlapping_pairs(roi_layers):
     """Find pairs of ROIs that have overlapping pixels.
 

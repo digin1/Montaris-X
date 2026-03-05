@@ -1,4 +1,5 @@
 import numpy as np
+from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
 
 ROI_COLORS = [
@@ -12,7 +13,28 @@ ROI_COLORS = [
     (150, 50, 255),
     (50, 255, 150),
     (255, 150, 150),
+    (100, 200, 100),
+    (200, 100, 200),
+    (100, 200, 255),
+    (255, 200, 100),
+    (180, 80, 80),
+    (80, 180, 80),
+    (80, 80, 180),
+    (200, 200, 100),
+    (100, 150, 200),
+    (200, 150, 100),
 ]
+
+
+def generate_unique_roi_name(base, existing_layers):
+    """Generate a unique ROI name by appending a number if needed."""
+    names = {l.name for l in existing_layers}
+    if base not in names:
+        return base
+    i = 2
+    while f"{base} ({i})" in names:
+        i += 1
+    return f"{base} ({i})"
 
 
 class ImageLayer:
@@ -84,6 +106,7 @@ class LayerStack(QObject):
         self.image_layer = None
         self.roi_layers = []
         self._color_index = 0
+        self._global_opacity_factor = 1.0
 
     def set_image(self, layer):
         self.image_layer = layer
@@ -144,3 +167,17 @@ class LayerStack(QObject):
         """Insert ROI at specific position."""
         self.roi_layers.insert(index, roi)
         self.changed.emit()
+
+
+@dataclass
+class MontageDocument:
+    """Represents a single montage with its image, ROIs, and settings."""
+    name: str
+    image_layer: ImageLayer
+    roi_layers: list = field(default_factory=list)
+    adjustments: dict = field(default_factory=lambda: {
+        'brightness': 0.0, 'contrast': 1.0, 'exposure': 0.0, 'gamma': 1.0,
+    })
+    color_index: int = 0
+    downsample_factor: int = 1
+    original_shape: tuple = None

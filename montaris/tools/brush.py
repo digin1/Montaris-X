@@ -2,6 +2,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QPointF
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
+from montaris.core.multi_undo import CompoundUndoCommand
 
 
 class BrushTool(BaseTool):
@@ -15,6 +16,7 @@ class BrushTool(BaseTool):
         self._last_pos = None
         self._snapshot = None
         self._canvas = None
+        self._other_snapshots = {}  # id(layer) -> (layer, snapshot)
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not hasattr(layer, 'mask'):
@@ -23,6 +25,14 @@ class BrushTool(BaseTool):
         self._last_pos = pos
         self._canvas = canvas
         self._snapshot = layer.mask.copy()
+
+        # Snapshot other layers if auto-overlap is on (C.7)
+        self._other_snapshots.clear()
+        if self.app._auto_overlap:
+            for other in self.app.layer_stack.roi_layers:
+                if other is not layer and hasattr(other, 'mask'):
+                    self._other_snapshots[id(other)] = (other, other.mask.copy())
+
         self._paint(pos, layer)
         canvas.refresh_active_overlay(layer)
 
@@ -37,6 +47,9 @@ class BrushTool(BaseTool):
         if not self._painting or layer is None:
             return
         self._painting = False
+
+        commands = []
+        # Main layer undo
         if self._snapshot is not None:
             diff = self._snapshot != layer.mask
             if diff.any():
@@ -48,9 +61,38 @@ class BrushTool(BaseTool):
                     self._snapshot[y1:y2, x1:x2],
                     layer.mask[y1:y2, x1:x2],
                 )
-                self.app.undo_stack.push(cmd)
+                commands.append(cmd)
+
+        # Auto-overlap: zero other layers where we painted (C.7)
+        if self.app._auto_overlap and self._snapshot is not None:
+            painted = layer.mask > 0
+            for lid, (other, snap) in self._other_snapshots.items():
+                overlap = painted & (other.mask > 0)
+                if overlap.any():
+                    other.mask[overlap] = 0
+                    diff = snap != other.mask
+                    if diff.any():
+                        ys, xs = np.where(diff)
+                        y1, y2 = ys.min(), ys.max() + 1
+                        x1, x2 = xs.min(), xs.max() + 1
+                        cmd = UndoCommand(
+                            other, (y1, y2, x1, x2),
+                            snap[y1:y2, x1:x2],
+                            other.mask[y1:y2, x1:x2],
+                        )
+                        commands.append(cmd)
+            if len(commands) > 1:
+                canvas.refresh_overlays()
+
+        if commands:
+            if len(commands) == 1:
+                self.app.undo_stack.push(commands[0])
+            else:
+                self.app.undo_stack.push(CompoundUndoCommand(commands))
+
         self._snapshot = None
         self._canvas = None
+        self._other_snapshots.clear()
 
     def _effective_size(self):
         if self._canvas is not None:
