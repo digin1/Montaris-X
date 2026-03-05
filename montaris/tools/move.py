@@ -1,5 +1,7 @@
 import numpy as np
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import QGraphicsPixmapItem
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
@@ -16,6 +18,10 @@ class MoveTool(BaseTool):
         self._snapshots = {}  # id(layer) -> (layer, snapshot)
         self._target_layers = []
         self._component_mask = None  # If moving a single component
+        self._preview_items = []
+        self._preview_rgba_buffers = []
+        self._hidden_layers = []
+        self._preview_offsets = []  # (bx1, by1) per preview item
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -49,6 +55,7 @@ class MoveTool(BaseTool):
                         self._moving = True
                         self._start_pos = pos
                         self._snapshots = {id(layer): (layer, layer.mask.copy())}
+                        self._create_previews(canvas)
                         return
 
         # Whole-layer move
@@ -64,6 +71,7 @@ class MoveTool(BaseTool):
         self._snapshots = {
             id(l): (l, l.mask.copy()) for l in self._target_layers
         }
+        self._create_previews(canvas)
 
     def on_move(self, pos, layer, canvas):
         if not self._moving:
@@ -71,14 +79,28 @@ class MoveTool(BaseTool):
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
 
+        # Move preview items — instant, no numpy
+        for i, item in enumerate(self._preview_items):
+            bx1, by1 = self._preview_offsets[i]
+            item.setOffset(bx1 + dx, by1 + dy)
+
+    def on_release(self, pos, layer, canvas):
+        if not self._moving:
+            return
+        self._moving = False
+
+        # Remove previews and restore visibility
+        self._remove_previews(canvas)
+
+        # Rasterize the final position
+        dx = pos.x() - self._start_pos.x()
+        dy = pos.y() - self._start_pos.y()
+
         if self._component_mask is not None:
-            # Component-aware move: shift only component pixels
             l = self._target_layers[0]
             snap = self._snapshots[id(l)][1]
             l.mask[:] = snap.copy()
-            # Zero component at original position
             l.mask[self._component_mask] = 0
-            # Place at new position
             ys, xs = np.where(self._component_mask)
             new_ys = ys + int(round(dy))
             new_xs = xs + int(round(dx))
@@ -89,14 +111,6 @@ class MoveTool(BaseTool):
             M = make_translation_matrix(dx, dy)
             for lid, (l, snap) in self._snapshots.items():
                 l.mask[:] = apply_affine_to_mask(snap, M, l.mask.shape)
-
-        canvas.refresh_overlays()
-        canvas._update_selection_highlights()
-
-    def on_release(self, pos, layer, canvas):
-        if not self._moving:
-            return
-        self._moving = False
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
@@ -122,6 +136,64 @@ class MoveTool(BaseTool):
         self._target_layers.clear()
         self._start_pos = None
         self._component_mask = None
+
+        canvas.refresh_overlays()
+
+    def _create_previews(self, canvas):
+        """Create preview pixmaps for live move preview."""
+        self._remove_previews(canvas)
+        self._preview_rgba_buffers = []
+        self._preview_offsets = []
+        self._hidden_layers = []
+        scene = canvas.scene()
+
+        for lid, (l, snap) in self._snapshots.items():
+            source = self._component_mask if self._component_mask is not None else snap
+            bbox = get_mask_bbox(source.astype(np.uint8) if source.dtype == bool else source)
+            if bbox is None:
+                continue
+            by1, by2, bx1, bx2 = bbox
+
+            # Hide ROI from combined overlay
+            was_visible = l.visible
+            l.visible = False
+            self._hidden_layers.append((l, was_visible))
+
+            # Build tight RGBA
+            bh, bw = by2 - by1, bx2 - bx1
+            r, g, b = l.color
+            rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+            if self._component_mask is not None:
+                mask_crop = self._component_mask[by1:by2, bx1:bx2]
+            else:
+                mask_crop = snap[by1:by2, bx1:bx2]
+            rgba[mask_crop > 0] = [r, g, b, l.opacity]
+            rgba = np.ascontiguousarray(rgba)
+            self._preview_rgba_buffers.append(rgba)
+
+            qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg)
+            item = QGraphicsPixmapItem(pixmap)
+            item.setOffset(bx1, by1)
+            item.setZValue(900)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(item)
+            self._preview_items.append(item)
+            self._preview_offsets.append((bx1, by1))
+
+        canvas.refresh_overlays()
+
+    def _remove_previews(self, canvas):
+        """Remove preview items and restore visibility."""
+        scene = canvas.scene()
+        for item in self._preview_items:
+            scene.removeItem(item)
+        self._preview_items.clear()
+        for l, was_visible in self._hidden_layers:
+            l.visible = was_visible
+        self._hidden_layers = []
+        self._preview_rgba_buffers = []
+        self._preview_offsets = []
 
     def cursor(self):
         return Qt.SizeAllCursor
