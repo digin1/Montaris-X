@@ -88,24 +88,28 @@ class MontarisApp(QMainWindow):
         # Layer panel
         self.layer_panel = LayerPanel(self.layer_stack, self)
         layer_dock = QDockWidget("Layers", self)
+        layer_dock.setObjectName("LayersDock")
         layer_dock.setWidget(self.layer_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, layer_dock)
 
         # Tool panel
         self.tool_panel = ToolPanel(self, self)
         tool_dock = QDockWidget("Tools", self)
+        tool_dock.setObjectName("ToolsDock")
         tool_dock.setWidget(self.tool_panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, tool_dock)
 
         # Properties panel
         self.properties_panel = PropertiesPanel(self, self)
         props_dock = QDockWidget("Properties", self)
+        props_dock.setObjectName("PropertiesDock")
         props_dock.setWidget(self.properties_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, props_dock)
 
         # Display panel (Phase 2)
         self.display_panel = DisplayPanel(self)
         display_dock = QDockWidget("Display", self)
+        display_dock.setObjectName("DisplayDock")
         display_dock.setWidget(self.display_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, display_dock)
         self.display_panel.mode_changed.connect(self._on_display_mode_changed)
@@ -115,6 +119,7 @@ class MontarisApp(QMainWindow):
         # Adjustments panel (Phase 2)
         self.adjustments_panel = AdjustmentsPanel(self)
         adj_dock = QDockWidget("Adjustments", self)
+        adj_dock.setObjectName("AdjustmentsDock")
         adj_dock.setWidget(self.adjustments_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, adj_dock)
         self.adjustments_panel.adjustments_changed.connect(self._on_adjustments_changed)
@@ -123,6 +128,7 @@ class MontarisApp(QMainWindow):
         # Minimap (Phase 6)
         self.minimap = MiniMap(self)
         minimap_dock = QDockWidget("Mini Map", self)
+        minimap_dock.setObjectName("MiniMapDock")
         minimap_dock.setWidget(self.minimap)
         self.addDockWidget(Qt.LeftDockWidgetArea, minimap_dock)
         self.minimap.pan_requested.connect(self._on_minimap_pan)
@@ -131,6 +137,7 @@ class MontarisApp(QMainWindow):
         # Performance monitor (Phase 6)
         self.perf_monitor = PerfMonitor(self)
         perf_dock = QDockWidget("Performance", self)
+        perf_dock.setObjectName("PerformanceDock")
         perf_dock.setWidget(self.perf_monitor)
         self.addDockWidget(Qt.LeftDockWidgetArea, perf_dock)
         perf_dock.setVisible(False)
@@ -139,6 +146,7 @@ class MontarisApp(QMainWindow):
         # Debug console (Phase 6)
         self.debug_console = DebugConsole(self, self)
         debug_dock = QDockWidget("Debug Console", self)
+        debug_dock.setObjectName("DebugConsoleDock")
         debug_dock.setWidget(self.debug_console)
         self.addDockWidget(Qt.BottomDockWidgetArea, debug_dock)
         debug_dock.setVisible(False)
@@ -370,6 +378,7 @@ class MontarisApp(QMainWindow):
     def _setup_toolbar(self):
         """Add main toolbar with brush size and opacity controls (G.19, G.20)."""
         toolbar = QToolBar("Main Toolbar", self)
+        toolbar.setObjectName("MainToolbar")
         toolbar.setMovable(True)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
