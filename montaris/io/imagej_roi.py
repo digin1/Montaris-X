@@ -285,6 +285,9 @@ def _fill_polygon(mask, x_coords, y_coords):
     min_x = max(0, int(x_coords.min()))
     max_x = min(w - 1, int(x_coords.max()))
 
+    if min_y > max_y or min_x > max_x:
+        return  # polygon entirely outside mask
+
     yy, xx = np.mgrid[min_y:max_y + 1, min_x:max_x + 1]
     points_x = xx.ravel()
     points_y = yy.ravel()

@@ -892,8 +892,10 @@ class MontarisApp(QMainWindow):
             from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
             from PIL import Image
             import io as _io
-            h, w = self.layer_stack.image_layer.shape[:2]
-            count = 0
+            img_h, img_w = self.layer_stack.image_layer.shape[:2]
+            # First pass: scan .roi files to find max extent
+            max_w, max_h = img_w, img_h
+            roi_entries = []
             with zipfile.ZipFile(path, 'r') as zf:
                 for name in zf.namelist():
                     lower = name.lower()
@@ -901,25 +903,55 @@ class MontarisApp(QMainWindow):
                     base = os.path.splitext(os.path.basename(name))[0]
                     if lower.endswith('.roi'):
                         roi_dict = read_imagej_roi(data)
-                        mask = imagej_roi_to_mask(roi_dict, w, h)
-                        roi = ROILayer(base, w, h)
-                        roi.mask = mask
-                        self.layer_stack.add_roi(roi)
-                        count += 1
+                        max_w = max(max_w, roi_dict['right'])
+                        max_h = max(max_h, roi_dict['bottom'])
+                        if roi_dict.get('x_coords') is not None:
+                            max_w = max(max_w, int(roi_dict['x_coords'].max()) + 1)
+                            max_h = max(max_h, int(roi_dict['y_coords'].max()) + 1)
+                        roi_entries.append(('roi', base, roi_dict))
                     elif lower.endswith('.png'):
-                        img = Image.open(_io.BytesIO(data)).convert('L')
+                        roi_entries.append(('png', base, data))
+            # Scale ROI coordinates to fit image if needed
+            w, h = img_w, img_h
+            need_scale = max_w > img_w or max_h > img_h
+            if need_scale:
+                scale_x = img_w / max_w
+                scale_y = img_h / max_h
+            count = 0
+            for entry_type, base, payload in roi_entries:
+                if entry_type == 'roi':
+                    roi_dict = payload
+                    if need_scale:
+                        roi_dict = dict(roi_dict)
+                        roi_dict['top'] = int(roi_dict['top'] * scale_y)
+                        roi_dict['bottom'] = int(roi_dict['bottom'] * scale_y)
+                        roi_dict['left'] = int(roi_dict['left'] * scale_x)
+                        roi_dict['right'] = int(roi_dict['right'] * scale_x)
+                        if roi_dict.get('x_coords') is not None:
+                            roi_dict['x_coords'] = (roi_dict['x_coords'] * scale_x).astype(np.int32)
+                            roi_dict['y_coords'] = (roi_dict['y_coords'] * scale_y).astype(np.int32)
+                    mask = imagej_roi_to_mask(roi_dict, w, h)
+                    roi = ROILayer(base, w, h)
+                    roi.mask = mask
+                    self.layer_stack.add_roi(roi)
+                    count += 1
+                elif entry_type == 'png':
+                    img = Image.open(_io.BytesIO(payload)).convert('L')
+                    arr = np.array(img)
+                    if arr.shape != (h, w):
+                        img = img.resize((w, h), Image.NEAREST)
                         arr = np.array(img)
-                        if arr.shape != (h, w):
-                            img = img.resize((w, h), Image.NEAREST)
-                            arr = np.array(img)
-                        mask = (arr > 0).astype(np.uint8) * 255
-                        roi = ROILayer(base, w, h)
-                        roi.mask = mask
-                        self.layer_stack.add_roi(roi)
-                        count += 1
+                    mask = (arr > 0).astype(np.uint8) * 255
+                    roi = ROILayer(base, w, h)
+                    roi.mask = mask
+                    self.layer_stack.add_roi(roi)
+                    count += 1
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
-            self.toast.show(f"Imported {count} ROI(s) from ZIP", "success")
+            msg = f"Imported {count} ROI(s) from ZIP"
+            if need_scale:
+                msg += f" (scaled from {max_w}\u00d7{max_h} to {img_w}\u00d7{img_h})"
+            self.toast.show(msg, "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import ZIP:\n{e}")
 
