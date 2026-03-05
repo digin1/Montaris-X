@@ -621,17 +621,9 @@ def numpy_to_qimage(array):
 
 def _compute_edge(mask):
     """Return boolean edge array for mask > 0 pixels."""
+    from scipy.ndimage import binary_erosion
     filled = mask > 0
-    edge = np.zeros_like(filled)
-    edge[0, :] |= filled[0, :]
-    edge[1:, :] |= filled[1:, :] & ~filled[:-1, :]
-    edge[-1, :] |= filled[-1, :]
-    edge[:-1, :] |= filled[:-1, :] & ~filled[1:, :]
-    edge[:, 0] |= filled[:, 0]
-    edge[:, 1:] |= filled[:, 1:] & ~filled[:, :-1]
-    edge[:, -1] |= filled[:, -1]
-    edge[:, :-1] |= filled[:, :-1] & ~filled[:, 1:]
-    return edge
+    return filled ^ binary_erosion(filled)
 
 
 def _composite_roi(combined, mask, color, opacity, fill_mode="solid"):

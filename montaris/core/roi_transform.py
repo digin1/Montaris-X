@@ -79,7 +79,12 @@ def apply_affine_inplace(dest, snap, matrix):
 
 
 def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):
-    """Core bbox-optimized affine transform (writes into result)."""
+    """Core bbox-optimized affine transform (writes into result).
+
+    Uses scipy.ndimage.affine_transform for C-accelerated interpolation.
+    """
+    from scipy.ndimage import affine_transform as scipy_affine
+
     if bbox is None:
         bbox = get_mask_bbox(mask)
     if bbox is None:
@@ -87,6 +92,7 @@ def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):
 
     sy1, sy2, sx1, sx2 = bbox
 
+    # Build 3x3 forward transform matrix
     M = np.array([
         [matrix[0, 0], matrix[0, 1], matrix[0, 2]],
         [matrix[1, 0], matrix[1, 1], matrix[1, 2]],
@@ -112,21 +118,32 @@ def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):
     if dx2 <= dx1 or dy2 <= dy1:
         return
 
-    # Create coordinate grid only for the output region
+    # scipy affine_transform uses (row, col) convention.
+    # M_inv maps output (x, y) -> input (x, y).  Convert to (row, col):
+    #   out_row = dy1 + r, out_col = dx1 + c
+    #   M_inv maps (out_col, out_row, 1) -> (in_col, in_row)
+    # scipy wants: input_coord = matrix @ output_coord + offset
+    # where output_coord is (row, col) within the sub-region.
+    # input_row = M_inv[1,0]*(dx1+c) + M_inv[1,1]*(dy1+r) + M_inv[1,2]
+    # input_col = M_inv[0,0]*(dx1+c) + M_inv[0,1]*(dy1+r) + M_inv[0,2]
+    scipy_matrix = np.array([
+        [M_inv[1, 1], M_inv[1, 0]],
+        [M_inv[0, 1], M_inv[0, 0]],
+    ], dtype=np.float64)
+    scipy_offset = np.array([
+        M_inv[1, 0] * dx1 + M_inv[1, 1] * dy1 + M_inv[1, 2],
+        M_inv[0, 0] * dx1 + M_inv[0, 1] * dy1 + M_inv[0, 2],
+    ], dtype=np.float64)
+
     rh, rw = dy2 - dy1, dx2 - dx1
-    yy, xx = np.mgrid[dy1:dy2, dx1:dx2]
-    coords = np.stack([xx.ravel(), yy.ravel(), np.ones(rh * rw)], axis=0)
-
-    # Inverse transform to source coordinates
-    src = M_inv @ coords
-    src_xi = np.round(src[0]).astype(np.int64).reshape(rh, rw)
-    src_yi = np.round(src[1]).astype(np.int64).reshape(rh, rw)
-
-    # Valid mask
-    h_in, w_in = mask.shape
-    valid = (src_xi >= 0) & (src_xi < w_in) & (src_yi >= 0) & (src_yi < h_in)
-
-    result[dy1:dy2, dx1:dx2][valid] = mask[src_yi[valid], src_xi[valid]]
+    region = scipy_affine(
+        mask, scipy_matrix, offset=scipy_offset,
+        output_shape=(rh, rw), order=0, mode='constant', cval=0,
+    )
+    # Merge into result (don't overwrite existing non-zero pixels with zero)
+    out_region = result[dy1:dy2, dx1:dx2]
+    mask_nz = region > 0
+    out_region[mask_nz] = region[mask_nz]
 
 
 def make_scale_matrix(sx, sy, cx=0, cy=0):

@@ -5,7 +5,11 @@ from scipy import ndimage
 
 
 def get_component_at(mask, x, y):
-    """Return boolean mask of the connected component at (x, y)."""
+    """Return boolean mask of the connected component at (x, y).
+
+    Uses binary_propagation from the seed point — only visits the target
+    component, not the entire mask.
+    """
     h, w = mask.shape
     ix, iy = int(x), int(y)
     if ix < 0 or ix >= w or iy < 0 or iy >= h:
@@ -13,11 +17,9 @@ def get_component_at(mask, x, y):
     if mask[iy, ix] == 0:
         return None
 
-    labels, _ = ndimage.label(mask > 0)
-    target = labels[iy, ix]
-    if target == 0:
-        return None
-    return labels == target
+    seed = np.zeros((h, w), dtype=bool)
+    seed[iy, ix] = True
+    return ndimage.binary_propagation(seed, mask=(mask > 0))
 
 
 def label_connected_components(mask):
