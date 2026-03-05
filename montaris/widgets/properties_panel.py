@@ -80,7 +80,7 @@ class PropertiesPanel(QWidget):
     def _on_opacity_changed(self, value):
         if self._layer and hasattr(self._layer, 'opacity'):
             self._layer.opacity = value
-            self.app.canvas.refresh_overlays()
+            self.app.canvas.refresh_overlays_lut_only()
 
     def _on_fill_mode_changed(self, text):
         if self._layer and hasattr(self._layer, 'fill_mode'):

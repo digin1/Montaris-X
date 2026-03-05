@@ -183,14 +183,19 @@ class TransformTool(BaseTool):
 
         self._current_matrix = M
 
-        # Apply transform to preview items only (GPU-accelerated, instant)
-        qt_transform = QTransform(
+        # Apply transform to preview items (instant, no numpy)
+        # M is in scene coordinates. Preview items are positioned at (bx1, by1).
+        # QTransform for item = translate(-bx,-by) → apply M → translate(bx,by)
+        # But since item.pos() already places it, we use scene-level transform:
+        # T = translate(-pos) * M_scene * translate(pos) — but simpler via
+        # QTransform which operates in parent (scene) coords when set on item.
+        qt_t = QTransform(
             M[0, 0], M[1, 0],
             M[0, 1], M[1, 1],
             M[0, 2], M[1, 2],
         )
         for item in self._preview_items:
-            item.setTransform(qt_transform)
+            item.setTransform(qt_t)
 
     def on_release(self, pos, layer, canvas):
         if not self._dragging or not self._snapshots:
@@ -287,39 +292,61 @@ class TransformTool(BaseTool):
         return None
 
     def _create_previews(self, canvas):
-        """Create lightweight QGraphicsPixmapItems for live preview.
+        """Create QGraphicsPixmapItems for live preview from tight bbox.
 
-        Erases the ROI content from the combined overlay so only the
-        preview items show the transformed shape.
+        Hides source ROIs via visibility flag instead of zeroing masks.
+        Does NOT call refresh_overlays — just hides the overlay contribution.
         """
         self._remove_previews(canvas)
+        self._preview_rgba_buffers = []  # prevent GC of numpy backing
+        self._hidden_layers = []
         scene = canvas.scene()
 
         for lid, (l, snap) in self._snapshots.items():
-            # Erase this layer's pixels from the mask during drag
-            l.mask[:] = 0
+            # Hide this ROI from the combined overlay
+            was_visible = l.visible
+            l.visible = False
+            self._hidden_layers.append((l, was_visible))
 
-            # Create RGBA pixmap from snapshot
-            from montaris.canvas import _mask_to_rgba
-            fill_mode = getattr(l, 'fill_mode', 'solid')
-            rgba = _mask_to_rgba(snap, l.color, l.opacity, fill_mode)
-            h, w = rgba.shape[:2]
-            qimg = QImage(rgba.data, w, h, w * 4, QImage.Format_RGBA8888)
+            # Compute tight bounding box of painted pixels
+            from montaris.core.roi_transform import get_mask_bbox
+            bbox = get_mask_bbox(snap)
+            if bbox is None:
+                continue
+            by1, by2, bx1, bx2 = bbox
+
+            # Extract tight RGBA region
+            r, g, b = l.color
+            bh, bw = by2 - by1, bx2 - bx1
+            rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+            mask_crop = snap[by1:by2, bx1:bx2]
+            rgba[mask_crop > 0] = [r, g, b, l.opacity]
+            rgba = np.ascontiguousarray(rgba)
+            self._preview_rgba_buffers.append(rgba)
+
+            qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
             pixmap = QPixmap.fromImage(qimg)
             item = QGraphicsPixmapItem(pixmap)
+            item.setOffset(bx1, by1)  # position within scene coords
             item.setZValue(900)
+            item.setAcceptedMouseButtons(Qt.NoButton)
             scene.addItem(item)
             self._preview_items.append(item)
 
-        # Refresh overlay to show erased state
+        # Quick overlay refresh — just update the combined item with hidden ROIs
         canvas.refresh_overlays()
 
     def _remove_previews(self, canvas):
-        """Remove preview pixmap items from scene."""
+        """Remove preview pixmap items and restore ROI visibility."""
         scene = canvas.scene()
         for item in self._preview_items:
             scene.removeItem(item)
         self._preview_items.clear()
+        # Restore visibility
+        for l, was_visible in getattr(self, '_hidden_layers', []):
+            l.visible = was_visible
+        self._hidden_layers = []
+        self._preview_rgba_buffers = []
 
     def _show_handles(self, bbox, canvas):
         self._clear_handles(canvas)
@@ -337,28 +364,35 @@ class TransformTool(BaseTool):
         self._bbox_item.setZValue(999)
 
         handles = compute_handles(bbox)
-        handle_pen = QPen(QColor(255, 255, 255), 1)
+        handle_pen = QPen(QColor(255, 255, 255), 2)
         handle_pen.setCosmetic(True)
         handle_brush = QBrush(QColor(0, 180, 255))
+        rotate_pen = QPen(QColor(0, 0, 0), 2)
+        rotate_pen.setCosmetic(True)
         rotate_brush = QBrush(QColor(255, 180, 0))
 
         for h in handles:
             if h.handle_type == 'rotate':
-                # Circle handle for rotation
-                r = 5
+                # Circle handle for rotation — larger and more visible
+                r = 7
                 item = scene.addEllipse(
                     QRectF(h.x - r, h.y - r, r * 2, r * 2),
-                    handle_pen, rotate_brush,
+                    rotate_pen, rotate_brush,
                 )
-                item.setZValue(1000)
+                item.setZValue(1001)
                 self._handle_items.append(item)
                 # Line connecting rotate handle to bbox top center
                 cx = (x1 + x2) / 2
-                line_pen = QPen(QColor(255, 180, 0), 1)
+                line_pen = QPen(QColor(255, 180, 0), 1.5)
                 line_pen.setCosmetic(True)
                 line_item = scene.addLine(QLineF(cx, y1, cx, h.y + r), line_pen)
-                line_item.setZValue(999)
+                line_item.setZValue(1000)
                 self._handle_items.append(line_item)
+                # Expand scene rect to ensure rotate handle is visible
+                sr = scene.sceneRect()
+                if h.y - r < sr.top():
+                    sr.setTop(h.y - r - 5)
+                    scene.setSceneRect(sr)
             elif h.handle_type in ('tl', 'tr', 'bl', 'br'):
                 # 8x8 square for corner handles
                 s = 4
