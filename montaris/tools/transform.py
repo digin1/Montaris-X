@@ -213,6 +213,7 @@ class TransformTool(BaseTool):
                 if not hasattr(l, 'mask'):
                     continue
                 apply_affine_inplace(l.mask, snap, M)
+                l.invalidate_bbox()
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():

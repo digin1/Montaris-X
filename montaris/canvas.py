@@ -63,6 +63,20 @@ class ImageCanvas(QGraphicsView):
         # Selection pulse timer (G.23)
         self._pulse_timer = None
 
+        # Prevent re-entrant refresh
+        self._refreshing = False
+
+        # Rasterization progress bar (bottom of canvas)
+        from PySide6.QtWidgets import QProgressBar
+        self._progress_bar = QProgressBar(self)
+        self._progress_bar.setFixedHeight(3)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setStyleSheet(
+            "QProgressBar { background: transparent; border: none; }"
+            "QProgressBar::chunk { background: #00b4ff; }"
+        )
+        self._progress_bar.hide()
+
     # ------------------------------------------------------------------
     # Tool / layer management
     # ------------------------------------------------------------------
@@ -103,7 +117,6 @@ class ImageCanvas(QGraphicsView):
             scene.removeItem(item)
         self._selection_highlight_items.clear()
 
-        from montaris.core.roi_transform import get_mask_bbox
         pen = QPen(QColor(255, 255, 0, 200), 2)
         pen.setCosmetic(True)
         pen.setStyle(Qt.DashLine)
@@ -111,7 +124,7 @@ class ImageCanvas(QGraphicsView):
         for layer in self._selection.layers:
             if not hasattr(layer, 'mask'):
                 continue
-            bbox = get_mask_bbox(layer.mask)
+            bbox = layer.get_bbox()  # cached
             if bbox is None:
                 continue
             y1, y2, x1, x2 = bbox
@@ -171,7 +184,21 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     def refresh_overlays(self):
-        """Rebuild all ROI pixmap items from current mask/color state."""
+        """Rebuild all ROI pixmap items from current mask/color state.
+
+        Shows a progress bar for large batches and processes events
+        to keep the UI responsive during rasterization.
+        """
+        if self._refreshing:
+            return  # prevent re-entrant calls from signal cascades
+        self._refreshing = True
+        try:
+            self._do_refresh_overlays()
+        finally:
+            self._refreshing = False
+
+    def _do_refresh_overlays(self):
+        """Internal: actual rebuild of all ROI pixmap items."""
         if self.layer_stack.image_layer is None:
             for item in self._roi_items.values():
                 self._scene.removeItem(item)
@@ -179,15 +206,32 @@ class ImageCanvas(QGraphicsView):
             return
 
         gof = self.layer_stack._global_opacity_factor
-        current_ids = {id(r) for r in self.layer_stack.roi_layers}
+        rois = self.layer_stack.roi_layers
+        current_ids = {id(r) for r in rois}
+        n = len(rois)
 
         # Remove stale items (deleted ROIs)
         for rid in list(self._roi_items.keys()):
             if rid not in current_ids:
                 self._scene.removeItem(self._roi_items.pop(rid))
 
-        for i, roi in enumerate(self.layer_stack.roi_layers):
+        # Show progress for large batches, process events to stay responsive
+        show_progress = n > 5
+        if show_progress:
+            from PySide6.QtWidgets import QApplication
+            self._progress_bar.setRange(0, n)
+            self._progress_bar.setValue(0)
+            self._progress_bar.show()
+
+        for i, roi in enumerate(rois):
             self._refresh_roi_item(roi, i, gof)
+            if show_progress:
+                self._progress_bar.setValue(i + 1)
+                if (i + 1) % 10 == 0:
+                    QApplication.processEvents()
+
+        if show_progress:
+            self._progress_bar.hide()
 
     def refresh_overlays_lut_only(self):
         """Re-render all ROI pixmaps (for color/opacity changes)."""
@@ -218,8 +262,7 @@ class ImageCanvas(QGraphicsView):
         if not roi.visible:
             return
 
-        from montaris.core.roi_transform import get_mask_bbox
-        bbox = get_mask_bbox(roi.mask)
+        bbox = roi.get_bbox()  # cached
         if bbox is None:
             return
 
@@ -306,6 +349,17 @@ class ImageCanvas(QGraphicsView):
         if self._polygon_item:
             self._scene.removeItem(self._polygon_item)
             self._polygon_item = None
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep progress bar at bottom
+        w = self.viewport().width()
+        h = self.viewport().height()
+        self._progress_bar.setGeometry(0, h - 3, w, 3)
 
     # ------------------------------------------------------------------
     # Zoom helpers

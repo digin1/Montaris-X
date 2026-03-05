@@ -11,10 +11,12 @@ class UndoCommand:
     def undo(self):
         y1, y2, x1, x2 = self.bbox
         self.roi_layer.mask[y1:y2, x1:x2] = self.old_data
+        self.roi_layer.invalidate_bbox()
 
     def redo(self):
         y1, y2, x1, x2 = self.bbox
         self.roi_layer.mask[y1:y2, x1:x2] = self.new_data
+        self.roi_layer.invalidate_bbox()
 
 
 class UndoStack:

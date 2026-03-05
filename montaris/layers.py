@@ -71,6 +71,15 @@ class ROILayer:
     def shape(self):
         return self.mask.shape
 
+    def invalidate_bbox(self):
+        """No-op for compatibility. Bbox is always computed fresh."""
+        pass
+
+    def get_bbox(self):
+        """Compute bounding box of non-zero mask pixels."""
+        from montaris.core.roi_transform import get_mask_bbox
+        return get_mask_bbox(self.mask)
+
     def mark_dirty(self, rect):
         """Mark a rectangular region as dirty.
 

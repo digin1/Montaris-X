@@ -108,10 +108,12 @@ class MoveTool(BaseTool):
             h, w = l.mask.shape
             valid = (new_ys >= 0) & (new_ys < h) & (new_xs >= 0) & (new_xs < w)
             l.mask[new_ys[valid], new_xs[valid]] = snap[ys[valid], xs[valid]]
+            l.invalidate_bbox()
         else:
             M = make_translation_matrix(dx, dy)
             for lid, (l, snap) in self._snapshots.items():
                 l.mask[:] = apply_affine_to_mask(snap, M, l.mask.shape)
+                l.invalidate_bbox()
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():

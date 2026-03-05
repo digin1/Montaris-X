@@ -1112,14 +1112,12 @@ class MontarisApp(QMainWindow):
         cmd = self.undo_stack.undo()
         if cmd:
             self.canvas.refresh_overlays()
-            self.canvas._update_selection_highlights()
             self._auto_select_roi_from_command(cmd)
 
     def redo(self):
         cmd = self.undo_stack.redo()
         if cmd:
             self.canvas.refresh_overlays()
-            self.canvas._update_selection_highlights()
             self._auto_select_roi_from_command(cmd)
 
     def _auto_select_roi_from_command(self, cmd):
