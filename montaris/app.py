@@ -1027,11 +1027,24 @@ class MontarisApp(QMainWindow):
             from PIL import Image
             import io as _io
             img_h, img_w = self.layer_stack.image_layer.shape[:2]
+
+            # Show progress for scanning phase
+            progress = QProgressDialog("Reading ZIP...", "Cancel", 0, 0, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            QApplication.processEvents()
+
             # First pass: scan .roi files to find max extent
             max_w, max_h = img_w, img_h
             roi_entries = []
             with zipfile.ZipFile(path, 'r') as zf:
-                for name in zf.namelist():
+                names = zf.namelist()
+                progress.setMaximum(len(names))
+                for idx, name in enumerate(names):
+                    if progress.wasCanceled():
+                        progress.close()
+                        return
                     lower = name.lower()
                     data = zf.read(name)
                     base = os.path.splitext(os.path.basename(name))[0]
@@ -1050,6 +1063,7 @@ class MontarisApp(QMainWindow):
                         roi_entries.append(('roi', base, roi_dict))
                     elif lower.endswith('.png'):
                         roi_entries.append(('png', base, data))
+                    progress.setValue(idx + 1)
             # Scale ROI coordinates to fit image if needed
             w, h = img_w, img_h
             need_scale = max_w > img_w or max_h > img_h
@@ -1058,9 +1072,8 @@ class MontarisApp(QMainWindow):
                 scale_y = img_h / max_h
             count = 0
             total = len(roi_entries)
-            progress = QProgressDialog(f"Importing {total} ROI(s)...", "Cancel", 0, total, self)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
+            progress.setLabelText(f"Importing {total} ROI(s)...")
+            progress.setMaximum(total)
             progress.setValue(0)
             QApplication.processEvents()
             for i, (entry_type, base, payload) in enumerate(roi_entries):
