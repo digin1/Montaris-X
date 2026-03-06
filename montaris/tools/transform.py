@@ -251,6 +251,8 @@ class TransformTool(BaseTool):
         self._active_handle = None
         self._start_pos = None
         self._current_matrix = None
+        for item in self._preview_items:
+            item.resetTransform()
         self._preview_items.clear()
         self._hidden_layers = []
 
