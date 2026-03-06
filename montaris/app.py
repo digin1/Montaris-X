@@ -225,6 +225,7 @@ class MontarisApp(QMainWindow):
         self.tool_panel.import_roi_zip_requested.connect(self.import_roi_zip)
         self.tool_panel.load_instructions_requested.connect(self.load_instructions_file)
         self.tool_panel.view_instructions_requested.connect(self._view_instructions)
+        self.canvas.viewport_changed.connect(self._update_minimap_viewport)
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
         self.layer_panel.visibility_changed.connect(self.canvas.refresh_overlays)
         self.layer_panel.roi_added.connect(self._on_roi_added)
@@ -613,6 +614,11 @@ class MontarisApp(QMainWindow):
     def _on_minimap_pan(self, scene_x, scene_y):
         self.canvas.centerOn(scene_x, scene_y)
 
+    def _update_minimap_viewport(self):
+        viewport_rect = self.canvas.mapToScene(self.canvas.viewport().rect()).boundingRect()
+        scene_rect = self.canvas.sceneRect()
+        self.minimap.update_viewport(viewport_rect, scene_rect)
+
     # -- View transforms (Phase 2D) --
 
     def flip_horizontal(self):
@@ -702,6 +708,7 @@ class MontarisApp(QMainWindow):
                 self.layer_panel.refresh()
                 self.undo_stack.clear()
                 self.minimap.set_image(data)
+                self._update_minimap_viewport()
                 self.adjustments_panel.set_image_data(data)
 
                 # Create montage document (A.10)

@@ -16,6 +16,7 @@ from montaris.core.selection import SelectionModel
 
 class ImageCanvas(QGraphicsView):
     cursor_moved = Signal(int, int, str)
+    viewport_changed = Signal()
 
     def __init__(self, layer_stack, parent=None):
         super().__init__(parent)
@@ -474,6 +475,11 @@ class ImageCanvas(QGraphicsView):
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
+        self.viewport_changed.emit()
+
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self.viewport_changed.emit()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space:
