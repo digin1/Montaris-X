@@ -135,10 +135,18 @@ class MoveTool(BaseTool):
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
 
-        # Move preview items — instant, no numpy
-        for i, item in enumerate(self._preview_items):
-            bx1, by1 = self._preview_offsets[i]
-            item.setOffset(bx1 + dx, by1 + dy)
+        # Move preview items
+        if self._component_mask is not None:
+            # Component previews: temporary items, use setOffset
+            for i, item in enumerate(self._preview_items):
+                bx1, by1 = self._preview_offsets[i]
+                item.setOffset(bx1 + dx, by1 + dy)
+        else:
+            # Whole-layer previews: reuse existing ROI items which may have
+            # LOD scaling (setScale + transformOriginPoint). Use setPos so
+            # the transform origin moves with the item.
+            for item in self._preview_items:
+                item.setPos(dx, dy)
 
         # Move bbox indicator
         if self._bbox_item and self._component_bbox:
@@ -300,7 +308,7 @@ class MoveTool(BaseTool):
     def _create_previews(self, canvas):
         """Use existing ROI pixmap items as live preview (zero scene changes)."""
         for item in self._preview_items:
-            item.setOffset(self._preview_offsets[self._preview_items.index(item)] if self._preview_offsets else item.offset())
+            item.setPos(0, 0)
         self._preview_items.clear()
         self._preview_offsets = []
         self._hidden_layers = []
@@ -318,10 +326,7 @@ class MoveTool(BaseTool):
         for lid, (l, snap_data, sb) in self._snapshots.items():
             rid = id(l)
             if rid in canvas._roi_items:
-                item = canvas._roi_items[rid]
-                self._preview_items.append(item)
-                off = item.offset()
-                self._preview_offsets.append((off.x(), off.y()))
+                self._preview_items.append(canvas._roi_items[rid])
             self._hidden_layers.append((l, True))
 
     def _create_component_previews(self, canvas):
@@ -409,11 +414,10 @@ class MoveTool(BaseTool):
             scene.removeItem(item)
         self._temp_scene_items.clear()
         self._bbox_item = None
-        # Reset non-temp preview items
-        for i, item in enumerate(self._preview_items):
-            if item.scene() and i < len(self._preview_offsets):
-                bx1, by1 = self._preview_offsets[i]
-                item.setOffset(bx1, by1)
+        # Reset non-temp preview items (whole-layer items moved via setPos)
+        for item in self._preview_items:
+            if item.scene():
+                item.setPos(0, 0)
         self._preview_items.clear()
         # Restore visibility of hidden real items
         for l, _ in self._hidden_layers:
