@@ -60,13 +60,14 @@ class TestBothFillMode:
 
 
 class TestLayerPanelFeatures:
-    def test_refresh_shows_pixel_count(self, qapp, app_with_image):
+    def test_refresh_shows_name_without_px(self, qapp, app_with_image):
         app = app_with_image
         roi = app.layer_stack.roi_layers[0]
         roi.mask[5:10, 5:10] = 255
         app.layer_panel.refresh()
         item = app.layer_panel.list_widget.item(1)
-        assert "px)" in item.text()
+        assert "px)" not in item.text()
+        assert roi.name in item.text()
 
     def test_refresh_shows_roi_count(self, qapp, app_with_image):
         app = app_with_image

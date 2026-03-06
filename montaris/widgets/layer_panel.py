@@ -225,7 +225,6 @@ class LayerPanel(QWidget):
         px_counts = []
         for i, roi in enumerate(roi_layers):
             icon = self._color_icon(roi.color)
-            # Index badge + name + pixel count (G.18, B.36)
             bbox = roi.get_bbox()
             if bbox is None:
                 px_count = 0
@@ -233,7 +232,7 @@ class LayerPanel(QWidget):
                 y1, y2, x1, x2 = bbox
                 px_count = int(np.count_nonzero(roi.mask[y1:y2, x1:x2]))
             px_counts.append(px_count)
-            display_name = f"{i + 1}. {roi.name} ({px_count:,}px)"
+            display_name = f"{i + 1}. {roi.name}"
             item = QListWidgetItem(display_name)
             item.setIcon(icon)
             item.setData(Qt.UserRole, ("roi", i))
@@ -346,13 +345,11 @@ class LayerPanel(QWidget):
                     return
                 # Inline rename (B.9): detect text change
                 raw_text = item.text()
-                # Strip index prefix and pixel count suffix for actual name
-                # Format: "1. Name (123px)"
+                # Strip index prefix for actual name
+                # Format: "1. Name"
                 name_part = raw_text
                 if ". " in name_part:
                     name_part = name_part.split(". ", 1)[1]
-                if " (" in name_part and name_part.endswith("px)"):
-                    name_part = name_part.rsplit(" (", 1)[0]
                 if name_part and name_part != roi.name:
                     # Name uniqueness (B.10)
                     validated = generate_unique_roi_name(
