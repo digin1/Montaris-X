@@ -98,34 +98,54 @@ def apply_affine_inplace(dest, snap, matrix):
         [sx1, sy2, 1], [sx2, sy2, 1],
     ], dtype=np.float64).T
     dst_corners = M3 @ corners
-    ox1 = max(0, int(np.floor(dst_corners[0].min())))
-    ox2 = min(w, int(np.ceil(dst_corners[0].max())))
-    oy1 = max(0, int(np.floor(dst_corners[1].min())))
-    oy2 = min(h, int(np.ceil(dst_corners[1].max())))
+    # Allow full transformed extent (don't clip to image bounds yet)
+    full_ox1 = int(np.floor(dst_corners[0].min()))
+    full_ox2 = int(np.ceil(dst_corners[0].max()))
+    full_oy1 = int(np.floor(dst_corners[1].min()))
+    full_oy2 = int(np.ceil(dst_corners[1].max()))
 
-    if ox2 <= ox1 or oy2 <= oy1:
+    if full_ox2 <= full_ox1 or full_oy2 <= full_oy1:
         return src_bbox, None
 
-    out_w, out_h = ox2 - ox1, oy2 - oy1
-    dst_bbox = (oy1, oy2, ox1, ox2)
+    full_w, full_h = full_ox2 - full_ox1, full_oy2 - full_oy1
 
     # Pillow inverse affine: map output pixel (ox, oy) → crop pixel (cx, cy)
     pil_data = (
         M_inv[0, 0], M_inv[0, 1],
-        M_inv[0, 0] * ox1 + M_inv[0, 1] * oy1 + M_inv[0, 2] - sx1,
+        M_inv[0, 0] * full_ox1 + M_inv[0, 1] * full_oy1 + M_inv[0, 2] - sx1,
         M_inv[1, 0], M_inv[1, 1],
-        M_inv[1, 0] * ox1 + M_inv[1, 1] * oy1 + M_inv[1, 2] - sy1,
+        M_inv[1, 0] * full_ox1 + M_inv[1, 1] * full_oy1 + M_inv[1, 2] - sy1,
     )
 
     pil_img = Image.fromarray(crop)
     result_img = pil_img.transform(
-        (out_w, out_h), Image.AFFINE, pil_data, resample=Image.NEAREST,
+        (full_w, full_h), Image.AFFINE, pil_data, resample=Image.NEAREST,
     )
     result_arr = np.asarray(result_img)
 
-    out_region = dest[oy1:oy2, ox1:ox2]
-    nz = result_arr > 0
-    out_region[nz] = result_arr[nz]
+    # Copy the portion that overlaps with dest
+    # Source region in result_arr that maps to dest bounds
+    cx1 = max(0, -full_ox1)
+    cy1 = max(0, -full_oy1)
+    cx2 = min(full_w, w - full_ox1)
+    cy2 = min(full_h, h - full_oy1)
+    dx1 = max(0, full_ox1)
+    dy1 = max(0, full_oy1)
+    dx2 = dx1 + (cx2 - cx1)
+    dy2 = dy1 + (cy2 - cy1)
+
+    if cx2 > cx1 and cy2 > cy1:
+        clipped = result_arr[cy1:cy2, cx1:cx2]
+        out_region = dest[dy1:dy2, dx1:dx2]
+        nz = clipped > 0
+        out_region[nz] = clipped[nz]
+
+    # dst_bbox covers only the in-bounds portion
+    ox1 = max(0, full_ox1)
+    ox2 = min(w, full_ox2)
+    oy1 = max(0, full_oy1)
+    oy2 = min(h, full_oy2)
+    dst_bbox = (oy1, oy2, ox1, ox2) if ox2 > ox1 and oy2 > oy1 else None
 
     return src_bbox, dst_bbox
 

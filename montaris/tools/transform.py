@@ -50,6 +50,8 @@ class TransformTool(BaseTool):
         self._preview_items = []  # references to ROI items for live preview
         self._hidden_layers = []
         self._rotation = 0.0  # cumulative rotation angle in radians
+        self._session_snapshots = {}  # persistent snapshots for entire transform session
+        self._cumulative_matrix = None  # accumulated transform from session start
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -89,15 +91,23 @@ class TransformTool(BaseTool):
             self._start_pos = pos
             self._dragging = True
             self._target_layers = self._get_target_layers(layer, canvas)
-            # Keep existing bbox — it matches the visual handles/rotation state
+            # Use session snapshots (original state) for OOB recovery;
+            # current mask state for undo diff
             self._snapshots = {
                 id(l): (l, l.mask.copy()) for l in self._target_layers
             }
+            # Session snapshot: taken once on first handle use, preserved across operations
+            for l in self._target_layers:
+                lid = id(l)
+                if lid not in self._session_snapshots:
+                    self._session_snapshots[lid] = l.mask.copy()
             self._create_previews(canvas)
             return
 
         # First click: show handles — component-aware (D.14)
         self._rotation = 0.0
+        self._session_snapshots.clear()
+        self._cumulative_matrix = None
         self._target_layers = self._get_target_layers(layer, canvas)
         self._component_mask = None
 
@@ -227,14 +237,32 @@ class TransformTool(BaseTool):
         canvas._progress_bar.show()
         QApplication.processEvents()
 
-        # Rasterize and collect bboxes for undo diff (no redundant get_mask_bbox)
+        # Accumulate transform matrix for session-level OOB preservation
         M = getattr(self, '_current_matrix', None)
+        if M is not None:
+            M3 = np.array([
+                [M[0, 0], M[0, 1], M[0, 2]],
+                [M[1, 0], M[1, 1], M[1, 2]],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            if self._cumulative_matrix is not None:
+                self._cumulative_matrix = M3 @ self._cumulative_matrix
+            else:
+                self._cumulative_matrix = M3
+
+        # Rasterize from session snapshot using cumulative matrix (preserves OOB pixels)
         bbox_pairs = {}  # lid -> (src_bbox, dst_bbox)
         if M is not None:
             for lid, (l, snap) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
-                src_bb, dst_bb = apply_affine_inplace(l.mask, snap, M)
+                session_snap = self._session_snapshots.get(lid)
+                if session_snap is not None and self._cumulative_matrix is not None:
+                    cum_2x3 = self._cumulative_matrix[:2]
+                    l.mask[:] = 0
+                    src_bb, dst_bb = apply_affine_inplace(l.mask, session_snap, cum_2x3)
+                else:
+                    src_bb, dst_bb = apply_affine_inplace(l.mask, snap, M)
                 bbox_pairs[lid] = (src_bb, dst_bb)
                 l.invalidate_bbox()
 
