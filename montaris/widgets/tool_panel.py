@@ -8,7 +8,7 @@ from montaris.tools.polygon import PolygonTool
 
 # Tool icons: emojis matching the web app (threejsroieditor)
 TOOL_ICONS = {
-    'Hand': '✥',
+    'Hand': '🖐️',
     'Select': '🖱️',
     'Brush': '🖌️',
     'Eraser': '🧹',
@@ -18,7 +18,7 @@ TOOL_ICONS = {
     'Circle': '⬤',
     'Stamp': '■',
     'Transform': '🔧',
-    'Move': '🖐️',
+    'Move': '✥',
 }
 
 
