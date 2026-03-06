@@ -185,16 +185,26 @@ class TransformTool(BaseTool):
 
         self._current_matrix = M
 
-        # Apply transform to preview items (instant, no numpy)
+        # Scene-level transform (for items at pos 0,0 like bbox_item)
         qt_t = QTransform(
             M[0, 0], M[1, 0],
             M[0, 1], M[1, 1],
             M[0, 2], M[1, 2],
         )
-        for item in self._preview_items:
-            item.setTransform(qt_t)
 
-        # Move bbox rect with transform
+        # Apply per-item transform accounting for item's pos offset
+        for item in self._preview_items:
+            px, py = item.pos().x(), item.pos().y()
+            tdx = M[0, 0] * px + M[0, 1] * py + M[0, 2] - px
+            tdy = M[1, 0] * px + M[1, 1] * py + M[1, 2] - py
+            item_t = QTransform(
+                M[0, 0], M[1, 0],
+                M[0, 1], M[1, 1],
+                tdx, tdy,
+            )
+            item.setTransform(item_t)
+
+        # Move bbox rect with transform (pos is 0,0)
         if self._bbox_item:
             self._bbox_item.setTransform(qt_t)
         # Move handles by mapping original positions through matrix
@@ -204,7 +214,7 @@ class TransformTool(BaseTool):
                 ny = M[1, 0] * ox + M[1, 1] * oy + M[1, 2]
                 item.setPos(nx, ny)
             else:
-                # Line items: apply transform directly
+                # Line items (pos 0,0): apply scene transform
                 item.setTransform(qt_t)
 
     def on_release(self, pos, layer, canvas):
