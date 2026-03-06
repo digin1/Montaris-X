@@ -89,10 +89,7 @@ class TransformTool(BaseTool):
             self._start_pos = pos
             self._dragging = True
             self._target_layers = self._get_target_layers(layer, canvas)
-            # Recompute bbox for current selection (may have changed via Ctrl+click)
-            bbox = self._compute_union_bbox(self._target_layers)
-            if bbox is not None:
-                self._bbox = bbox
+            # Keep existing bbox — it matches the visual handles/rotation state
             self._snapshots = {
                 id(l): (l, l.mask.copy()) for l in self._target_layers
             }
