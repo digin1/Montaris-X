@@ -1057,7 +1057,15 @@ class MontarisApp(QMainWindow):
                 scale_x = img_w / max_w
                 scale_y = img_h / max_h
             count = 0
-            for entry_type, base, payload in roi_entries:
+            total = len(roi_entries)
+            progress = QProgressDialog(f"Importing {total} ROI(s)...", "Cancel", 0, total, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            QApplication.processEvents()
+            for i, (entry_type, base, payload) in enumerate(roi_entries):
+                if progress.wasCanceled():
+                    break
                 if entry_type == 'roi':
                     roi_dict = payload
                     if need_scale:
@@ -1071,8 +1079,8 @@ class MontarisApp(QMainWindow):
                             roi_dict['y_coords'] = (roi_dict['y_coords'] * scale_y).astype(np.int32)
                         if roi_dict.get('paths'):
                             roi_dict['paths'] = [
-                                [(x * scale_x, y * scale_y) for x, y in path]
-                                for path in roi_dict['paths']
+                                [(x * scale_x, y * scale_y) for x, y in p]
+                                for p in roi_dict['paths']
                             ]
                     mask = imagej_roi_to_mask(roi_dict, w, h)
                     roi = ROILayer(base, w, h)
@@ -1090,6 +1098,8 @@ class MontarisApp(QMainWindow):
                     roi.mask = mask
                     self.layer_stack.add_roi(roi)
                     count += 1
+                progress.setValue(i + 1)
+            progress.close()
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             msg = f"Imported {count} ROI(s) from ZIP"

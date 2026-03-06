@@ -180,22 +180,22 @@ class ToolPanel(QWidget):
 
         montage_btn = QPushButton("🖼️  Load Montage")
         montage_btn.setToolTip("Open a montage image")
-        montage_btn.clicked.connect(self.open_montage_requested.emit)
+        montage_btn.clicked.connect(lambda: self.open_montage_requested.emit())
         layout.addWidget(montage_btn)
 
         roi_zip_btn = QPushButton("📦  Import ROI ZIP")
         roi_zip_btn.setToolTip("Import ROIs from a ZIP file")
-        roi_zip_btn.clicked.connect(self.import_roi_zip_requested.emit)
+        roi_zip_btn.clicked.connect(lambda: self.import_roi_zip_requested.emit())
         layout.addWidget(roi_zip_btn)
 
         instr_btn = QPushButton("📝  Load Instructions")
         instr_btn.setToolTip("Load instructions file (.json/.txt)")
-        instr_btn.clicked.connect(self.load_instructions_requested.emit)
+        instr_btn.clicked.connect(lambda: self.load_instructions_requested.emit())
         layout.addWidget(instr_btn)
 
         view_instr_btn = QPushButton("👁️  View Instructions")
         view_instr_btn.setToolTip("View loaded instructions")
-        view_instr_btn.clicked.connect(self.view_instructions_requested.emit)
+        view_instr_btn.clicked.connect(lambda: self.view_instructions_requested.emit())
         layout.addWidget(view_instr_btn)
 
         layout.addStretch()
