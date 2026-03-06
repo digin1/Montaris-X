@@ -25,6 +25,9 @@ TOOL_ICONS = {
 class ToolPanel(QWidget):
     tool_changed = Signal(object)
     collapse_requested = Signal()
+    open_montage_requested = Signal()
+    import_roi_zip_requested = Signal()
+    load_instructions_requested = Signal()
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -165,6 +168,29 @@ class ToolPanel(QWidget):
         self.deselect_btn.setToolTip("Deselect current tool")
         self.deselect_btn.clicked.connect(self._deselect_tool)
         layout.addWidget(self.deselect_btn)
+
+        # --- File upload buttons ---
+        layout.addSpacing(10)
+        file_label = QLabel("File")
+        file_label.setStyleSheet(
+            "font-weight: bold; font-size: 11px; margin-top: 6px;"
+        )
+        layout.addWidget(file_label)
+
+        montage_btn = QPushButton("🖼️  Load Montage")
+        montage_btn.setToolTip("Open a montage image")
+        montage_btn.clicked.connect(self.open_montage_requested.emit)
+        layout.addWidget(montage_btn)
+
+        roi_zip_btn = QPushButton("📦  Import ROI ZIP")
+        roi_zip_btn.setToolTip("Import ROIs from a ZIP file")
+        roi_zip_btn.clicked.connect(self.import_roi_zip_requested.emit)
+        layout.addWidget(roi_zip_btn)
+
+        instr_btn = QPushButton("📝  Load Instructions")
+        instr_btn.setToolTip("Load instructions file (.json/.txt)")
+        instr_btn.clicked.connect(self.load_instructions_requested.emit)
+        layout.addWidget(instr_btn)
 
         layout.addStretch()
 
