@@ -1043,8 +1043,8 @@ class MontarisApp(QMainWindow):
                             max_w = max(max_w, int(roi_dict['x_coords'].max()) + 1)
                             max_h = max(max_h, int(roi_dict['y_coords'].max()) + 1)
                         if roi_dict.get('paths'):
-                            for path in roi_dict['paths']:
-                                for x, y in path:
+                            for sub_path in roi_dict['paths']:
+                                for x, y in sub_path:
                                     max_w = max(max_w, int(x) + 1)
                                     max_h = max(max_h, int(y) + 1)
                         roi_entries.append(('roi', base, roi_dict))
