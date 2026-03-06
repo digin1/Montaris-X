@@ -1,7 +1,7 @@
 import math
 import numpy as np
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QTimer
-from PySide6.QtGui import QPen, QColor, QBrush, QTransform
+from PySide6.QtGui import QPen, QColor, QBrush, QTransform, QImage, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
     QGraphicsPixmapItem, QGraphicsItem,
@@ -48,8 +48,10 @@ class TransformTool(BaseTool):
         self._dragging = False
         self._shift_held = False
         self._component_mask = None
+        self._component_bbox = None  # bbox of component in original mask
         self._preview_items = []  # references to ROI items for live preview
         self._hidden_layers = []
+        self._temp_scene_items = []  # temporary items added to scene (component mode)
         self._rotation = 0.0  # cumulative rotation angle in radians
         self._session_snapshots = {}  # persistent snapshots for entire transform session
         self._session_bboxes = {}  # id(layer) -> bbox at session start
@@ -126,6 +128,7 @@ class TransformTool(BaseTool):
         self._cumulative_matrix = None
         self._target_layers = self._get_target_layers(layer, canvas)
         self._component_mask = None
+        self._component_bbox = None
 
         # If single layer and clicking on painted pixel, detect component
         if (len(self._target_layers) == 1
@@ -147,6 +150,7 @@ class TransformTool(BaseTool):
                         cys, cxs = np.where(comp_crop)
                         bbox = (cys.min() + by1, cys.max() + 1 + by1,
                                 cxs.min() + bx1, cxs.max() + 1 + bx1)
+                        self._component_bbox = bbox
                         self._show_handles(bbox, canvas)
                         return
 
@@ -285,7 +289,7 @@ class TransformTool(BaseTool):
                 comp_snap[comp] = session_snap[comp]
                 src_bb, dst_bb = apply_affine_inplace(
                     l.mask, comp_snap, cum_2x3,
-                    src_bbox=self._session_bboxes.get(lid),
+                    src_bbox=self._component_bbox,
                     clear_src=False)
                 # For undo diff, include snap bbox (previous component position)
                 # so the union region covers both old and new component locations
@@ -367,6 +371,16 @@ class TransformTool(BaseTool):
         for item in self._preview_items:
             item.resetTransform()
         self._preview_items.clear()
+        # Remove temporary scene items (component mode)
+        scene = canvas.scene()
+        for item in self._temp_scene_items:
+            scene.removeItem(item)
+        self._temp_scene_items.clear()
+        # Restore real item visibility
+        for l, _ in self._hidden_layers:
+            rid = id(l)
+            if rid in canvas._roi_items:
+                canvas._roi_items[rid].setVisible(True)
         self._hidden_layers = []
 
         # After rotation: keep original bbox (don't use inflated axis-aligned bbox)
@@ -477,6 +491,10 @@ class TransformTool(BaseTool):
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
 
+        if self._component_mask is not None:
+            self._create_component_previews(canvas)
+            return
+
         for lid, (l, snap_data, sb) in self._snapshots.items():
             rid = id(l)
             if rid in canvas._roi_items:
@@ -484,11 +502,93 @@ class TransformTool(BaseTool):
                 self._preview_items.append(canvas._roi_items[rid])
             self._hidden_layers.append((l, True))
 
+    def _create_component_previews(self, canvas):
+        """Split ROI into component (draggable) and remainder (static) pixmaps."""
+        l = self._target_layers[0]
+        lid = id(l)
+        rid = id(l)
+        comp = self._component_mask
+        scene = canvas.scene()
+
+        # Hide the real ROI item
+        real_item = canvas._roi_items.get(rid)
+        z = real_item.zValue() if real_item else 10
+        if real_item:
+            real_item.setVisible(False)
+        self._hidden_layers.append((l, True))
+
+        r, g, b = l.color
+        gof = canvas.layer_stack._global_opacity_factor
+        eff = int(l.opacity * gof)
+
+        # Identify current component vs remainder pixels using layer bbox crop
+        layer_bb = l.get_bbox()
+        if layer_bb is None:
+            return
+        ly1, ly2, lx1, lx2 = layer_bb
+        lh, lw = ly2 - ly1, lx2 - lx1
+        mask_crop = l.mask[ly1:ly2, lx1:lx2]
+
+        # Non-component = pixels in session snapshot outside the original component mask
+        session_snap = self._session_snapshots.get(lid)
+        if session_snap is not None:
+            snap_crop = session_snap[ly1:ly2, lx1:lx2]
+            comp_crop_full = comp[ly1:ly2, lx1:lx2]
+            non_comp = (snap_crop > 0) & ~comp_crop_full
+        else:
+            non_comp = np.zeros((lh, lw), dtype=bool)
+        current_comp = (mask_crop > 0) & ~non_comp
+
+        # Component-only pixmap (this gets transformed during drag)
+        cys, cxs = np.where(current_comp)
+        if len(cys) > 0:
+            cy1 = int(cys.min()) + ly1
+            cy2 = int(cys.max()) + 1 + ly1
+            cx1 = int(cxs.min()) + lx1
+            cx2 = int(cxs.max()) + 1 + lx1
+            ch, cw = cy2 - cy1, cx2 - cx1
+            comp_region = current_comp[cy1 - ly1:cy2 - ly1, cx1 - lx1:cx2 - lx1]
+            mask_region = mask_crop[cy1 - ly1:cy2 - ly1, cx1 - lx1:cx2 - lx1]
+            rgba = np.zeros((ch, cw, 4), dtype=np.uint8)
+            rgba[comp_region] = [r, g, b, eff]
+            rgba = np.ascontiguousarray(rgba)
+            qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
+            comp_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+            comp_item.setOffset(cx1, cy1)
+            comp_item.setZValue(z)
+            comp_item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(comp_item)
+            self._preview_items.append(comp_item)
+            self._temp_scene_items.append(comp_item)
+
+        # Remainder pixmap (static, not transformed)
+        if np.any(non_comp):
+            rem_rgba = np.zeros((lh, lw, 4), dtype=np.uint8)
+            rem_rgba[non_comp] = [r, g, b, eff]
+            rem_rgba = np.ascontiguousarray(rem_rgba)
+            qimg2 = QImage(rem_rgba.data, lw, lh, lw * 4, QImage.Format_RGBA8888)
+            rem_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg2))
+            rem_item.setOffset(lx1, ly1)
+            rem_item.setZValue(z - 1)
+            rem_item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(rem_item)
+            self._temp_scene_items.append(rem_item)
+
     def _remove_previews(self, canvas, re_render=True):
         """Reset preview transforms. If re_render, rebuild affected ROI items."""
         for item in self._preview_items:
             item.resetTransform()
         self._preview_items.clear()
+        # Remove temporary scene items (component mode)
+        scene = canvas.scene()
+        for item in self._temp_scene_items:
+            scene.removeItem(item)
+        self._temp_scene_items.clear()
+        # Restore visibility of hidden real items
+        for l, _ in getattr(self, '_hidden_layers', []):
+            rid = id(l)
+            if rid in canvas._roi_items:
+                canvas._roi_items[rid].setVisible(True)
         if re_render:
             lod = canvas._current_lod_level()
             for l, _ in getattr(self, '_hidden_layers', []):
