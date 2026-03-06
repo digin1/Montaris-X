@@ -257,6 +257,8 @@ class ImageCanvas(QGraphicsView):
         except ValueError:
             return
         self._refresh_roi_item(layer, index)
+        if layer in self._selection.layers:
+            self._update_selection_highlights()
 
     def _ensure_roi_pixmap(self, layer):
         """Ensure the ROI has a pixmap item, creating one if needed.
