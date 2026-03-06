@@ -928,6 +928,11 @@ class MontarisApp(QMainWindow):
                         if roi_dict.get('x_coords') is not None:
                             max_w = max(max_w, int(roi_dict['x_coords'].max()) + 1)
                             max_h = max(max_h, int(roi_dict['y_coords'].max()) + 1)
+                        if roi_dict.get('paths'):
+                            for path in roi_dict['paths']:
+                                for x, y in path:
+                                    max_w = max(max_w, int(x) + 1)
+                                    max_h = max(max_h, int(y) + 1)
                         roi_entries.append(('roi', base, roi_dict))
                     elif lower.endswith('.png'):
                         roi_entries.append(('png', base, data))
@@ -950,6 +955,11 @@ class MontarisApp(QMainWindow):
                         if roi_dict.get('x_coords') is not None:
                             roi_dict['x_coords'] = (roi_dict['x_coords'] * scale_x).astype(np.int32)
                             roi_dict['y_coords'] = (roi_dict['y_coords'] * scale_y).astype(np.int32)
+                        if roi_dict.get('paths'):
+                            roi_dict['paths'] = [
+                                [(x * scale_x, y * scale_y) for x, y in path]
+                                for path in roi_dict['paths']
+                            ]
                     mask = imagej_roi_to_mask(roi_dict, w, h)
                     roi = ROILayer(base, w, h)
                     roi.mask = mask

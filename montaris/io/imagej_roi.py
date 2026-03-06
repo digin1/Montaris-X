@@ -61,13 +61,51 @@ def read_imagej_roi(path_or_bytes):
 
     n_coords = struct.unpack('>H', buf.read(2))[0]
 
-    # Skip to offset 64 where coordinates start
+    # Check for composite ROI (shape_roi_size at offset 36)
+    buf.seek(36)
+    shape_roi_size = struct.unpack('>i', buf.read(4))[0]
+    is_composite = shape_roi_size > 0
+
+    # Skip to offset 64 where coordinates/shape data start
     buf.seek(64)
 
     x_coords = None
     y_coords = None
+    paths = None
 
-    if roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
+    if is_composite:
+        # Composite ROI: read float path segments
+        shape_array = []
+        for _ in range(shape_roi_size):
+            val = struct.unpack('>f', buf.read(4))[0]
+            shape_array.append(val)
+
+        paths = []
+        current_path = None
+        i = 0
+        while i < len(shape_array):
+            seg_type = int(shape_array[i])
+            if seg_type == 0:  # SEG_MOVETO
+                if current_path is not None:
+                    paths.append(current_path)
+                current_path = []
+                current_path.append((shape_array[i + 1], shape_array[i + 2]))
+                i += 3
+            elif seg_type == 1:  # SEG_LINETO
+                if current_path is not None:
+                    current_path.append((shape_array[i + 1], shape_array[i + 2]))
+                i += 3
+            elif seg_type == 4:  # SEG_CLOSE
+                if current_path is not None:
+                    paths.append(current_path)
+                    current_path = None
+                i += 1
+            else:
+                i += 1
+        if current_path is not None:
+            paths.append(current_path)
+
+    elif roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
         x_coords = np.array(
             [struct.unpack('>h', buf.read(2))[0] for _ in range(n_coords)],
             dtype=np.int32
@@ -89,6 +127,7 @@ def read_imagej_roi(path_or_bytes):
         'n_coords': n_coords,
         'x_coords': x_coords,
         'y_coords': y_coords,
+        'paths': paths,
         'name': '',
     }
     return result
@@ -243,7 +282,22 @@ def imagej_roi_to_mask(roi_dict, width, height):
     Returns:
         uint8 mask array
     """
+    from PIL import Image, ImageDraw
+
     mask = np.zeros((height, width), dtype=np.uint8)
+
+    # Composite ROI: multiple sub-paths
+    paths = roi_dict.get('paths')
+    if paths:
+        img = Image.new('L', (width, height), 0)
+        draw = ImageDraw.Draw(img)
+        for path in paths:
+            if len(path) >= 3:
+                verts = [(int(round(x)), int(round(y))) for x, y in path]
+                draw.polygon(verts, fill=255)
+        mask = np.asarray(img).copy()
+        return mask
+
     roi_type = roi_dict['type']
 
     if roi_type == ROI_RECT:
@@ -263,59 +317,25 @@ def imagej_roi_to_mask(roi_dict, width, height):
         ry = (bottom - top) / 2.0
         rx = (right - left) / 2.0
         if rx > 0 and ry > 0:
-            yy, xx = np.mgrid[0:height, 0:width]
-            ellipse = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2 <= 1.0
-            mask[ellipse] = 255
+            # Use bbox-only ogrid
+            by1 = max(0, int(cy - ry))
+            by2 = min(height, int(cy + ry) + 1)
+            bx1 = max(0, int(cx - rx))
+            bx2 = min(width, int(cx + rx) + 1)
+            if by1 < by2 and bx1 < bx2:
+                yy, xx = np.ogrid[by1:by2, bx1:bx2]
+                ellipse = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2 <= 1.0
+                mask[by1:by2, bx1:bx2][ellipse] = 255
 
     elif roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED):
         x_coords = roi_dict.get('x_coords')
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
-            # Fill polygon using scanline
-            _fill_polygon(mask, x_coords, y_coords)
+            verts = list(zip(x_coords.tolist(), y_coords.tolist()))
+            img = Image.new('L', (width, height), 0)
+            ImageDraw.Draw(img).polygon(verts, fill=255)
+            mask = np.asarray(img).copy()
 
     return mask
 
 
-def _fill_polygon(mask, x_coords, y_coords):
-    """Fill a polygon in a mask using vectorized scanline algorithm."""
-    h, w = mask.shape
-    n = len(x_coords)
-    min_y = max(0, int(y_coords.min()))
-    max_y = min(h - 1, int(y_coords.max()))
-
-    if min_y > max_y:
-        return
-
-    # Build edge arrays (each edge: y0, y1, x0, x1)
-    x0 = x_coords.astype(np.float64)
-    y0 = y_coords.astype(np.float64)
-    x1 = np.roll(x0, -1)
-    y1 = np.roll(y0, -1)
-
-    # Filter out horizontal edges
-    non_horiz = y0 != y1
-    x0, y0, x1, y1 = x0[non_horiz], y0[non_horiz], x1[non_horiz], y1[non_horiz]
-
-    # Ensure y0 <= y1 for each edge
-    swap = y0 > y1
-    x0[swap], x1[swap] = x1[swap].copy(), x0[swap].copy()
-    y0[swap], y1[swap] = y1[swap].copy(), y0[swap].copy()
-
-    # Precompute inverse slopes
-    inv_slope = (x1 - x0) / (y1 - y0)
-
-    for y in range(min_y, max_y + 1):
-        # Find edges that cross this scanline: y0 <= y < y1
-        active = (y0 <= y) & (y < y1)
-        if not np.any(active):
-            continue
-        # Compute x-intersections
-        x_cross = x0[active] + (y - y0[active]) * inv_slope[active]
-        x_cross.sort()
-        # Fill between pairs
-        for k in range(0, len(x_cross) - 1, 2):
-            xs = max(0, int(np.ceil(x_cross[k])))
-            xe = min(w, int(np.floor(x_cross[k + 1])) + 1)
-            if xs < xe:
-                mask[y, xs:xe] = 255
