@@ -652,7 +652,8 @@ class MontarisApp(QMainWindow):
         self._auto_overlap = checked
 
     def _select_all_rois(self):
-        self.canvas._selection.select_all(self.layer_stack.roi_layers)
+        visible = [r for r in self.layer_stack.roi_layers if r.visible]
+        self.canvas._selection.select_all(visible)
 
     def _on_selection_count_changed(self, layers):
         count = len(layers)
