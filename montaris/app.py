@@ -1028,17 +1028,11 @@ class MontarisApp(QMainWindow):
             import io as _io
             img_h, img_w = self.layer_stack.image_layer.shape[:2]
 
-            import time
-            print(f"[ROI ZIP] Starting import from {os.path.basename(path)}")
-            print(f"[ROI ZIP] Image size: {img_w}x{img_h}")
-            t0 = time.time()
-
             # First pass: scan .roi files to find max extent
             max_w, max_h = img_w, img_h
             roi_entries = []
             with zipfile.ZipFile(path, 'r') as zf:
                 names = zf.namelist()
-                print(f"[ROI ZIP] ZIP contains {len(names)} entries")
                 for idx, name in enumerate(names):
                     lower = name.lower()
                     data = zf.read(name)
@@ -1058,8 +1052,6 @@ class MontarisApp(QMainWindow):
                         roi_entries.append(('roi', base, roi_dict))
                     elif lower.endswith('.png'):
                         roi_entries.append(('png', base, data))
-            t1 = time.time()
-            print(f"[ROI ZIP] Scan done in {t1-t0:.2f}s, {len(roi_entries)} ROI entries")
 
             # Scale ROI coordinates to fit image if needed
             w, h = img_w, img_h
@@ -1067,7 +1059,6 @@ class MontarisApp(QMainWindow):
             if need_scale:
                 scale_x = img_w / max_w
                 scale_y = img_h / max_h
-                print(f"[ROI ZIP] Scaling from {max_w}x{max_h} to {img_w}x{img_h}")
 
             count = 0
             total = len(roi_entries)
@@ -1080,8 +1071,6 @@ class MontarisApp(QMainWindow):
             for i, (entry_type, base, payload) in enumerate(roi_entries):
                 if progress.wasCanceled():
                     break
-                t_roi = time.time()
-                print(f"[ROI ZIP] Processing {i+1}/{total} '{base}' ({entry_type})...")
                 if entry_type == 'roi':
                     roi_dict = payload
                     if need_scale:
@@ -1114,13 +1103,10 @@ class MontarisApp(QMainWindow):
                     roi.mask = mask
                     self.layer_stack.add_roi(roi)
                     count += 1
-                print(f"[ROI ZIP] {i+1}/{total} '{base}' ({entry_type}) {time.time()-t_roi:.3f}s")
                 progress.setValue(i + 1)
                 QApplication.processEvents()
 
             progress.close()
-            t2 = time.time()
-            print(f"[ROI ZIP] Import done in {t2-t1:.2f}s total {t2-t0:.2f}s")
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             msg = f"Imported {count} ROI(s) from ZIP"

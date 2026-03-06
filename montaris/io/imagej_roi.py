@@ -270,12 +270,9 @@ def imagej_roi_to_mask(roi_dict, width, height):
     # Composite ROI: multiple sub-paths with even-odd fill (XOR)
     paths = roi_dict.get('paths')
     if paths:
-        import time
         from PIL import Image, ImageDraw
-        print(f"  [mask] Composite ROI: {len(paths)} paths, canvas {width}x{height}")
-        for pi, path in enumerate(paths):
+        for path in paths:
             if len(path) >= 3:
-                t0 = time.time()
                 xs = [p[0] for p in path]
                 ys = [p[1] for p in path]
                 x0 = max(0, int(min(xs)))
@@ -284,13 +281,11 @@ def imagej_roi_to_mask(roi_dict, width, height):
                 y1 = min(height, int(max(ys)) + 2)
                 bw, bh = x1 - x0, y1 - y0
                 xy = [(round(x) - x0, round(y) - y0) for x, y in path]
-                print(f"  [mask]   path {pi}: {len(path)} pts, bbox {bw}x{bh}...", end='', flush=True)
                 sub_img = Image.new('L', (bw, bh), 0)
                 draw = ImageDraw.Draw(sub_img)
                 draw.polygon(xy, fill=255)
                 sub = np.array(sub_img)
                 mask[y0:y1, x0:x1] ^= sub
-                print(f" {time.time()-t0:.3f}s")
         return mask
 
     roi_type = roi_dict['type']
@@ -325,16 +320,12 @@ def imagej_roi_to_mask(roi_dict, width, height):
         x_coords = roi_dict.get('x_coords')
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
-            import time
             from PIL import Image, ImageDraw
-            t0 = time.time()
-            print(f"  [mask] Polygon: {len(x_coords)} pts, drawing...", end='', flush=True)
             img = Image.new('L', (width, height), 0)
             draw = ImageDraw.Draw(img)
             xy = list(zip(x_coords.tolist(), y_coords.tolist()))
             draw.polygon(xy, fill=255)
             mask[:] = np.array(img)
-            print(f" {time.time()-t0:.3f}s")
 
     return mask
 
