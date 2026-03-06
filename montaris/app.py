@@ -94,6 +94,7 @@ class MontarisApp(QMainWindow):
         layer_dock.setObjectName("LayersDock")
         layer_dock.setWidget(self.layer_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, layer_dock)
+        self._layer_dock = layer_dock
 
         # Tool panel
         self.tool_panel = ToolPanel(self, self)
@@ -101,6 +102,7 @@ class MontarisApp(QMainWindow):
         tool_dock.setObjectName("ToolsDock")
         tool_dock.setWidget(self.tool_panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, tool_dock)
+        self._tool_dock = tool_dock
 
         # Properties panel
         self.properties_panel = PropertiesPanel(self, self)
@@ -108,6 +110,7 @@ class MontarisApp(QMainWindow):
         props_dock.setObjectName("PropertiesDock")
         props_dock.setWidget(self.properties_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, props_dock)
+        self._props_dock = props_dock
 
         # Display panel (Phase 2)
         self.display_panel = DisplayPanel(self)
@@ -355,6 +358,19 @@ class MontarisApp(QMainWindow):
 
         view_menu.addSeparator()
 
+        # Sidebar toggles
+        collapse_left_act = QAction("Collapse &Left Sidebar", self)
+        collapse_left_act.setShortcut(QKeySequence("Ctrl+["))
+        collapse_left_act.triggered.connect(self._toggle_left_sidebar)
+        view_menu.addAction(collapse_left_act)
+
+        collapse_right_act = QAction("Collapse &Right Sidebar", self)
+        collapse_right_act.setShortcut(QKeySequence("Ctrl+]"))
+        collapse_right_act.triggered.connect(self._toggle_right_sidebar)
+        view_menu.addAction(collapse_right_act)
+
+        view_menu.addSeparator()
+
         # Dock toggles
         view_menu.addAction(self._display_dock.toggleViewAction())
         view_menu.addAction(self._adj_dock.toggleViewAction())
@@ -435,6 +451,19 @@ class MontarisApp(QMainWindow):
             if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1]:
                 roi_info = f"  ROI: {'yes' if mask[y, x] > 0 else 'no'}"
         self.statusbar.showMessage(f"X: {x}  Y: {y}  Value: {value}{roi_info}")
+
+    def _toggle_left_sidebar(self):
+        self.tool_panel.toggle_collapsed()
+
+    def _toggle_right_sidebar(self):
+        right_docks = [
+            self._layer_dock, self._props_dock,
+            self._display_dock, self._adj_dock,
+        ]
+        # If any visible, hide all; otherwise show all
+        any_visible = any(d.isVisible() for d in right_docks)
+        for d in right_docks:
+            d.setVisible(not any_visible)
 
     def _on_tool_changed(self, tool):
         self.active_tool = tool
