@@ -222,10 +222,17 @@ class LayerPanel(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsDragEnabled)
             self.list_widget.addItem(item)
 
+        px_counts = []
         for i, roi in enumerate(roi_layers):
             icon = self._color_icon(roi.color)
             # Index badge + name + pixel count (G.18, B.36)
-            px_count = np.count_nonzero(roi.mask)
+            bbox = roi.get_bbox()
+            if bbox is None:
+                px_count = 0
+            else:
+                y1, y2, x1, x2 = bbox
+                px_count = int(np.count_nonzero(roi.mask[y1:y2, x1:x2]))
+            px_counts.append(px_count)
             display_name = f"{i + 1}. {roi.name} ({px_count:,}px)"
             item = QListWidgetItem(display_name)
             item.setIcon(icon)
@@ -234,17 +241,26 @@ class LayerPanel(QWidget):
             item.setCheckState(Qt.Checked if roi.visible else Qt.Unchecked)
             self.list_widget.addItem(item)
 
-        # Update nav bar (G.13)
-        self._update_nav_bar()
+        # Update nav bar (G.13) — reuse precomputed pixel counts
+        self._update_nav_bar(px_counts)
 
         self._updating = False
 
-    def _update_nav_bar(self):
+    def _update_nav_bar(self, px_counts=None):
         roi_layers = self.layer_stack.roi_layers
-        total = sum(max(1, np.count_nonzero(r.mask)) for r in roi_layers) if roi_layers else 1
+        if px_counts is None:
+            px_counts = []
+            for roi in roi_layers:
+                bbox = roi.get_bbox()
+                if bbox is None:
+                    px_counts.append(0)
+                else:
+                    y1, y2, x1, x2 = bbox
+                    px_counts.append(int(np.count_nonzero(roi.mask[y1:y2, x1:x2])))
+        total = sum(max(1, c) for c in px_counts) if px_counts else 1
         segments = []
         for i, roi in enumerate(roi_layers):
-            frac = max(1, np.count_nonzero(roi.mask)) / total
+            frac = max(1, px_counts[i]) / total
             segments.append((frac, roi.color, i))
         self.nav_bar.set_segments(segments)
 

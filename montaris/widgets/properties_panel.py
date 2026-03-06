@@ -1,3 +1,4 @@
+import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QFormLayout, QComboBox,
 )
@@ -62,7 +63,13 @@ class PropertiesPanel(QWidget):
             self.fill_mode_combo.setCurrentText(fill_mode.capitalize())
             self.fill_mode_combo.blockSignals(False)
             self.fill_mode_combo.setEnabled(True)
-            self.pixel_count_label.setText(f"{(layer.mask > 0).sum():,}")
+            bbox = layer.get_bbox()
+            if bbox is None:
+                px = 0
+            else:
+                y1, y2, x1, x2 = bbox
+                px = int(np.count_nonzero(layer.mask[y1:y2, x1:x2]))
+            self.pixel_count_label.setText(f"{px:,}")
         else:
             self.type_label.setText("Image")
             shape = layer.data.shape
