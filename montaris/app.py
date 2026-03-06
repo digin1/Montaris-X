@@ -1274,6 +1274,24 @@ class MontarisApp(QMainWindow):
         state = self.settings.value("windowState")
         if state:
             self.restoreState(state)
+        # Sync collapsed state with restored visibility
+        # If right docks are hidden but toolbar is also hidden, show the docks
+        right_docks = [self._layer_dock, self._props_dock,
+                       self._display_dock, self._adj_dock]
+        right_docks_visible = any(d.isVisible() for d in right_docks)
+        right_toolbar_visible = self._right_toolbar.isVisible()
+        if not right_docks_visible and not right_toolbar_visible:
+            for d in right_docks:
+                d.setVisible(True)
+        self._right_collapsed = right_toolbar_visible and not right_docks_visible
+
+        left_docks = [self._tool_dock, self._minimap_dock]
+        left_docks_visible = any(d.isVisible() for d in left_docks)
+        left_toolbar_visible = self._left_toolbar.isVisible()
+        if not left_docks_visible and not left_toolbar_visible:
+            for d in left_docks:
+                d.setVisible(True)
+        self._left_collapsed = left_toolbar_visible and not left_docks_visible
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
