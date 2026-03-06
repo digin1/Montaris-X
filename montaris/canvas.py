@@ -258,22 +258,129 @@ class ImageCanvas(QGraphicsView):
             return
         self._refresh_roi_item(layer, index)
 
+    def _ensure_roi_pixmap(self, layer):
+        """Ensure the ROI has a pixmap item, creating one if needed.
+
+        Returns the QGraphicsPixmapItem or None.
+        """
+        rid = id(layer)
+        if rid not in self._roi_items:
+            self.refresh_active_overlay(layer)
+        return self._roi_items.get(rid)
+
+    def paint_on_roi_pixmap(self, layer, cx, cy, radius):
+        """QPainter: draw filled circle on ROI pixmap (brush preview)."""
+        item = self._ensure_roi_pixmap(layer)
+        if item is None:
+            return
+        pixmap = item.pixmap()
+        ox, oy = int(item.offset().x()), int(item.offset().y())
+        r, g, b = layer.color
+        gof = self.layer_stack._global_opacity_factor
+        alpha = int(layer.opacity * gof)
+
+        # Expand pixmap if circle extends beyond current bounds
+        px1, py1 = ox, oy
+        px2, py2 = ox + pixmap.width(), oy + pixmap.height()
+        h, w = layer.mask.shape
+        nx1 = max(0, min(px1, cx - radius))
+        ny1 = max(0, min(py1, cy - radius))
+        nx2 = min(w, max(px2, cx + radius + 1))
+        ny2 = min(h, max(py2, cy + radius + 1))
+
+        if nx1 < px1 or ny1 < py1 or nx2 > px2 or ny2 > py2:
+            new_pm = QPixmap(nx2 - nx1, ny2 - ny1)
+            new_pm.fill(QColor(0, 0, 0, 0))
+            p = QPainter(new_pm)
+            p.drawPixmap(px1 - nx1, py1 - ny1, pixmap)
+            p.end()
+            pixmap = new_pm
+            item.setOffset(nx1, ny1)
+            ox, oy = nx1, ny1
+
+        p = QPainter(pixmap)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(r, g, b, alpha))
+        p.drawEllipse(cx - radius - ox, cy - radius - oy,
+                       radius * 2 + 1, radius * 2 + 1)
+        p.end()
+        item.setPixmap(pixmap)
+
+    def erase_on_roi_pixmap(self, layer, cx, cy, radius):
+        """QPainter: erase circle on ROI pixmap (eraser preview)."""
+        item = self._roi_items.get(id(layer))
+        if item is None:
+            return
+        pixmap = item.pixmap()
+        ox, oy = int(item.offset().x()), int(item.offset().y())
+
+        p = QPainter(pixmap)
+        p.setCompositionMode(QPainter.CompositionMode_Clear)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 0))
+        p.drawEllipse(cx - radius - ox, cy - radius - oy,
+                       radius * 2 + 1, radius * 2 + 1)
+        p.end()
+        item.setPixmap(pixmap)
+
+    def stamp_on_roi_pixmap(self, layer, cx, cy, half_w, half_h):
+        """QPainter: draw filled rect on ROI pixmap (stamp preview)."""
+        item = self._ensure_roi_pixmap(layer)
+        if item is None:
+            return
+        pixmap = item.pixmap()
+        ox, oy = int(item.offset().x()), int(item.offset().y())
+        r, g, b = layer.color
+        gof = self.layer_stack._global_opacity_factor
+        alpha = int(layer.opacity * gof)
+        h, w = layer.mask.shape
+
+        # Stamp rect in mask coordinates
+        rx1 = max(0, cx - half_w)
+        ry1 = max(0, cy - half_h)
+        rx2 = min(w, cx + half_w)
+        ry2 = min(h, cy + half_h)
+
+        # Expand pixmap if stamp extends beyond current bounds
+        px1, py1 = ox, oy
+        px2, py2 = ox + pixmap.width(), oy + pixmap.height()
+        nx1, ny1 = min(px1, rx1), min(py1, ry1)
+        nx2, ny2 = max(px2, rx2), max(py2, ry2)
+
+        if nx1 < px1 or ny1 < py1 or nx2 > px2 or ny2 > py2:
+            new_pm = QPixmap(nx2 - nx1, ny2 - ny1)
+            new_pm.fill(QColor(0, 0, 0, 0))
+            p = QPainter(new_pm)
+            p.drawPixmap(px1 - nx1, py1 - ny1, pixmap)
+            p.end()
+            pixmap = new_pm
+            item.setOffset(nx1, ny1)
+            ox, oy = nx1, ny1
+
+        p = QPainter(pixmap)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(r, g, b, alpha))
+        p.drawRect(rx1 - ox, ry1 - oy, rx2 - rx1, ry2 - ry1)
+        p.end()
+        item.setPixmap(pixmap)
+
     def _refresh_roi_item(self, roi, index, gof=None):
         """Create or update the QGraphicsPixmapItem for a single ROI."""
         if gof is None:
             gof = self.layer_stack._global_opacity_factor
 
         rid = id(roi)
-
-        # Remove old item
-        if rid in self._roi_items:
-            self._scene.removeItem(self._roi_items.pop(rid))
+        existing = self._roi_items.get(rid)
 
         if not roi.visible:
+            if existing is not None:
+                self._scene.removeItem(self._roi_items.pop(rid))
             return
 
         bbox = roi.get_bbox()  # cached
         if bbox is None:
+            if existing is not None:
+                self._scene.removeItem(self._roi_items.pop(rid))
             return
 
         y1, y2, x1, x2 = bbox
@@ -302,12 +409,17 @@ class ImageCanvas(QGraphicsView):
         qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
         pixmap = QPixmap.fromImage(qimg)
 
-        item = QGraphicsPixmapItem(pixmap)
-        item.setOffset(x1, y1)
-        item.setZValue(1 + index * 0.001)
-        item.setAcceptedMouseButtons(Qt.NoButton)
-        self._scene.addItem(item)
-        self._roi_items[rid] = item
+        if existing is not None:
+            existing.setPixmap(pixmap)
+            existing.setOffset(x1, y1)
+            existing.setZValue(1 + index * 0.001)
+        else:
+            item = QGraphicsPixmapItem(pixmap)
+            item.setOffset(x1, y1)
+            item.setZValue(1 + index * 0.001)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self._scene.addItem(item)
+            self._roi_items[rid] = item
 
     # ------------------------------------------------------------------
     # Brush cursor preview

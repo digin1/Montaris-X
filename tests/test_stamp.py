@@ -18,6 +18,9 @@ class MockCanvas:
     def refresh_active_overlay(self, layer):
         pass
 
+    def stamp_on_roi_pixmap(self, layer, cx, cy, half_w, half_h):
+        pass
+
 
 class TestStampTool:
     def test_stamp_places_square(self):

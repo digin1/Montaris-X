@@ -15,6 +15,7 @@ class EraserTool(BaseTool):
         self._last_pos = None
         self._snapshot = None
         self._canvas = None
+        self._stroke_bbox = None
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not hasattr(layer, 'mask'):
@@ -23,6 +24,7 @@ class EraserTool(BaseTool):
         self._last_pos = pos
         self._canvas = canvas
         self._snapshot = layer.mask.copy()
+        self._stroke_bbox = None
         self._erase(pos, layer)
         canvas.refresh_active_overlay(layer)
 
@@ -31,26 +33,28 @@ class EraserTool(BaseTool):
             return
         self._erase_line(self._last_pos, pos, layer)
         self._last_pos = pos
-        canvas.refresh_active_overlay(layer)
+        effective = self._effective_size()
+        r = effective // 2
+        canvas.erase_on_roi_pixmap(layer, int(pos.x()), int(pos.y()), r)
 
     def on_release(self, pos, layer, canvas):
         if not self._erasing or layer is None:
             return
         self._erasing = False
-        if self._snapshot is not None:
-            diff = self._snapshot != layer.mask
-            if diff.any():
-                ys, xs = np.where(diff)
-                y1, y2 = ys.min(), ys.max() + 1
-                x1, x2 = xs.min(), xs.max() + 1
+        if self._snapshot is not None and self._stroke_bbox is not None:
+            sy1, sy2, sx1, sx2 = self._stroke_bbox
+            old_crop = self._snapshot[sy1:sy2, sx1:sx2]
+            new_crop = layer.mask[sy1:sy2, sx1:sx2]
+            if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
-                    layer, (y1, y2, x1, x2),
-                    self._snapshot[y1:y2, x1:x2],
-                    layer.mask[y1:y2, x1:x2],
+                    layer, (sy1, sy2, sx1, sx2),
+                    old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
+        canvas.refresh_active_overlay(layer)
         self._snapshot = None
         self._canvas = None
+        self._stroke_bbox = None
 
     def _effective_size(self):
         if self._canvas is not None:
@@ -81,6 +85,15 @@ class EraserTool(BaseTool):
         if y1 < y2 and x1 < x2 and cy1 < cy2 and cx1 < cx2:
             layer.mask[y1:y2, x1:x2][circle[cy1:cy2, cx1:cx2]] = 0
             layer.mark_dirty((x1, y1, x2 - x1, y2 - y1))
+            if self._stroke_bbox is None:
+                self._stroke_bbox = (y1, y2, x1, x2)
+            else:
+                self._stroke_bbox = (
+                    min(self._stroke_bbox[0], y1),
+                    max(self._stroke_bbox[1], y2),
+                    min(self._stroke_bbox[2], x1),
+                    max(self._stroke_bbox[3], x2),
+                )
 
     def _erase_line(self, p1, p2, layer):
         x1, y1 = p1.x(), p1.y()

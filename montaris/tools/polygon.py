@@ -1,4 +1,5 @@
 import numpy as np
+from PIL import Image, ImageDraw
 from PySide6.QtCore import Qt
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -44,64 +45,42 @@ class PolygonTool(BaseTool):
             return
 
         layer = self._active_layer
-        snapshot = layer.mask.copy()
-
-        self._fill_polygon(layer)
-
-        diff = snapshot != layer.mask
-        if diff.any():
-            ys, xs = np.where(diff)
-            y1, y2 = ys.min(), ys.max() + 1
-            x1, x2 = xs.min(), xs.max() + 1
-            cmd = UndoCommand(
-                layer, (y1, y2, x1, x2),
-                snapshot[y1:y2, x1:x2],
-                layer.mask[y1:y2, x1:x2],
-            )
-            self.app.undo_stack.push(cmd)
-
-        if self._canvas:
-            self._canvas.clear_polygon_preview()
-            self._canvas.refresh_overlays()
-
-        self._vertices.clear()
-
-    def _fill_polygon(self, layer):
         h, w = layer.mask.shape
         vertices = np.array(self._vertices)
 
-        min_x = max(0, vertices[:, 0].min())
-        max_x = min(w - 1, vertices[:, 0].max())
-        min_y = max(0, vertices[:, 1].min())
-        max_y = min(h - 1, vertices[:, 1].max())
+        # Known bbox from vertex extremes
+        bx1 = max(0, int(vertices[:, 0].min()))
+        bx2 = min(w, int(vertices[:, 0].max()) + 1)
+        by1 = max(0, int(vertices[:, 1].min()))
+        by2 = min(h, int(vertices[:, 1].max()) + 1)
 
-        if min_x >= max_x or min_y >= max_y:
-            return
+        if bx1 < bx2 and by1 < by2:
+            old_crop = layer.mask[by1:by2, bx1:bx2].copy()
 
-        yy, xx = np.mgrid[min_y:max_y + 1, min_x:max_x + 1]
-        points_x = xx.ravel()
-        points_y = yy.ravel()
+            self._fill_polygon(layer, bx1, by1, bx2, by2)
 
-        n = len(self._vertices)
-        inside = np.zeros(len(points_x), dtype=bool)
+            new_crop = layer.mask[by1:by2, bx1:bx2]
+            if not np.array_equal(old_crop, new_crop):
+                cmd = UndoCommand(
+                    layer, (by1, by2, bx1, bx2),
+                    old_crop, new_crop,
+                )
+                self.app.undo_stack.push(cmd)
 
-        j = n - 1
-        for i in range(n):
-            xi, yi = self._vertices[i]
-            xj, yj = self._vertices[j]
+        if self._canvas:
+            self._canvas.clear_polygon_preview()
+            self._canvas.refresh_active_overlay(layer)
 
-            cond1 = (yi > points_y) != (yj > points_y)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                slope = (xj - xi) * (points_y - yi) / (yj - yi) + xi
-            cond2 = points_x < slope
+        self._vertices.clear()
 
-            inside ^= (cond1 & cond2)
-            j = i
-
-        mask_y = points_y[inside]
-        mask_x = points_x[inside]
-        if len(mask_y) > 0:
-            layer.mask[mask_y, mask_x] = 255
+    def _fill_polygon(self, layer, bx1, by1, bx2, by2):
+        bw, bh = bx2 - bx1, by2 - by1
+        # Shift vertices to local bbox coordinates
+        local_verts = [(x - bx1, y - by1) for x, y in self._vertices]
+        img = Image.new('L', (bw, bh), 0)
+        ImageDraw.Draw(img).polygon(local_verts, fill=255)
+        poly_mask = np.asarray(img)
+        layer.mask[by1:by2, bx1:bx2][poly_mask > 0] = 255
 
     def cursor(self):
         return Qt.CrossCursor

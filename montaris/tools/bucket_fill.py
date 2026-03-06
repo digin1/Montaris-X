@@ -1,6 +1,7 @@
 import collections
 
 import numpy as np
+from scipy.ndimage import binary_propagation
 from PySide6.QtCore import Qt
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -46,11 +47,23 @@ class BucketFillTool(BaseTool):
             )
             self.app.undo_stack.push(cmd)
 
-        canvas.refresh_overlays()
+        canvas.refresh_active_overlay(layer)
 
     def _flood_fill(self, mask, start_x, start_y, fill_value, target_value):
         h, w = mask.shape
         if fill_value == target_value:
+            return
+
+        if self.tolerance == 0:
+            # Fast path: scipy binary_propagation for exact-match flood fill
+            seed = np.zeros((h, w), dtype=bool)
+            seed[start_y, start_x] = True
+            if target_value > 0:
+                structure = mask > 0
+            else:
+                structure = mask == 0
+            region = binary_propagation(seed, structure=np.ones((3, 3), dtype=bool), mask=structure)
+            mask[region] = fill_value
             return
 
         visited = np.zeros((h, w), dtype=bool)

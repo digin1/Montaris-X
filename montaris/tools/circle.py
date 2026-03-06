@@ -47,24 +47,29 @@ class CircleTool(BaseTool):
             return
 
         h, w = layer.mask.shape
-        y, x = np.ogrid[:h, :w]
-        dist_sq = (x - cx) ** 2 + (y - cy) ** 2
-        circle_mask = dist_sq <= radius * radius
-        layer.mask[circle_mask] = 255
+        # Compute bbox of the circle and clamp to mask bounds
+        by1 = max(0, cy - radius)
+        by2 = min(h, cy + radius + 1)
+        bx1 = max(0, cx - radius)
+        bx2 = min(w, cx + radius + 1)
 
-        diff = self._snapshot != layer.mask
-        if diff.any():
-            ys, xs = np.where(diff)
-            y1, y2 = ys.min(), ys.max() + 1
-            x1, x2 = xs.min(), xs.max() + 1
-            cmd = UndoCommand(
-                layer, (y1, y2, x1, x2),
-                self._snapshot[y1:y2, x1:x2],
-                layer.mask[y1:y2, x1:x2],
-            )
-            self.app.undo_stack.push(cmd)
+        if by1 < by2 and bx1 < bx2:
+            y, x = np.ogrid[by1:by2, bx1:bx2]
+            dist_sq = (x - cx) ** 2 + (y - cy) ** 2
+            circle_mask = dist_sq <= radius * radius
 
-        canvas.refresh_overlays()
+            old_crop = self._snapshot[by1:by2, bx1:bx2].copy()
+            layer.mask[by1:by2, bx1:bx2][circle_mask] = 255
+            new_crop = layer.mask[by1:by2, bx1:bx2]
+
+            if not np.array_equal(old_crop, new_crop):
+                cmd = UndoCommand(
+                    layer, (by1, by2, bx1, bx2),
+                    old_crop, new_crop,
+                )
+                self.app.undo_stack.push(cmd)
+
+        canvas.refresh_active_overlay(layer)
         self._center = None
         self._snapshot = None
 

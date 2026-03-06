@@ -15,6 +15,7 @@ class StampTool(BaseTool):
         self._stamping = False
         self._last_pos = None
         self._snapshot = None
+        self._stroke_bbox = None
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not hasattr(layer, 'mask'):
@@ -22,6 +23,7 @@ class StampTool(BaseTool):
         self._stamping = True
         self._last_pos = pos
         self._snapshot = layer.mask.copy()
+        self._stroke_bbox = None
         self._stamp(pos, layer)
         canvas.refresh_active_overlay(layer)
 
@@ -30,25 +32,28 @@ class StampTool(BaseTool):
             return
         self._stamp_line(self._last_pos, pos, layer)
         self._last_pos = pos
-        canvas.refresh_active_overlay(layer)
+        canvas.stamp_on_roi_pixmap(
+            layer, int(pos.x()), int(pos.y()),
+            self.width // 2, self.height // 2,
+        )
 
     def on_release(self, pos, layer, canvas):
         if not self._stamping or layer is None:
             return
         self._stamping = False
-        if self._snapshot is not None:
-            diff = self._snapshot != layer.mask
-            if diff.any():
-                ys, xs = np.where(diff)
-                y1, y2 = ys.min(), ys.max() + 1
-                x1, x2 = xs.min(), xs.max() + 1
+        if self._snapshot is not None and self._stroke_bbox is not None:
+            sy1, sy2, sx1, sx2 = self._stroke_bbox
+            old_crop = self._snapshot[sy1:sy2, sx1:sx2]
+            new_crop = layer.mask[sy1:sy2, sx1:sx2]
+            if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
-                    layer, (y1, y2, x1, x2),
-                    self._snapshot[y1:y2, x1:x2],
-                    layer.mask[y1:y2, x1:x2],
+                    layer, (sy1, sy2, sx1, sx2),
+                    old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
+        canvas.refresh_active_overlay(layer)
         self._snapshot = None
+        self._stroke_bbox = None
 
     def _stamp(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
@@ -65,6 +70,15 @@ class StampTool(BaseTool):
         if y1 < y2 and x1 < x2:
             layer.mask[y1:y2, x1:x2] = 255
             layer.mark_dirty((x1, y1, x2 - x1, y2 - y1))
+            if self._stroke_bbox is None:
+                self._stroke_bbox = (y1, y2, x1, x2)
+            else:
+                self._stroke_bbox = (
+                    min(self._stroke_bbox[0], y1),
+                    max(self._stroke_bbox[1], y2),
+                    min(self._stroke_bbox[2], x1),
+                    max(self._stroke_bbox[3], x2),
+                )
 
     def _stamp_line(self, p1, p2, layer):
         x1, y1 = p1.x(), p1.y()

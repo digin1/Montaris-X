@@ -17,6 +17,7 @@ class BrushTool(BaseTool):
         self._snapshot = None
         self._canvas = None
         self._other_snapshots = {}  # id(layer) -> (layer, snapshot)
+        self._stroke_bbox = None  # (y1, y2, x1, x2) accumulated during stroke
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not hasattr(layer, 'mask'):
@@ -25,6 +26,7 @@ class BrushTool(BaseTool):
         self._last_pos = pos
         self._canvas = canvas
         self._snapshot = layer.mask.copy()
+        self._stroke_bbox = None
 
         # Snapshot other layers if auto-overlap is on (C.7)
         self._other_snapshots.clear()
@@ -41,7 +43,10 @@ class BrushTool(BaseTool):
             return
         self._paint_line(self._last_pos, pos, layer)
         self._last_pos = pos
-        canvas.refresh_active_overlay(layer)
+        # QPainter preview: draw last circle on pixmap instead of full refresh
+        effective = self._effective_size()
+        r = effective // 2
+        canvas.paint_on_roi_pixmap(layer, int(pos.x()), int(pos.y()), r)
 
     def on_release(self, pos, layer, canvas):
         if not self._painting or layer is None:
@@ -49,36 +54,33 @@ class BrushTool(BaseTool):
         self._painting = False
 
         commands = []
-        # Main layer undo
-        if self._snapshot is not None:
-            diff = self._snapshot != layer.mask
-            if diff.any():
-                ys, xs = np.where(diff)
-                y1, y2 = ys.min(), ys.max() + 1
-                x1, x2 = xs.min(), xs.max() + 1
+        # Main layer undo — use accumulated stroke bbox for efficient diff
+        if self._snapshot is not None and self._stroke_bbox is not None:
+            sy1, sy2, sx1, sx2 = self._stroke_bbox
+            old_crop = self._snapshot[sy1:sy2, sx1:sx2]
+            new_crop = layer.mask[sy1:sy2, sx1:sx2]
+            if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
-                    layer, (y1, y2, x1, x2),
-                    self._snapshot[y1:y2, x1:x2],
-                    layer.mask[y1:y2, x1:x2],
+                    layer, (sy1, sy2, sx1, sx2),
+                    old_crop, new_crop,
                 )
                 commands.append(cmd)
 
         # Auto-overlap: zero other layers where we painted (C.7)
-        if self.app._auto_overlap and self._snapshot is not None:
-            painted = layer.mask > 0
+        sb = self._stroke_bbox
+        if self.app._auto_overlap and sb is not None:
+            sy1, sy2, sx1, sx2 = sb
+            painted = layer.mask[sy1:sy2, sx1:sx2] > 0
             for lid, (other, snap) in self._other_snapshots.items():
-                overlap = painted & (other.mask > 0)
+                other_crop = other.mask[sy1:sy2, sx1:sx2]
+                overlap = painted & (other_crop > 0)
                 if overlap.any():
-                    other.mask[overlap] = 0
-                    diff = snap != other.mask
-                    if diff.any():
-                        ys, xs = np.where(diff)
-                        y1, y2 = ys.min(), ys.max() + 1
-                        x1, x2 = xs.min(), xs.max() + 1
+                    other_crop[overlap] = 0
+                    snap_crop = snap[sy1:sy2, sx1:sx2]
+                    if not np.array_equal(snap_crop, other_crop):
                         cmd = UndoCommand(
-                            other, (y1, y2, x1, x2),
-                            snap[y1:y2, x1:x2],
-                            other.mask[y1:y2, x1:x2],
+                            other, (sy1, sy2, sx1, sx2),
+                            snap_crop, other_crop,
                         )
                         commands.append(cmd)
             if len(commands) > 1:
@@ -87,11 +89,17 @@ class BrushTool(BaseTool):
         if commands:
             if len(commands) == 1:
                 self.app.undo_stack.push(commands[0])
+                canvas.refresh_active_overlay(layer)
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
+                # refresh_overlays already called above for auto-overlap
+        else:
+            # No change, but still do a proper refresh for edge rendering
+            canvas.refresh_active_overlay(layer)
 
         self._snapshot = None
         self._canvas = None
+        self._stroke_bbox = None
         self._other_snapshots.clear()
 
     def _effective_size(self):
@@ -123,6 +131,15 @@ class BrushTool(BaseTool):
         if y1 < y2 and x1 < x2 and cy1 < cy2 and cx1 < cx2:
             layer.mask[y1:y2, x1:x2][circle[cy1:cy2, cx1:cx2]] = 255
             layer.mark_dirty((x1, y1, x2 - x1, y2 - y1))
+            if self._stroke_bbox is None:
+                self._stroke_bbox = (y1, y2, x1, x2)
+            else:
+                self._stroke_bbox = (
+                    min(self._stroke_bbox[0], y1),
+                    max(self._stroke_bbox[1], y2),
+                    min(self._stroke_bbox[2], x1),
+                    max(self._stroke_bbox[3], x2),
+                )
 
     def _paint_line(self, p1, p2, layer):
         x1, y1 = p1.x(), p1.y()

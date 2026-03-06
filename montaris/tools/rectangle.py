@@ -43,21 +43,18 @@ class RectangleTool(BaseTool):
         y2 = min(h, y2 + 1)
 
         if x1 < x2 and y1 < y2:
+            old_crop = self._snapshot[y1:y2, x1:x2]
             layer.mask[y1:y2, x1:x2] = 255
+            new_crop = layer.mask[y1:y2, x1:x2]
 
-            diff = self._snapshot != layer.mask
-            if diff.any():
-                ys, xs = np.where(diff)
-                dy1, dy2 = ys.min(), ys.max() + 1
-                dx1, dx2 = xs.min(), xs.max() + 1
+            if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
-                    layer, (dy1, dy2, dx1, dx2),
-                    self._snapshot[dy1:dy2, dx1:dx2],
-                    layer.mask[dy1:dy2, dx1:dx2],
+                    layer, (y1, y2, x1, x2),
+                    old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
 
-        canvas.refresh_overlays()
+        canvas.refresh_active_overlay(layer)
         self._start = None
         self._snapshot = None
 
