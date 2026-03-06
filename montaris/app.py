@@ -1308,6 +1308,21 @@ class MontarisApp(QMainWindow):
         geom = self.settings.value("geometry")
         if geom:
             self.restoreGeometry(geom)
+            # Clamp restored geometry to available screen to avoid Qt warnings
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen:
+                avail = screen.availableGeometry()
+                fg = self.frameGeometry()
+                if fg.width() > avail.width() or fg.height() > avail.height():
+                    w = min(fg.width(), avail.width())
+                    h = min(fg.height(), avail.height())
+                    self.resize(w, h)
+                # Also ensure window isn't positioned off-screen
+                pos = self.pos()
+                x = max(avail.x(), min(pos.x(), avail.right() - self.width()))
+                y = max(avail.y(), min(pos.y(), avail.bottom() - self.height()))
+                if pos.x() != x or pos.y() != y:
+                    self.move(x, y)
         state = self.settings.value("windowState")
         if state:
             self.restoreState(state)
