@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox, QInputDialog,
 )
 from PySide6.QtCore import Qt, QSettings, QRectF
-from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor, QTransform, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
 
 from montaris.canvas import ImageCanvas
 from montaris.layers import LayerStack, ImageLayer, ROILayer, generate_unique_roi_name, MontageDocument
@@ -52,6 +52,9 @@ class MontarisApp(QMainWindow):
         super().__init__()
         self.setWindowTitle("Montaris-X")
         self.resize(1400, 900)
+        _logo = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+        if os.path.exists(_logo):
+            self.setWindowIcon(QIcon(_logo))
 
         self.layer_stack = LayerStack()
         self.undo_stack = UndoStack()
