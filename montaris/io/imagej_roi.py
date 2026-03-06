@@ -277,13 +277,18 @@ def imagej_roi_to_mask(roi_dict, width, height):
         for pi, path in enumerate(paths):
             if len(path) >= 3:
                 t0 = time.time()
-                xs = [p[0] for p in path]
-                ys = [p[1] for p in path]
-                print(f"  [mask]   path {pi}: {len(path)} points, drawing...", end='', flush=True)
-                rr, cc = draw_polygon(ys, xs, shape=(height, width))
-                print(f" {time.time()-t0:.3f}s, {len(rr)} pixels")
+                xs = np.array([p[0] for p in path], dtype=np.float64)
+                ys = np.array([p[1] for p in path], dtype=np.float64)
+                x0 = max(0, int(np.floor(xs.min())))
+                y0 = max(0, int(np.floor(ys.min())))
+                x1 = min(width, int(np.ceil(xs.max())) + 1)
+                y1 = min(height, int(np.ceil(ys.max())) + 1)
+                bw, bh = x1 - x0, y1 - y0
+                print(f"  [mask]   path {pi}: {len(path)} pts, bbox {bw}x{bh}...", end='', flush=True)
+                rr, cc = draw_polygon(ys - y0, xs - x0, shape=(bh, bw))
+                print(f" {time.time()-t0:.3f}s, {len(rr)} px")
                 if len(rr) > 0:
-                    mask[rr, cc] ^= 255
+                    mask[rr + y0, cc + x0] ^= 255
         return mask
 
     roi_type = roi_dict['type']
@@ -318,12 +323,20 @@ def imagej_roi_to_mask(roi_dict, width, height):
         x_coords = roi_dict.get('x_coords')
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
-            rr, cc = draw_polygon(
-                y_coords.astype(np.float64),
-                x_coords.astype(np.float64),
-                shape=(height, width),
-            )
-            mask[rr, cc] = 255
+            import time
+            t0 = time.time()
+            xf = x_coords.astype(np.float64)
+            yf = y_coords.astype(np.float64)
+            # Bounding-box-scoped draw for performance
+            x0 = max(0, int(np.floor(xf.min())))
+            y0 = max(0, int(np.floor(yf.min())))
+            x1 = min(width, int(np.ceil(xf.max())) + 1)
+            y1 = min(height, int(np.ceil(yf.max())) + 1)
+            bw, bh = x1 - x0, y1 - y0
+            print(f"  [mask] Polygon: {len(x_coords)} pts, bbox {bw}x{bh}, drawing...", end='', flush=True)
+            rr, cc = draw_polygon(yf - y0, xf - x0, shape=(bh, bw))
+            mask[rr + y0, cc + x0] = 255
+            print(f" {time.time()-t0:.3f}s")
 
     return mask
 
