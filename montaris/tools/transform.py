@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QTimer
 from PySide6.QtGui import QPen, QColor, QBrush, QTransform
 from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
-    QGraphicsPixmapItem,
+    QGraphicsPixmapItem, QGraphicsItem,
 )
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -41,7 +41,7 @@ class TransformTool(BaseTool):
         self._bbox = None
         self._snapshots = {}  # id(layer) -> (layer, snapshot)
         self._target_layers = []
-        self._handle_items = []
+        self._handle_items = []  # (item, orig_x, orig_y) tuples
         self._bbox_item = None
         self._canvas = None
         self._dragging = False
@@ -192,11 +192,18 @@ class TransformTool(BaseTool):
         for item in self._preview_items:
             item.setTransform(qt_t)
 
-        # Move bbox rect and handles with the same transform
+        # Move bbox rect with transform
         if self._bbox_item:
             self._bbox_item.setTransform(qt_t)
-        for item in self._handle_items:
-            item.setTransform(qt_t)
+        # Move handles by mapping original positions through matrix
+        for item, ox, oy in self._handle_items:
+            if ox is not None:
+                nx = M[0, 0] * ox + M[0, 1] * oy + M[0, 2]
+                ny = M[1, 0] * ox + M[1, 1] * oy + M[1, 2]
+                item.setPos(nx, ny)
+            else:
+                # Line items: apply transform directly
+                item.setTransform(qt_t)
 
     def on_release(self, pos, layer, canvas):
         if not self._dragging or not self._snapshots:
@@ -301,10 +308,12 @@ class TransformTool(BaseTool):
         """Hit-test handles and change cursor on hover."""
         if not self._bbox:
             return
+        scale = self._view_scale(canvas)
+        hit_r = HANDLE_HIT_RADIUS / max(scale, 0.01)
         handles = compute_handles(self._bbox)
         for h in handles:
             dist = math.hypot(pos.x() - h.x, pos.y() - h.y)
-            if dist <= HANDLE_HIT_RADIUS:
+            if dist <= hit_r:
                 if self._hovered_handle != h.handle_type:
                     self._hovered_handle = h.handle_type
                     cursor = _HANDLE_CURSORS.get(h.handle_type, Qt.SizeAllCursor)
@@ -317,10 +326,12 @@ class TransformTool(BaseTool):
     def _hit_test_handle(self, pos):
         if not self._bbox:
             return None
+        scale = self._view_scale(self._canvas) if self._canvas else 1.0
+        hit_r = HANDLE_HIT_RADIUS / max(scale, 0.01)
         handles = compute_handles(self._bbox)
         for h in handles:
             dist = math.hypot(pos.x() - h.x, pos.y() - h.y)
-            if dist <= HANDLE_HIT_RADIUS:
+            if dist <= hit_r:
                 return h
         return None
 
@@ -357,6 +368,10 @@ class TransformTool(BaseTool):
             canvas._update_selection_highlights()
         self._hidden_layers = []
 
+    def _view_scale(self, canvas):
+        """Return the current view scale factor (pixels per scene unit)."""
+        return canvas.transform().m11() or 1.0
+
     def _show_handles(self, bbox, canvas):
         self._clear_handles(canvas)
         self._bbox = bbox
@@ -374,59 +389,62 @@ class TransformTool(BaseTool):
 
         handles = compute_handles(bbox)
         handle_pen = QPen(QColor(255, 255, 255), 2)
-        handle_pen.setCosmetic(True)
         handle_brush = QBrush(QColor(0, 180, 255))
         rotate_pen = QPen(QColor(0, 0, 0), 2)
-        rotate_pen.setCosmetic(True)
         rotate_brush = QBrush(QColor(255, 180, 0))
 
         for h in handles:
             if h.handle_type == 'rotate':
-                r = 12
+                r = 10
                 item = scene.addEllipse(
-                    QRectF(h.x - r, h.y - r, r * 2, r * 2),
+                    QRectF(-r, -r, r * 2, r * 2),
                     rotate_pen, rotate_brush,
                 )
+                item.setPos(h.x, h.y)
+                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 item.setZValue(1001)
-                self._handle_items.append(item)
+                self._handle_items.append((item, h.x, h.y))
+                # Line from top-center to rotate handle (cosmetic)
                 cx = (x1 + x2) / 2
                 line_pen = QPen(QColor(255, 180, 0), 1.5)
                 line_pen.setCosmetic(True)
-                line_item = scene.addLine(QLineF(cx, y1, cx, h.y + r), line_pen)
+                line_item = scene.addLine(QLineF(cx, y1, cx, h.y), line_pen)
                 line_item.setZValue(1000)
-                self._handle_items.append(line_item)
-                sr = scene.sceneRect()
-                if h.y - r < sr.top():
-                    sr.setTop(h.y - r - 5)
-                    scene.setSceneRect(sr)
+                self._handle_items.append((line_item, None, None))
             elif h.handle_type in ('tl', 'tr', 'bl', 'br'):
-                s = 8
+                s = 7
                 item = scene.addRect(
-                    QRectF(h.x - s, h.y - s, s * 2, s * 2),
+                    QRectF(-s, -s, s * 2, s * 2),
                     handle_pen, handle_brush,
                 )
+                item.setPos(h.x, h.y)
+                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 item.setZValue(1000)
-                self._handle_items.append(item)
+                self._handle_items.append((item, h.x, h.y))
             elif h.handle_type in ('tm', 'bm'):
-                w_h, h_h = 10, 6
+                w_h, h_h = 9, 5
                 item = scene.addRect(
-                    QRectF(h.x - w_h, h.y - h_h, w_h * 2, h_h * 2),
+                    QRectF(-w_h, -h_h, w_h * 2, h_h * 2),
                     handle_pen, handle_brush,
                 )
+                item.setPos(h.x, h.y)
+                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 item.setZValue(1000)
-                self._handle_items.append(item)
+                self._handle_items.append((item, h.x, h.y))
             elif h.handle_type in ('ml', 'mr'):
-                w_h, h_h = 6, 10
+                w_h, h_h = 5, 9
                 item = scene.addRect(
-                    QRectF(h.x - w_h, h.y - h_h, w_h * 2, h_h * 2),
+                    QRectF(-w_h, -h_h, w_h * 2, h_h * 2),
                     handle_pen, handle_brush,
                 )
+                item.setPos(h.x, h.y)
+                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 item.setZValue(1000)
-                self._handle_items.append(item)
+                self._handle_items.append((item, h.x, h.y))
 
     def _clear_handles(self, canvas):
         scene = canvas.scene()
-        for item in self._handle_items:
+        for item, _, _ in self._handle_items:
             scene.removeItem(item)
         self._handle_items.clear()
         if self._bbox_item:
