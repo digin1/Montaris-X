@@ -121,10 +121,22 @@ class ImageCanvas(QGraphicsView):
     def _on_selection_changed(self, layers):
         """Sync _active_layer to primary selection and update highlights."""
         primary = self._selection.primary
+        old = self._active_layer
         if primary is not None:
             self._active_layer = primary
         self._update_selection_highlights()
         self._pulse_selection()
+        # Notify tool of layer/selection change so it can refresh visuals
+        tool = self._tool
+        if tool is not None and hasattr(tool, 'on_activate'):
+            if primary is not old:
+                # Layer changed: clear old state, show for new
+                if hasattr(tool, '_clear_handles'):
+                    tool._clear_handles(self)
+                tool.on_activate(primary, self)
+            elif primary is not None:
+                # Same layer but selection changed: refresh
+                tool.on_activate(primary, self)
 
     def _clean_stale_selection(self):
         """Remove layers from selection that are no longer in the layer stack."""

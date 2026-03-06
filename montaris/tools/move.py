@@ -305,8 +305,11 @@ class MoveTool(BaseTool):
         if self._multi_comp_mask is not None and moved_layer is not None:
             self._show_marching_ants_for_mask(
                 self._multi_comp_mask, moved_layer, canvas)
-        elif len(affected) == 1:
-            self._show_marching_ants_for_layer(affected[0], canvas)
+        else:
+            # Show ants for the active layer (works for single and multi-layer)
+            active = canvas._active_layer
+            if active is not None and hasattr(active, 'mask'):
+                self._show_marching_ants_for_layer(active, canvas)
 
     def _create_previews(self, canvas):
         """Use existing ROI pixmap items as live preview (zero scene changes)."""
