@@ -184,17 +184,18 @@ class TransformTool(BaseTool):
         self._current_matrix = M
 
         # Apply transform to preview items (instant, no numpy)
-        # M is in scene coordinates. Preview items are positioned at (bx1, by1).
-        # QTransform for item = translate(-bx,-by) → apply M → translate(bx,by)
-        # But since item.pos() already places it, we use scene-level transform:
-        # T = translate(-pos) * M_scene * translate(pos) — but simpler via
-        # QTransform which operates in parent (scene) coords when set on item.
         qt_t = QTransform(
             M[0, 0], M[1, 0],
             M[0, 1], M[1, 1],
             M[0, 2], M[1, 2],
         )
         for item in self._preview_items:
+            item.setTransform(qt_t)
+
+        # Move bbox rect and handles with the same transform
+        if self._bbox_item:
+            self._bbox_item.setTransform(qt_t)
+        for item in self._handle_items:
             item.setTransform(qt_t)
 
     def on_release(self, pos, layer, canvas):
