@@ -616,8 +616,12 @@ class MontarisApp(QMainWindow):
 
     def _update_minimap_viewport(self):
         viewport_rect = self.canvas.mapToScene(self.canvas.viewport().rect()).boundingRect()
-        scene_rect = self.canvas.sceneRect()
-        self.minimap.update_viewport(viewport_rect, scene_rect)
+        # Use image bounds, not sceneRect (which includes Qt padding)
+        if self.canvas._image_item:
+            image_rect = self.canvas._image_item.boundingRect()
+        else:
+            image_rect = self.canvas.sceneRect()
+        self.minimap.update_viewport(viewport_rect, image_rect)
 
     # -- View transforms (Phase 2D) --
 
