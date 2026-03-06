@@ -286,16 +286,15 @@ def imagej_roi_to_mask(roi_dict, width, height):
 
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    # Composite ROI: multiple sub-paths
+    # Composite ROI: multiple sub-paths with even-odd fill (XOR)
     paths = roi_dict.get('paths')
     if paths:
-        img = Image.new('L', (width, height), 0)
-        draw = ImageDraw.Draw(img)
         for path in paths:
             if len(path) >= 3:
                 verts = [(int(round(x)), int(round(y))) for x, y in path]
-                draw.polygon(verts, fill=255)
-        mask = np.asarray(img).copy()
+                img = Image.new('L', (width, height), 0)
+                ImageDraw.Draw(img).polygon(verts, fill=255)
+                mask ^= np.asarray(img)
         return mask
 
     roi_type = roi_dict['type']
