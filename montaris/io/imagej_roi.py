@@ -272,11 +272,16 @@ def imagej_roi_to_mask(roi_dict, width, height):
     # Composite ROI: multiple sub-paths with even-odd fill (XOR)
     paths = roi_dict.get('paths')
     if paths:
-        for path in paths:
+        import time
+        print(f"  [mask] Composite ROI: {len(paths)} paths, canvas {width}x{height}")
+        for pi, path in enumerate(paths):
             if len(path) >= 3:
+                t0 = time.time()
                 xs = [p[0] for p in path]
                 ys = [p[1] for p in path]
+                print(f"  [mask]   path {pi}: {len(path)} points, drawing...", end='', flush=True)
                 rr, cc = draw_polygon(ys, xs, shape=(height, width))
+                print(f" {time.time()-t0:.3f}s, {len(rr)} pixels")
                 if len(rr) > 0:
                     mask[rr, cc] ^= 255
         return mask

@@ -1081,6 +1081,7 @@ class MontarisApp(QMainWindow):
                 if progress.wasCanceled():
                     break
                 t_roi = time.time()
+                print(f"[ROI ZIP] Processing {i+1}/{total} '{base}' ({entry_type})...")
                 if entry_type == 'roi':
                     roi_dict = payload
                     if need_scale:
