@@ -265,7 +265,7 @@ def imagej_roi_to_mask(roi_dict, width, height):
     Returns:
         uint8 mask array
     """
-    from PIL import Image, ImageDraw
+    from skimage.draw import polygon as draw_polygon
 
     mask = np.zeros((height, width), dtype=np.uint8)
 
@@ -274,10 +274,12 @@ def imagej_roi_to_mask(roi_dict, width, height):
     if paths:
         for path in paths:
             if len(path) >= 3:
-                verts = [(int(round(x)), int(round(y))) for x, y in path]
-                img = Image.new('L', (width, height), 0)
-                ImageDraw.Draw(img).polygon(verts, fill=255)
-                mask ^= np.asarray(img)
+                xs = [p[0] for p in path]
+                ys = [p[1] for p in path]
+                rr, cc = draw_polygon(ys, xs, shape=(height, width))
+                sub = np.zeros((height, width), dtype=np.uint8)
+                sub[rr, cc] = 255
+                mask ^= sub
         return mask
 
     roi_type = roi_dict['type']
@@ -299,7 +301,6 @@ def imagej_roi_to_mask(roi_dict, width, height):
         ry = (bottom - top) / 2.0
         rx = (right - left) / 2.0
         if rx > 0 and ry > 0:
-            # Use bbox-only ogrid
             by1 = max(0, int(cy - ry))
             by2 = min(height, int(cy + ry) + 1)
             bx1 = max(0, int(cx - rx))
@@ -313,10 +314,12 @@ def imagej_roi_to_mask(roi_dict, width, height):
         x_coords = roi_dict.get('x_coords')
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
-            verts = list(zip(x_coords.tolist(), y_coords.tolist()))
-            img = Image.new('L', (width, height), 0)
-            ImageDraw.Draw(img).polygon(verts, fill=255)
-            mask = np.asarray(img).copy()
+            rr, cc = draw_polygon(
+                y_coords.astype(np.float64),
+                x_coords.astype(np.float64),
+                shape=(height, width),
+            )
+            mask[rr, cc] = 255
 
     return mask
 
