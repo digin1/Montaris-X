@@ -1,5 +1,5 @@
 import numpy as np
-from PySide6.QtCore import Qt, QRectF, QLineF
+from PySide6.QtCore import Qt, QRectF, QTimer
 from PySide6.QtGui import QPen, QColor, QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem
 from montaris.tools.base import BaseTool
@@ -30,14 +30,19 @@ class MoveTool(BaseTool):
         # Persistent multi-component selection (survives between drags)
         self._multi_comp_mask = None  # combined bool mask of Ctrl+clicked components
         self._multi_comp_layer = None  # the layer these components belong to
-        self._multi_bbox_items = []  # visual bbox indicators for selection
+        # Marching ants overlay
+        self._ants_item = None
+        self._ants_timer = None
+        self._ants_phase = 0
+        self._ants_ey = None  # edge pixel y-coords (relative to crop)
+        self._ants_ex = None  # edge pixel x-coords (relative to crop)
+        self._ants_bbox = None  # (y1, y2, x1, x2) of the crop
+        self._ants_buf = None  # reusable indexed image buffer
 
     def on_activate(self, layer, canvas):
-        """Called when the move tool is selected — show bbox for active layer."""
+        """Called when the move tool is selected — show ants for active layer."""
         if layer is not None and hasattr(layer, 'mask'):
-            bb = layer.get_bbox()
-            if bb is not None:
-                self._show_bbox(bb, canvas)
+            self._show_marching_ants_for_layer(layer, canvas)
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -296,14 +301,12 @@ class MoveTool(BaseTool):
                 pass
         canvas._update_selection_highlights()
 
-        # Show persistent bbox around moved content
-        if self._multi_comp_mask is not None:
-            self._show_multi_selection_bbox(canvas)
+        # Show marching ants around moved content
+        if self._multi_comp_mask is not None and moved_layer is not None:
+            self._show_marching_ants_for_mask(
+                self._multi_comp_mask, moved_layer, canvas)
         elif len(affected) == 1:
-            # Whole-layer move: show bbox around the layer's content
-            bb = affected[0].get_bbox()
-            if bb is not None:
-                self._show_bbox(bb, canvas)
+            self._show_marching_ants_for_layer(affected[0], canvas)
 
     def _create_previews(self, canvas):
         """Use existing ROI pixmap items as live preview (zero scene changes)."""
@@ -313,11 +316,10 @@ class MoveTool(BaseTool):
         self._preview_offsets = []
         self._hidden_layers = []
 
-        # Hide selection highlights and multi-selection bbox during drag
+        # Hide selection highlights and marching ants during drag
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
-        for item in self._multi_bbox_items:
-            item.setVisible(False)
+        self._clear_marching_ants(canvas)
 
         if self._component_mask is not None:
             self._create_component_previews(canvas)
@@ -438,6 +440,109 @@ class MoveTool(BaseTool):
         self._hidden_layers = []
         self._preview_offsets = []
 
+    # ------------------------------------------------------------------
+    # Marching ants overlay
+    # ------------------------------------------------------------------
+
+    def _show_marching_ants_for_layer(self, layer, canvas):
+        """Show marching ants around the full layer mask boundary."""
+        bbox = layer.get_bbox()
+        if bbox is None:
+            self._clear_marching_ants(canvas)
+            return
+        y1, y2, x1, x2 = bbox
+        crop = layer.mask[y1:y2, x1:x2]
+        self._show_marching_ants(crop, bbox, canvas)
+
+    def _show_marching_ants_for_mask(self, mask, layer, canvas):
+        """Show marching ants around an arbitrary boolean mask."""
+        from montaris.core.roi_transform import get_mask_bbox
+        bbox = get_mask_bbox(mask.view(np.uint8) if mask.dtype == np.bool_ else mask)
+        if bbox is None:
+            self._clear_marching_ants(canvas)
+            return
+        y1, y2, x1, x2 = bbox
+        crop = mask[y1:y2, x1:x2]
+        self._show_marching_ants(crop, bbox, canvas)
+
+    def _show_marching_ants(self, crop, bbox, canvas):
+        """Compute edge pixels and start marching ants animation."""
+        self._clear_marching_ants(canvas)
+
+        from scipy.ndimage import binary_erosion
+        binary = crop > 0 if crop.dtype != np.bool_ else crop
+        eroded = binary_erosion(binary)
+        edge = binary & ~eroded
+
+        ey, ex = np.where(edge)
+        if len(ey) == 0:
+            return
+
+        y1, y2, x1, x2 = bbox
+        h, w = y2 - y1, x2 - x1
+        self._ants_ey = ey
+        self._ants_ex = ex
+        self._ants_bbox = bbox
+        self._ants_phase = 0
+        self._ants_buf = np.zeros((h, w), dtype=np.uint8)
+
+        self._build_ants_frame(canvas)
+
+        self._ants_timer = QTimer()
+        self._ants_timer.timeout.connect(lambda: self._tick_ants(canvas))
+        self._ants_timer.start(150)
+
+    def _build_ants_frame(self, canvas):
+        """Build one frame of the marching ants animation."""
+        buf = self._ants_buf
+        buf[:] = 0
+        ey, ex = self._ants_ey, self._ants_ex
+        phase = self._ants_phase
+
+        # Diagonal stripe pattern: marches 1px per frame
+        pattern = ((ex.astype(np.int32) + ey.astype(np.int32) + phase) % 8) < 4
+        buf[ey[pattern], ex[pattern]] = 1   # black
+        buf[ey[~pattern], ex[~pattern]] = 2  # white
+
+        y1, _, x1, _ = self._ants_bbox
+        h, w = buf.shape
+        qimg = QImage(buf.data, w, h, w, QImage.Format_Indexed8)
+        qimg.setColorTable([0x00000000, 0xFF000000, 0xFFFFFFFF])
+        pixmap = QPixmap.fromImage(qimg)
+
+        scene = canvas.scene()
+        if self._ants_item is None:
+            self._ants_item = QGraphicsPixmapItem(pixmap)
+            self._ants_item.setOffset(x1, y1)
+            self._ants_item.setZValue(999)
+            self._ants_item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(self._ants_item)
+        else:
+            self._ants_item.setPixmap(pixmap)
+
+    def _tick_ants(self, canvas):
+        """Advance animation by one frame."""
+        self._ants_phase = (self._ants_phase + 1) % 8
+        if self._ants_item and self._ants_item.scene():
+            self._build_ants_frame(canvas)
+
+    def _clear_marching_ants(self, canvas):
+        """Stop animation and remove overlay."""
+        if self._ants_timer is not None:
+            self._ants_timer.stop()
+            self._ants_timer = None
+        if self._ants_item is not None:
+            canvas.scene().removeItem(self._ants_item)
+            self._ants_item = None
+        self._ants_buf = None
+        self._ants_ey = None
+        self._ants_ex = None
+        self._ants_bbox = None
+
+    # ------------------------------------------------------------------
+    # Multi-component selection
+    # ------------------------------------------------------------------
+
     def _toggle_component(self, comp, layer, canvas):
         """Ctrl+click: add or remove a component from multi-selection."""
         if self._multi_comp_layer is not layer:
@@ -457,7 +562,8 @@ class MoveTool(BaseTool):
             else:
                 # Add component to selection
                 self._multi_comp_mask |= comp
-        self._show_multi_selection_bbox(canvas)
+        self._show_marching_ants_for_mask(
+            self._multi_comp_mask, layer, canvas)
 
     def _multi_comp_bbox(self):
         """Compute union bbox of multi-component selection."""
@@ -466,43 +572,9 @@ class MoveTool(BaseTool):
         from montaris.core.roi_transform import get_mask_bbox
         return get_mask_bbox(self._multi_comp_mask.view(np.uint8))
 
-    def _show_multi_selection_bbox(self, canvas):
-        """Show/update the dashed bbox around multi-selected components."""
-        self._clear_multi_bbox_items(canvas)
-        bb = self._multi_comp_bbox()
-        if bb is None:
-            return
-        cy1, cy2, cx1, cx2 = bb
-        scene = canvas.scene()
-        pen = QPen(QColor(0, 180, 255), 1.5)
-        pen.setCosmetic(True)
-        pen.setStyle(Qt.DashLine)
-        item = scene.addRect(QRectF(cx1, cy1, cx2 - cx1, cy2 - cy1), pen)
-        item.setZValue(999)
-        self._multi_bbox_items.append(item)
-
-    def _show_bbox(self, bbox, canvas):
-        """Show a dashed bbox around the given region."""
-        self._clear_multi_bbox_items(canvas)
-        cy1, cy2, cx1, cx2 = bbox
-        scene = canvas.scene()
-        pen = QPen(QColor(0, 180, 255), 1.5)
-        pen.setCosmetic(True)
-        pen.setStyle(Qt.DashLine)
-        item = scene.addRect(QRectF(cx1, cy1, cx2 - cx1, cy2 - cy1), pen)
-        item.setZValue(999)
-        self._multi_bbox_items.append(item)
-
-    def _clear_multi_bbox_items(self, canvas):
-        """Remove visual multi-selection bbox indicators."""
-        scene = canvas.scene()
-        for item in self._multi_bbox_items:
-            scene.removeItem(item)
-        self._multi_bbox_items.clear()
-
     def _clear_multi_selection(self, canvas):
         """Clear multi-component selection and its visuals."""
-        self._clear_multi_bbox_items(canvas)
+        self._clear_marching_ants(canvas)
         self._multi_comp_mask = None
         self._multi_comp_layer = None
 
