@@ -4,11 +4,15 @@ import numpy as np
 from scipy import ndimage
 
 
-def get_component_at(mask, x, y):
+def get_component_at(mask, x, y, bbox=None):
     """Return boolean mask of the connected component at (x, y).
 
     Uses binary_propagation from the seed point — only visits the target
     component, not the entire mask.
+
+    If *bbox* is provided as (y1, y2, x1, x2), operates on the cropped
+    region and embeds the result back into a full-size mask. This avoids
+    allocating/propagating over the entire image when the ROI is small.
     """
     h, w = mask.shape
     ix, iy = int(x), int(y)
@@ -16,6 +20,20 @@ def get_component_at(mask, x, y):
         return None
     if mask[iy, ix] == 0:
         return None
+
+    if bbox is not None:
+        by1, by2, bx1, bx2 = bbox
+        # Ensure click is within bbox (should always be true)
+        if by1 <= iy < by2 and bx1 <= ix < bx2:
+            crop = mask[by1:by2, bx1:bx2]
+            ly, lx = iy - by1, ix - bx1
+            seed_crop = np.zeros(crop.shape, dtype=bool)
+            seed_crop[ly, lx] = True
+            comp_crop = ndimage.binary_propagation(seed_crop, mask=(crop > 0))
+            # Embed back into full-size mask
+            result = np.zeros((h, w), dtype=bool)
+            result[by1:by2, bx1:bx2] = comp_crop
+            return result
 
     seed = np.zeros((h, w), dtype=bool)
     seed[iy, ix] = True

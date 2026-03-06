@@ -43,7 +43,9 @@ class SnapshotUndoCommand:
     def undo(self):
         for layer, old_mask, _ in self._entries:
             layer.mask[:] = old_mask
+            layer.invalidate_bbox()
 
     def redo(self):
         for layer, _, new_mask in self._entries:
             layer.mask[:] = new_mask
+            layer.invalidate_bbox()

@@ -12,13 +12,15 @@ class TransformHandle:
 
 def get_mask_bbox(mask):
     """Get bounding box of non-zero mask pixels. Returns (y1, y2, x1, x2) or None."""
-    rows = np.any(mask > 0, axis=1)
-    if not np.any(rows):
+    # Use bool view (zero-copy for uint8) to avoid repeated > 0 comparisons
+    b = mask.view(np.bool_) if mask.dtype == np.uint8 else mask > 0
+    rows = np.any(b, axis=1)
+    if not rows.any():
         return None
-    cols = np.any(mask > 0, axis=0)
-    y1, y2 = np.argmax(rows), len(rows) - np.argmax(rows[::-1])
-    x1, x2 = np.argmax(cols), len(cols) - np.argmax(cols[::-1])
-    return (y1, y2, x1, x2)
+    cols = np.any(b, axis=0)
+    rr = np.flatnonzero(rows)
+    cc = np.flatnonzero(cols)
+    return (rr[0], rr[-1] + 1, cc[0], cc[-1] + 1)
 
 
 def compute_handles(bbox):
@@ -62,10 +64,11 @@ def apply_affine_to_mask(mask, matrix, output_shape=None):
     return result
 
 
-def apply_affine_inplace(dest, snap, matrix):
+def apply_affine_inplace(dest, snap, matrix, src_bbox=None):
     """Transform snap and write result into dest in-place.
 
     Uses Pillow's C-accelerated affine transform on the bbox crop only.
+    If *src_bbox* is provided, skips the expensive full-mask bbox scan.
 
     Returns:
         (src_bbox, dst_bbox) tuple, or (None, None) if no pixels to transform.
@@ -73,7 +76,8 @@ def apply_affine_inplace(dest, snap, matrix):
     from PIL import Image
 
     h, w = dest.shape
-    src_bbox = get_mask_bbox(snap)
+    if src_bbox is None:
+        src_bbox = get_mask_bbox(snap)
     if src_bbox is None:
         return None, None
     sy1, sy2, sx1, sx2 = src_bbox

@@ -67,10 +67,18 @@ class ImageCanvas(QGraphicsView):
         # Prevent re-entrant refresh
         self._refreshing = False
 
+        # LOD / viewport culling state
+        self._roi_stale = set()       # ROI ids needing rasterization when visible
+        self._roi_lod = {}            # id(roi) -> current LOD level
+        self._roi_lod_pending = set() # ROI ids queued for LOD re-rasterization
+        self._last_lod_level = 0
+        self._lod_timer = None        # debounce timer for viewport changes
+        self.viewport_changed.connect(self._schedule_viewport_lod_check)
+
         # Rasterization progress bar (bottom of canvas)
         from PySide6.QtWidgets import QProgressBar
         self._progress_bar = QProgressBar(self)
-        self._progress_bar.setFixedHeight(3)
+        self._progress_bar.setFixedHeight(4)
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setStyleSheet(
             "QProgressBar { background: transparent; border: none; }"
@@ -208,6 +216,9 @@ class ImageCanvas(QGraphicsView):
             for item in self._roi_items.values():
                 self._scene.removeItem(item)
             self._roi_items.clear()
+            self._roi_stale.clear()
+            self._roi_lod.clear()
+            self._roi_lod_pending.clear()
             return
 
         gof = self.layer_stack._global_opacity_factor
@@ -219,6 +230,18 @@ class ImageCanvas(QGraphicsView):
         for rid in list(self._roi_items.keys()):
             if rid not in current_ids:
                 self._scene.removeItem(self._roi_items.pop(rid))
+        # Clean tracking dicts for deleted ROIs
+        self._roi_stale &= current_ids
+        self._roi_lod_pending.clear()  # full refresh makes pending obsolete
+        for rid in list(self._roi_lod):
+            if rid not in current_ids:
+                del self._roi_lod[rid]
+
+        # Viewport culling: skip off-screen ROIs
+        vp_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        use_culling = vp_rect.width() > 0 and vp_rect.height() > 0
+        lod = self._current_lod_level() if use_culling else 0
+        self._last_lod_level = lod
 
         # Show progress for large batches, process events to stay responsive
         show_progress = n > 5
@@ -229,7 +252,22 @@ class ImageCanvas(QGraphicsView):
             self._progress_bar.show()
 
         for i, roi in enumerate(rois):
-            self._refresh_roi_item(roi, i, gof)
+            rid = id(roi)
+            # Viewport cull non-active ROIs
+            if use_culling and roi != self._active_layer:
+                bbox = roi.get_bbox()
+                if bbox is not None:
+                    y1, y2, x1, x2 = bbox
+                    if not vp_rect.intersects(QRectF(x1, y1, x2 - x1, y2 - y1)):
+                        self._roi_stale.add(rid)
+                        if show_progress:
+                            self._progress_bar.setValue(i + 1)
+                        continue
+
+            self._roi_stale.discard(rid)
+            target_lod = 0 if roi == self._active_layer else lod
+            self._refresh_roi_item(roi, i, gof, lod_level=target_lod)
+            self._roi_lod[rid] = target_lod
             if show_progress:
                 self._progress_bar.setValue(i + 1)
                 if (i + 1) % 10 == 0:
@@ -238,11 +276,18 @@ class ImageCanvas(QGraphicsView):
         if show_progress:
             self._progress_bar.hide()
 
-    def flash_progress(self):
-        """Show a brief progress flash to indicate rasterization."""
+    def flash_progress(self, message=None):
+        """Show a brief progress flash to indicate rasterization.
+
+        If *message* is given, also show it in the main window statusbar.
+        """
         self._progress_bar.setRange(0, 0)  # indeterminate mode
         self._progress_bar.show()
-        self._progress_hide_timer.start(300)
+        self._progress_hide_timer.start(400)
+        if message:
+            win = self.window()
+            if hasattr(win, 'statusbar'):
+                win.statusbar.showMessage(message, 1000)
 
     def refresh_overlays_lut_only(self):
         """Re-render all ROI pixmaps (for color/opacity changes)."""
@@ -257,7 +302,10 @@ class ImageCanvas(QGraphicsView):
             index = self.layer_stack.roi_layers.index(layer)
         except ValueError:
             return
+        rid = id(layer)
+        self._roi_stale.discard(rid)
         self._refresh_roi_item(layer, index)
+        self._roi_lod[rid] = 0
         if layer in self._selection.layers:
             self._update_selection_highlights()
 
@@ -269,6 +317,7 @@ class ImageCanvas(QGraphicsView):
         """
         if layer is None or not hasattr(layer, 'mask'):
             return
+        self._roi_stale.discard(id(layer))
 
         dy1, dy2, dx1, dx2 = dirty_bbox
         dh, dw = dy2 - dy1, dx2 - dx1
@@ -332,7 +381,7 @@ class ImageCanvas(QGraphicsView):
         p.end()
         existing.setPixmap(pixmap)
 
-    def _refresh_roi_item(self, roi, index, gof=None):
+    def _refresh_roi_item(self, roi, index, gof=None, lod_level=0):
         """Create or update the QGraphicsPixmapItem for a single ROI."""
         if gof is None:
             gof = self.layer_stack._global_opacity_factor
@@ -357,8 +406,22 @@ class ImageCanvas(QGraphicsView):
         effective_opacity = int(roi.opacity * gof)
         fill_mode = getattr(roi, 'fill_mode', 'solid')
 
-        rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
         mask_crop = roi.mask[y1:y2, x1:x2]
+
+        # LOD downsampling: max-pool mask then scale up in Qt
+        scale_factor = 1
+        if lod_level > 0:
+            factor = 1 << lod_level
+            th = (bh // factor) * factor
+            tw = (bw // factor) * factor
+            if th > 0 and tw > 0:
+                mask_crop = mask_crop[:th, :tw].reshape(
+                    th // factor, factor, tw // factor, factor
+                ).max(axis=(1, 3))
+                bh, bw = th // factor, tw // factor
+                scale_factor = factor
+
+        rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
 
         if fill_mode == 'outline':
             edge = _compute_edge(mask_crop)
@@ -388,6 +451,13 @@ class ImageCanvas(QGraphicsView):
             item.setAcceptedMouseButtons(Qt.NoButton)
             self._scene.addItem(item)
             self._roi_items[rid] = item
+            existing = item
+
+        if scale_factor > 1:
+            existing.setTransformOriginPoint(x1, y1)
+            existing.setScale(scale_factor)
+        else:
+            existing.setScale(1)
 
     # ------------------------------------------------------------------
     # Brush cursor preview
@@ -449,7 +519,7 @@ class ImageCanvas(QGraphicsView):
         # Keep progress bar at bottom
         w = self.viewport().width()
         h = self.viewport().height()
-        self._progress_bar.setGeometry(0, h - 3, w, 3)
+        self._progress_bar.setGeometry(0, h - 4, w, 4)
 
     # ------------------------------------------------------------------
     # Zoom helpers
@@ -467,6 +537,99 @@ class ImageCanvas(QGraphicsView):
 
     def zoom_out(self):
         self.scale(1 / 1.25, 1 / 1.25)
+
+    # ------------------------------------------------------------------
+    # LOD / viewport culling
+    # ------------------------------------------------------------------
+
+    def _current_lod_level(self):
+        """LOD level from zoom: 0=full, 1=half, 2=quarter, 3=eighth."""
+        m = abs(self.transform().m11())
+        if m >= 0.5:
+            return 0
+        if m >= 0.25:
+            return 1
+        if m >= 0.125:
+            return 2
+        return 3
+
+    def _schedule_viewport_lod_check(self):
+        """Debounced check for stale ROIs entering viewport or LOD change."""
+        if self._lod_timer is None:
+            self._lod_timer = QTimer(self)
+            self._lod_timer.setSingleShot(True)
+            self._lod_timer.timeout.connect(self._on_viewport_changed_lod)
+        self._lod_timer.start(50)
+
+    _LOD_BATCH_SIZE = 6
+
+    def _on_viewport_changed_lod(self):
+        """Rasterize stale/pending ROIs in small batches to avoid UI hitches."""
+        # Skip LOD updates while a tool is actively dragging (transform/move preview)
+        tool = self._tool
+        if tool and (getattr(tool, '_dragging', False) or getattr(tool, '_moving', False)):
+            return
+
+        lod = self._current_lod_level()
+        lod_changed = lod != self._last_lod_level
+        self._last_lod_level = lod
+
+        if not self._roi_stale and not lod_changed and not self._roi_lod_pending:
+            return
+
+        vp_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        if vp_rect.width() <= 0 or vp_rect.height() <= 0:
+            return
+
+        gof = self.layer_stack._global_opacity_factor
+        rois = self.layer_stack.roi_layers
+
+        # On LOD change, queue visible ROIs at wrong LOD for update
+        if lod_changed:
+            for roi in rois:
+                rid = id(roi)
+                target_lod = 0 if roi == self._active_layer else lod
+                if self._roi_lod.get(rid) != target_lod and rid not in self._roi_stale:
+                    self._roi_lod_pending.add(rid)
+
+        # Process stale entries + LOD pending in a single batched pass
+        budget = self._LOD_BATCH_SIZE
+        needs_more = False
+
+        for i, roi in enumerate(rois):
+            rid = id(roi)
+            target_lod = 0 if roi == self._active_layer else lod
+
+            is_stale = rid in self._roi_stale
+            is_pending = rid in self._roi_lod_pending
+
+            if not is_stale and not is_pending:
+                continue
+
+            # Stale items need a viewport check first
+            if is_stale:
+                bbox = roi.get_bbox()
+                if bbox is None:
+                    self._roi_stale.discard(rid)
+                    continue
+                y1, y2, x1, x2 = bbox
+                if not vp_rect.intersects(QRectF(x1, y1, x2 - x1, y2 - y1)):
+                    continue  # off-screen, stays in _roi_stale
+
+            if budget <= 0:
+                needs_more = True
+                continue
+
+            # Rasterize
+            self._roi_stale.discard(rid)
+            self._roi_lod_pending.discard(rid)
+            self._refresh_roi_item(roi, i, gof, lod_level=target_lod)
+            self._roi_lod[rid] = target_lod
+            budget -= 1
+
+        # Schedule next batch if work remains
+        if needs_more:
+            self._lod_timer.start(16)
 
     # ------------------------------------------------------------------
     # Event overrides

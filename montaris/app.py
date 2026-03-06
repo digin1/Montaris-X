@@ -467,13 +467,13 @@ class MontarisApp(QMainWindow):
         toolbar.addWidget(QLabel(" Size: "))
         tb_size_slider = QSlider(Qt.Horizontal)
         tb_size_slider.setRange(1, 500)
-        tb_size_slider.setValue(10)
+        tb_size_slider.setValue(100)
         tb_size_slider.setFixedWidth(120)
         toolbar.addWidget(tb_size_slider)
 
         tb_size_spin = QSpinBox()
         tb_size_spin.setRange(1, 500)
-        tb_size_spin.setValue(10)
+        tb_size_spin.setValue(100)
         toolbar.addWidget(tb_size_spin)
 
         # Bidirectional sync between toolbar and tool_panel
@@ -1248,6 +1248,7 @@ class MontarisApp(QMainWindow):
             from montaris.core.undo import UndoCommand
             snapshot = layer.mask.copy()
             layer.mask[:] = 0
+            layer.invalidate_bbox()
             if snapshot.any():
                 ys, xs = np.where(snapshot > 0)
                 y1, y2 = ys.min(), ys.max() + 1

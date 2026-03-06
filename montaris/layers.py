@@ -66,19 +66,27 @@ class ROILayer:
         self.visible = True
         self.fill_mode = "solid"  # "solid" or "outline"
         self._dirty_rect = None  # (x, y, w, h) or None
+        self._cached_bbox = None
+        self._bbox_valid = False
 
     @property
     def shape(self):
         return self.mask.shape
 
     def invalidate_bbox(self):
-        """No-op for compatibility. Bbox is always computed fresh."""
-        pass
+        """Mark the cached bounding box as stale."""
+        self._bbox_valid = False
 
     def get_bbox(self):
-        """Compute bounding box of non-zero mask pixels."""
+        """Return bounding box of non-zero mask pixels (cached)."""
+        if self._bbox_valid:
+            return self._cached_bbox
         from montaris.core.roi_transform import get_mask_bbox
-        return get_mask_bbox(self.mask)
+        self._cached_bbox = get_mask_bbox(self.mask)
+        # Only cache non-None; empty masks recompute so direct mask
+        # assignment (without invalidate_bbox) still works correctly.
+        self._bbox_valid = self._cached_bbox is not None
+        return self._cached_bbox
 
     def mark_dirty(self, rect):
         """Mark a rectangular region as dirty.
@@ -86,6 +94,7 @@ class ROILayer:
         *rect* is ``(x, y, w, h)``.  Successive calls expand the dirty
         region to the union of all supplied rects.
         """
+        self.invalidate_bbox()
         if self._dirty_rect is None:
             self._dirty_rect = rect
         else:
@@ -148,6 +157,7 @@ class LayerStack(QObject):
         for idx in indices[1:]:
             roi = self.roi_layers[idx]
             target.mask = np.maximum(target.mask, roi.mask)
+        target.invalidate_bbox()
         # Remove merged layers in reverse order
         for idx in sorted(indices[1:], reverse=True):
             self.roi_layers.pop(idx)

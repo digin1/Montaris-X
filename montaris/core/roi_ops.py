@@ -25,6 +25,7 @@ def fix_overlaps(roi_layers, priority="later_wins"):
             current = roi.mask > 0
             # Remove pixels claimed by later layers
             roi.mask[claimed & current] = 0
+            roi.invalidate_bbox()
             claimed |= current
     else:
         # Earlier layers keep priority
@@ -32,6 +33,7 @@ def fix_overlaps(roi_layers, priority="later_wins"):
         for roi in roi_layers:
             current = roi.mask > 0
             roi.mask[claimed & current] = 0
+            roi.invalidate_bbox()
             claimed |= current
 
     return roi_layers
@@ -68,6 +70,7 @@ def auto_fit_rois(roi_layers, image_w, image_h):
             img = Image.fromarray(roi.mask)
             img = img.resize((image_w, image_h), Image.NEAREST)
             roi.mask = np.array(img)
+            roi.invalidate_bbox()
             count += 1
             continue
         # Check if content is out of bounds (shouldn't happen if sizes match)
@@ -91,6 +94,7 @@ def auto_fit_rois(roi_layers, image_w, image_h):
             new_xs = np.clip(xs + dx, 0, image_w - 1)
             new_mask[new_ys, new_xs] = roi.mask[ys, xs]
             roi.mask = new_mask
+            roi.invalidate_bbox()
             count += 1
     return count
 

@@ -303,7 +303,7 @@ class TestTransformToolGUI:
         tool._start_pos = QPointF(br.x, br.y)
         tool._dragging = True
         tool._target_layers = [roi1]
-        tool._snapshots = {id(roi1): (roi1, original.copy())}
+        tool._snapshots = {id(roi1): (roi1, original.copy(), None)}
         # Scale up — preview only, mask rasterized on release
         tool.on_move(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
         tool.on_release(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
@@ -322,7 +322,7 @@ class TestTransformToolGUI:
         tool._start_pos = QPointF(rot.x, rot.y)
         tool._dragging = True
         tool._target_layers = [roi1]
-        tool._snapshots = {id(roi1): (roi1, original.copy())}
+        tool._snapshots = {id(roi1): (roi1, original.copy(), None)}
         tool.on_move(QPointF(rot.x + 10, rot.y), roi1, app.canvas)
         tool.on_release(QPointF(rot.x + 10, rot.y), roi1, app.canvas)
         assert not np.array_equal(roi1.mask, original)
@@ -339,7 +339,7 @@ class TestTransformToolGUI:
         tool._start_pos = QPointF(br.x, br.y)
         tool._dragging = True
         tool._target_layers = [roi1]
-        tool._snapshots = {id(roi1): (roi1, original.copy())}
+        tool._snapshots = {id(roi1): (roi1, original.copy(), None)}
         tool.on_move(QPointF(br.x + 20, br.y + 20), roi1, app.canvas)
         # Escape restores original mask
         tool.on_key_press(Qt.Key_Escape, app.canvas)
@@ -357,7 +357,7 @@ class TestTransformToolGUI:
         tool._start_pos = QPointF(br.x, br.y)
         tool._dragging = True
         tool._target_layers = [roi1]
-        tool._snapshots = {id(roi1): (roi1, original.copy())}
+        tool._snapshots = {id(roi1): (roi1, original.copy(), None)}
         tool.on_move(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
         tool.on_release(QPointF(br.x + 5, br.y + 5), roi1, app.canvas)
         app.undo_stack.undo()

@@ -10,9 +10,10 @@ from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
 from montaris.core.roi_transform import (
-    TransformHandle, get_mask_bbox, compute_handles, apply_affine_to_mask,
+    TransformHandle, compute_handles, apply_affine_to_mask,
     apply_affine_inplace, make_scale_matrix, make_rotation_matrix,
 )
+from montaris.core.components import get_component_at
 
 HANDLE_HIT_RADIUS = 24
 
@@ -51,6 +52,8 @@ class TransformTool(BaseTool):
         self._hidden_layers = []
         self._rotation = 0.0  # cumulative rotation angle in radians
         self._session_snapshots = {}  # persistent snapshots for entire transform session
+        self._session_bboxes = {}  # id(layer) -> bbox at session start
+        self._snap_bboxes = {}  # id(layer) -> bbox at operation start
         self._cumulative_matrix = None  # accumulated transform from session start
 
     def _get_target_layers(self, layer, canvas):
@@ -64,7 +67,7 @@ class TransformTool(BaseTool):
         """Compute union bounding box across all target layers."""
         y1_min, y2_max, x1_min, x2_max = None, None, None, None
         for l in layers:
-            bbox = get_mask_bbox(l.mask)
+            bbox = l.get_bbox()
             if bbox is None:
                 continue
             y1, y2, x1, x2 = bbox
@@ -92,21 +95,34 @@ class TransformTool(BaseTool):
             self._dragging = True
             self._target_layers = self._get_target_layers(layer, canvas)
             # Use session snapshots (original state) for OOB recovery;
-            # current mask state for undo diff
-            self._snapshots = {
-                id(l): (l, l.mask.copy()) for l in self._target_layers
-            }
-            # Session snapshot: taken once on first handle use, preserved across operations
+            # current mask state for undo diff (crop-only for speed)
+            self._snapshots = {}
+            self._snap_bboxes = {}
             for l in self._target_layers:
                 lid = id(l)
+                sb = l.get_bbox()
+                self._snap_bboxes[lid] = sb
+                # Session snapshot: taken once on first handle use (full mask).
+                # On first click, share full mask ref as undo snapshot too.
                 if lid not in self._session_snapshots:
-                    self._session_snapshots[lid] = l.mask.copy()
+                    full_snap = l.mask.copy()
+                    self._session_snapshots[lid] = full_snap
+                    self._session_bboxes[lid] = sb
+                    self._snapshots[lid] = (l, full_snap, sb)
+                else:
+                    # Subsequent ops: crop-only snapshot (fast)
+                    if sb is not None:
+                        crop = l.mask[sb[0]:sb[1], sb[2]:sb[3]].copy()
+                    else:
+                        crop = None
+                    self._snapshots[lid] = (l, crop, sb)
             self._create_previews(canvas)
             return
 
         # First click: show handles — component-aware (D.14)
         self._rotation = 0.0
         self._session_snapshots.clear()
+        self._session_bboxes.clear()
         self._cumulative_matrix = None
         self._target_layers = self._get_target_layers(layer, canvas)
         self._component_mask = None
@@ -117,15 +133,20 @@ class TransformTool(BaseTool):
             ix, iy = int(pos.x()), int(pos.y())
             h, w = layer.mask.shape
             if 0 <= iy < h and 0 <= ix < w and layer.mask[iy, ix] > 0:
-                from montaris.core.components import get_component_at
-                comp = get_component_at(layer.mask, ix, iy)
+                layer_bbox = layer.get_bbox()
+                comp = get_component_at(layer.mask, ix, iy, bbox=layer_bbox)
                 if comp is not None:
-                    total = np.count_nonzero(layer.mask)
-                    comp_px = np.count_nonzero(comp)
+                    # Count pixels within the bbox crop to avoid full-mask scans
+                    by1, by2, bx1, bx2 = layer_bbox
+                    crop = layer.mask[by1:by2, bx1:bx2]
+                    comp_crop = comp[by1:by2, bx1:bx2]
+                    total = np.count_nonzero(crop)
+                    comp_px = np.count_nonzero(comp_crop)
                     if comp_px < total:
                         self._component_mask = comp
-                        ys, xs = np.where(comp)
-                        bbox = (ys.min(), ys.max() + 1, xs.min(), xs.max() + 1)
+                        cys, cxs = np.where(comp_crop)
+                        bbox = (cys.min() + by1, cys.max() + 1 + by1,
+                                cxs.min() + bx1, cxs.max() + 1 + bx1)
                         self._show_handles(bbox, canvas)
                         return
 
@@ -228,14 +249,9 @@ class TransformTool(BaseTool):
         if not self._dragging or not self._snapshots:
             return
         self._dragging = False
+        canvas.flash_progress("Applying transform…")
 
         affected = [l for l, _ in self._hidden_layers]
-
-        # Show progress bar immediately
-        from PySide6.QtWidgets import QApplication
-        canvas._progress_bar.setRange(0, 0)
-        canvas._progress_bar.show()
-        QApplication.processEvents()
 
         # Accumulate transform matrix for session-level OOB preservation
         M = getattr(self, '_current_matrix', None)
@@ -253,21 +269,26 @@ class TransformTool(BaseTool):
         # Rasterize from session snapshot using cumulative matrix (preserves OOB pixels)
         bbox_pairs = {}  # lid -> (src_bbox, dst_bbox)
         if M is not None:
-            for lid, (l, snap) in self._snapshots.items():
+            for lid, (l, snap_data, sb) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
                 session_snap = self._session_snapshots.get(lid)
                 if session_snap is not None and self._cumulative_matrix is not None:
                     cum_2x3 = self._cumulative_matrix[:2]
                     l.mask[:] = 0
-                    src_bb, dst_bb = apply_affine_inplace(l.mask, session_snap, cum_2x3)
+                    src_bb, dst_bb = apply_affine_inplace(
+                        l.mask, session_snap, cum_2x3,
+                        src_bbox=self._session_bboxes.get(lid))
                 else:
-                    src_bb, dst_bb = apply_affine_inplace(l.mask, snap, M)
+                    # snap_data may be a full mask or crop — session path preferred
+                    src_bb, dst_bb = apply_affine_inplace(
+                        l.mask, session_snap if session_snap is not None else snap_data, M,
+                        src_bbox=self._snap_bboxes.get(lid))
                 bbox_pairs[lid] = (src_bb, dst_bb)
                 l.invalidate_bbox()
 
         commands = []
-        for lid, (l, snap) in self._snapshots.items():
+        for lid, (l, snap_data, sb) in self._snapshots.items():
             src_bb, dst_bb = bbox_pairs.get(lid, (None, None))
             if src_bb is None and dst_bb is None:
                 continue
@@ -276,12 +297,26 @@ class TransformTool(BaseTool):
             y2 = max(b[1] for b in bbs)
             x1 = min(b[2] for b in bbs)
             x2 = max(b[3] for b in bbs)
-            region_old = snap[y1:y2, x1:x2]
+            # Reconstruct old region from snapshot (may be crop or full mask)
+            if sb is not None and snap_data is not None and snap_data.shape != l.mask.shape:
+                # Crop-only snapshot: embed into zero-padded region
+                sy1, sy2, sx1, sx2 = sb
+                region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                # Overlap between union region and snap bbox
+                oy1, oy2 = max(y1, sy1), min(y2, sy2)
+                ox1, ox2 = max(x1, sx1), min(x2, sx2)
+                if oy2 > oy1 and ox2 > ox1:
+                    region_old[oy1 - y1:oy2 - y1, ox1 - x1:ox2 - x1] = \
+                        snap_data[oy1 - sy1:oy2 - sy1, ox1 - sx1:ox2 - sx1]
+            elif snap_data is not None:
+                region_old = snap_data[y1:y2, x1:x2].copy()
+            else:
+                region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
             region_new = l.mask[y1:y2, x1:x2]
             if not np.array_equal(region_old, region_new):
                 cmd = UndoCommand(
                     l, (y1, y2, x1, x2),
-                    region_old.copy(),
+                    region_old if region_old.base is None else region_old.copy(),
                     region_new.copy(),
                 )
                 commands.append(cmd)
@@ -324,14 +359,16 @@ class TransformTool(BaseTool):
 
         # Defer expensive visual rebuild to next frame (render + highlights)
         def _deferred_rebuild():
+            lod = canvas._current_lod_level()
             for l in affected:
                 try:
                     idx = canvas.layer_stack.roi_layers.index(l)
-                    canvas._refresh_roi_item(l, idx)
+                    target_lod = 0 if l == canvas._active_layer else lod
+                    canvas._refresh_roi_item(l, idx, lod_level=target_lod)
+                    canvas._roi_lod[id(l)] = target_lod
                 except ValueError:
                     pass
             canvas._update_selection_highlights()
-            canvas._progress_bar.hide()
 
         QTimer.singleShot(0, _deferred_rebuild)
 
@@ -413,7 +450,7 @@ class TransformTool(BaseTool):
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
 
-        for lid, (l, snap) in self._snapshots.items():
+        for lid, (l, snap_data, sb) in self._snapshots.items():
             rid = id(l)
             if rid in canvas._roi_items:
                 # Reference existing item — no pop, no z-change, no scene modification
@@ -426,10 +463,13 @@ class TransformTool(BaseTool):
             item.resetTransform()
         self._preview_items.clear()
         if re_render:
+            lod = canvas._current_lod_level()
             for l, _ in getattr(self, '_hidden_layers', []):
                 try:
                     idx = canvas.layer_stack.roi_layers.index(l)
-                    canvas._refresh_roi_item(l, idx)
+                    target_lod = 0 if l == canvas._active_layer else lod
+                    canvas._refresh_roi_item(l, idx, lod_level=target_lod)
+                    canvas._roi_lod[id(l)] = target_lod
                 except ValueError:
                     pass
             canvas._update_selection_highlights()
