@@ -18,8 +18,8 @@ class MoveTool(BaseTool):
         self._start_pos = None
         self._snapshots = {}  # id(layer) -> (layer, snapshot)
         self._target_layers = []
-        self._component_mask = None  # If moving a single component
-        self._component_bbox = None  # bbox of clicked component
+        self._component_mask = None  # Combined mask of selected components
+        self._component_bbox = None  # union bbox of selected components
         self._preview_items = []
         self._old_bboxes = {}  # id(layer) -> bbox at press time
 
@@ -27,6 +27,10 @@ class MoveTool(BaseTool):
         self._preview_offsets = []  # (bx1, by1) per preview item
         self._temp_scene_items = []  # temporary items (remainder pixmap, bbox)
         self._bbox_item = None
+        # Persistent multi-component selection (survives between drags)
+        self._multi_comp_mask = None  # combined bool mask of Ctrl+clicked components
+        self._multi_comp_layer = None  # the layer these components belong to
+        self._multi_bbox_items = []  # visual bbox indicators for selection
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -39,31 +43,50 @@ class MoveTool(BaseTool):
         if layer is None or not hasattr(layer, 'mask'):
             return
 
+        from PySide6.QtWidgets import QApplication
+        ctrl = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+
         ix, iy = int(pos.x()), int(pos.y())
 
-        # Check if clicking on a painted pixel for component-aware move (D.13)
+        # Check if clicking on a painted pixel for component-aware move
         sel = canvas._selection.layers
-        multi = sel and layer in sel and len(sel) > 1
+        multi_layer = sel and layer in sel and len(sel) > 1
 
-        if not multi and hasattr(layer, 'mask'):
+        if not multi_layer and hasattr(layer, 'mask'):
             h, w = layer.mask.shape
             if 0 <= iy < h and 0 <= ix < w and layer.mask[iy, ix] > 0:
                 layer_bbox = layer.get_bbox()
                 comp = get_component_at(layer.mask, ix, iy, bbox=layer_bbox)
-                # Only use component mode if there are multiple components
                 if comp is not None:
                     by1, by2, bx1, bx2 = layer_bbox
                     crop = layer.mask[by1:by2, bx1:bx2]
                     comp_crop = comp[by1:by2, bx1:bx2]
                     total_pixels = np.count_nonzero(crop)
                     comp_pixels = np.count_nonzero(comp_crop)
-                    if comp_pixels < total_pixels:
-                        # Compute tight component bbox
-                        cys, cxs = np.where(comp_crop)
-                        comp_bb = (int(cys.min()) + by1, int(cys.max()) + 1 + by1,
-                                   int(cxs.min()) + bx1, int(cxs.max()) + 1 + bx1)
-                        self._component_mask = comp
-                        self._component_bbox = comp_bb
+                    has_multiple = comp_pixels < total_pixels
+
+                    if has_multiple and ctrl:
+                        # Ctrl+click: toggle component in multi-selection
+                        self._toggle_component(comp, layer, canvas)
+                        return
+
+                    if has_multiple:
+                        # Check if clicking on a pixel in the multi-selection
+                        if (self._multi_comp_mask is not None
+                                and self._multi_comp_layer is layer
+                                and self._multi_comp_mask[iy, ix]):
+                            # Move all selected components
+                            self._component_mask = self._multi_comp_mask
+                            self._component_bbox = self._multi_comp_bbox()
+                        else:
+                            # Single component move — clear multi-selection
+                            self._clear_multi_selection(canvas)
+                            cys, cxs = np.where(comp_crop)
+                            comp_bb = (int(cys.min()) + by1, int(cys.max()) + 1 + by1,
+                                       int(cxs.min()) + bx1, int(cxs.max()) + 1 + bx1)
+                            self._component_mask = comp
+                            self._component_bbox = comp_bb
+
                         self._target_layers = [layer]
                         self._moving = True
                         self._start_pos = pos
@@ -72,8 +95,14 @@ class MoveTool(BaseTool):
                         self._create_previews(canvas)
                         return
 
+            # Clicked on empty space or non-component pixel — clear multi-selection
+            if self._multi_comp_mask is not None:
+                self._clear_multi_selection(canvas)
+
         # Whole-layer move
         self._component_mask = None
+        self._component_bbox = None
+        self._clear_multi_selection(canvas)
         self._target_layers = self._get_target_layers(layer, canvas)
         has_content = any(
             l.get_bbox() is not None for l in self._target_layers
@@ -217,6 +246,20 @@ class MoveTool(BaseTool):
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
 
+        # Update multi-component selection mask to new positions
+        had_multi = (self._multi_comp_mask is not None
+                     and self._component_mask is self._multi_comp_mask)
+        if had_multi:
+            idx_dy, idx_dx = int(round(dy)), int(round(dx))
+            old_mask = self._multi_comp_mask
+            new_mask = np.zeros_like(old_mask)
+            ys, xs = np.where(old_mask)
+            nys, nxs = ys + idx_dy, xs + idx_dx
+            mh, mw = new_mask.shape
+            valid = (nys >= 0) & (nys < mh) & (nxs >= 0) & (nxs < mw)
+            new_mask[nys[valid], nxs[valid]] = True
+            self._multi_comp_mask = new_mask
+
         self._snapshots.clear()
         self._old_bboxes = {}
         self._target_layers.clear()
@@ -236,6 +279,10 @@ class MoveTool(BaseTool):
                 pass
         canvas._update_selection_highlights()
 
+        # Re-show multi-selection bbox at new position
+        if had_multi:
+            self._show_multi_selection_bbox(canvas)
+
     def _create_previews(self, canvas):
         """Use existing ROI pixmap items as live preview (zero scene changes)."""
         for item in self._preview_items:
@@ -244,8 +291,10 @@ class MoveTool(BaseTool):
         self._preview_offsets = []
         self._hidden_layers = []
 
-        # Hide selection highlights during drag
+        # Hide selection highlights and multi-selection bbox during drag
         for item in canvas._selection_highlight_items:
+            item.setVisible(False)
+        for item in self._multi_bbox_items:
             item.setVisible(False)
 
         if self._component_mask is not None:
@@ -370,6 +419,66 @@ class MoveTool(BaseTool):
             canvas._update_selection_highlights()
         self._hidden_layers = []
         self._preview_offsets = []
+
+    def _toggle_component(self, comp, layer, canvas):
+        """Ctrl+click: add or remove a component from multi-selection."""
+        if self._multi_comp_layer is not layer:
+            # Switching layers — start fresh
+            self._clear_multi_selection(canvas)
+            self._multi_comp_mask = comp.copy()
+            self._multi_comp_layer = layer
+        else:
+            # Check if this component overlaps existing selection
+            overlap = self._multi_comp_mask & comp
+            if np.any(overlap):
+                # Remove component from selection
+                self._multi_comp_mask[comp] = False
+                if not np.any(self._multi_comp_mask):
+                    self._clear_multi_selection(canvas)
+                    return
+            else:
+                # Add component to selection
+                self._multi_comp_mask |= comp
+        self._show_multi_selection_bbox(canvas)
+
+    def _multi_comp_bbox(self):
+        """Compute union bbox of multi-component selection."""
+        if self._multi_comp_mask is None:
+            return None
+        from montaris.core.roi_transform import get_mask_bbox
+        return get_mask_bbox(self._multi_comp_mask.view(np.uint8))
+
+    def _show_multi_selection_bbox(self, canvas):
+        """Show/update the dashed bbox around multi-selected components."""
+        self._clear_multi_bbox_items(canvas)
+        bb = self._multi_comp_bbox()
+        if bb is None:
+            return
+        cy1, cy2, cx1, cx2 = bb
+        scene = canvas.scene()
+        pen = QPen(QColor(0, 180, 255), 1.5)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+        item = scene.addRect(QRectF(cx1, cy1, cx2 - cx1, cy2 - cy1), pen)
+        item.setZValue(999)
+        self._multi_bbox_items.append(item)
+
+    def _clear_multi_bbox_items(self, canvas):
+        """Remove visual multi-selection bbox indicators."""
+        scene = canvas.scene()
+        for item in self._multi_bbox_items:
+            scene.removeItem(item)
+        self._multi_bbox_items.clear()
+
+    def _clear_multi_selection(self, canvas):
+        """Clear multi-component selection and its visuals."""
+        self._clear_multi_bbox_items(canvas)
+        self._multi_comp_mask = None
+        self._multi_comp_layer = None
+
+    def _clear_handles(self, canvas):
+        """Called by canvas on tool/layer switch to clean up state."""
+        self._clear_multi_selection(canvas)
 
     def cursor(self):
         return Qt.SizeAllCursor
