@@ -104,6 +104,11 @@ class ImageCanvas(QGraphicsView):
         self._update_cursor()
 
     def set_active_layer(self, layer):
+        if layer is not self._active_layer:
+            # Clear transform/move handles when switching layers
+            tool = self._tool
+            if tool is not None and hasattr(tool, '_clear_handles'):
+                tool._clear_handles(self)
         self._active_layer = layer
 
     def _on_selection_changed(self, layers):

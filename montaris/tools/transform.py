@@ -710,6 +710,12 @@ class TransformTool(BaseTool):
         self._hovered_handle = None
         if self._preview_items:
             self._remove_previews(canvas)
+        # Reset session state so it doesn't carry to a different layer
+        self._component_mask = None
+        self._component_bbox = None
+        self._session_snapshots.clear()
+        self._session_bboxes.clear()
+        self._cumulative_matrix = None
 
     def cursor(self):
         return Qt.SizeAllCursor
