@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QSlider, QSpinBox,
-    QButtonGroup, QHBoxLayout, QDialog, QFormLayout, QDialogButtonBox,
+    QButtonGroup, QHBoxLayout,
 )
 from PySide6.QtCore import Signal, Qt
 from montaris.tools import TOOL_REGISTRY, get_tool_class
@@ -80,11 +80,40 @@ class ToolPanel(QWidget):
         tol_layout.addWidget(self.tolerance_spin)
         layout.addLayout(tol_layout)
 
-        # Stamp settings (C.19) — shown when Stamp active
-        self.stamp_settings_btn = QPushButton("Stamp Settings...")
-        self.stamp_settings_btn.setVisible(False)
-        self.stamp_settings_btn.clicked.connect(self._open_stamp_settings)
-        layout.addWidget(self.stamp_settings_btn)
+        # Stamp W/H inputs — shown when Stamp active
+        self.stamp_label = QLabel("Stamp Size")
+        self.stamp_label.setVisible(False)
+        layout.addWidget(self.stamp_label)
+
+        stamp_layout = QHBoxLayout()
+        stamp_layout.setContentsMargins(0, 0, 0, 0)
+        stamp_w_label = QLabel("W:")
+        stamp_w_label.setVisible(False)
+        self._stamp_w_label = stamp_w_label
+        stamp_layout.addWidget(stamp_w_label)
+
+        self.stamp_w_spin = QSpinBox()
+        self.stamp_w_spin.setRange(1, 1000)
+        self.stamp_w_spin.setValue(20)
+        self.stamp_w_spin.setSuffix(" px")
+        self.stamp_w_spin.setVisible(False)
+        self.stamp_w_spin.valueChanged.connect(self._on_stamp_size_changed)
+        stamp_layout.addWidget(self.stamp_w_spin)
+
+        stamp_h_label = QLabel("H:")
+        stamp_h_label.setVisible(False)
+        self._stamp_h_label = stamp_h_label
+        stamp_layout.addWidget(stamp_h_label)
+
+        self.stamp_h_spin = QSpinBox()
+        self.stamp_h_spin.setRange(1, 1000)
+        self.stamp_h_spin.setValue(20)
+        self.stamp_h_spin.setSuffix(" px")
+        self.stamp_h_spin.setVisible(False)
+        self.stamp_h_spin.valueChanged.connect(self._on_stamp_size_changed)
+        stamp_layout.addWidget(self.stamp_h_spin)
+
+        layout.addLayout(stamp_layout)
 
         self.finish_polygon_btn = QPushButton("Close Polygon (Enter)")
         self.finish_polygon_btn.clicked.connect(self._finish_polygon)
@@ -133,8 +162,8 @@ class ToolPanel(QWidget):
             tool.size = self.size_slider.value()
         # Apply stamp dimensions
         if hasattr(tool, 'width') and hasattr(tool, 'height'):
-            tool.width = getattr(self, '_stamp_width', 20)
-            tool.height = getattr(self, '_stamp_height', 20)
+            tool.width = self.stamp_w_spin.value()
+            tool.height = self.stamp_h_spin.value()
         # Apply tolerance
         if hasattr(tool, 'tolerance'):
             tool.tolerance = self.tolerance_slider.value()
@@ -145,7 +174,12 @@ class ToolPanel(QWidget):
         self.tolerance_label.setVisible(is_bucket)
         self.tolerance_slider.setVisible(is_bucket)
         self.tolerance_spin.setVisible(is_bucket)
-        self.stamp_settings_btn.setVisible(tool_name == "Stamp")
+        is_stamp = tool_name == "Stamp"
+        self.stamp_label.setVisible(is_stamp)
+        self._stamp_w_label.setVisible(is_stamp)
+        self.stamp_w_spin.setVisible(is_stamp)
+        self._stamp_h_label.setVisible(is_stamp)
+        self.stamp_h_spin.setVisible(is_stamp)
 
         self._current_tool = tool
         self._current_tool_name = tool_name
@@ -167,29 +201,10 @@ class ToolPanel(QWidget):
         if self._current_tool and hasattr(self._current_tool, 'tolerance'):
             self._current_tool.tolerance = value
 
-    def _open_stamp_settings(self):
-        """Open stamp W/H settings dialog (C.19)."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Stamp Settings")
-        form = QFormLayout(dlg)
-        w_spin = QSpinBox()
-        w_spin.setRange(1, 1000)
-        w_spin.setValue(getattr(self, '_stamp_width', 20))
-        h_spin = QSpinBox()
-        h_spin.setRange(1, 1000)
-        h_spin.setValue(getattr(self, '_stamp_height', 20))
-        form.addRow("Width:", w_spin)
-        form.addRow("Height:", h_spin)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        form.addRow(bb)
-        if dlg.exec():
-            self._stamp_width = w_spin.value()
-            self._stamp_height = h_spin.value()
-            if self._current_tool and hasattr(self._current_tool, 'width'):
-                self._current_tool.width = self._stamp_width
-                self._current_tool.height = self._stamp_height
+    def _on_stamp_size_changed(self):
+        if self._current_tool and hasattr(self._current_tool, 'width'):
+            self._current_tool.width = self.stamp_w_spin.value()
+            self._current_tool.height = self.stamp_h_spin.value()
 
     def _finish_polygon(self):
         if self._current_tool and isinstance(self._current_tool, PolygonTool):
