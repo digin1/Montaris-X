@@ -51,7 +51,14 @@ class MontarisApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Montaris-X")
-        self.resize(1400, 900)
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            w = min(1400, avail.width() - 20)
+            h = min(900, avail.height() - 20)
+            self.resize(w, h)
+        else:
+            self.resize(1400, 900)
         _logo = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
         if os.path.exists(_logo):
             self.setWindowIcon(QIcon(_logo))
