@@ -299,6 +299,7 @@ class ImageCanvas(QGraphicsView):
             ox, oy = nx1, ny1
 
         p = QPainter(pixmap)
+        p.setCompositionMode(QPainter.CompositionMode_Source)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(r, g, b, alpha))
         p.drawEllipse(cx - radius - ox, cy - radius - oy,
@@ -358,6 +359,7 @@ class ImageCanvas(QGraphicsView):
             ox, oy = nx1, ny1
 
         p = QPainter(pixmap)
+        p.setCompositionMode(QPainter.CompositionMode_Source)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(r, g, b, alpha))
         p.drawRect(rx1 - ox, ry1 - oy, rx2 - rx1, ry2 - ry1)
