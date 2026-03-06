@@ -265,30 +265,32 @@ def imagej_roi_to_mask(roi_dict, width, height):
     Returns:
         uint8 mask array
     """
-    from skimage.draw import polygon as draw_polygon
-
     mask = np.zeros((height, width), dtype=np.uint8)
 
     # Composite ROI: multiple sub-paths with even-odd fill (XOR)
     paths = roi_dict.get('paths')
     if paths:
         import time
+        from PIL import Image, ImageDraw
         print(f"  [mask] Composite ROI: {len(paths)} paths, canvas {width}x{height}")
         for pi, path in enumerate(paths):
             if len(path) >= 3:
                 t0 = time.time()
-                xs = np.array([p[0] for p in path], dtype=np.float64)
-                ys = np.array([p[1] for p in path], dtype=np.float64)
-                x0 = max(0, int(np.floor(xs.min())))
-                y0 = max(0, int(np.floor(ys.min())))
-                x1 = min(width, int(np.ceil(xs.max())) + 1)
-                y1 = min(height, int(np.ceil(ys.max())) + 1)
+                xs = [p[0] for p in path]
+                ys = [p[1] for p in path]
+                x0 = max(0, int(min(xs)))
+                y0 = max(0, int(min(ys)))
+                x1 = min(width, int(max(xs)) + 2)
+                y1 = min(height, int(max(ys)) + 2)
                 bw, bh = x1 - x0, y1 - y0
+                xy = [(round(x) - x0, round(y) - y0) for x, y in path]
                 print(f"  [mask]   path {pi}: {len(path)} pts, bbox {bw}x{bh}...", end='', flush=True)
-                rr, cc = draw_polygon(ys - y0, xs - x0, shape=(bh, bw))
-                print(f" {time.time()-t0:.3f}s, {len(rr)} px")
-                if len(rr) > 0:
-                    mask[rr + y0, cc + x0] ^= 255
+                sub_img = Image.new('L', (bw, bh), 0)
+                draw = ImageDraw.Draw(sub_img)
+                draw.polygon(xy, fill=255)
+                sub = np.array(sub_img)
+                mask[y0:y1, x0:x1] ^= sub
+                print(f" {time.time()-t0:.3f}s")
         return mask
 
     roi_type = roi_dict['type']
@@ -324,18 +326,14 @@ def imagej_roi_to_mask(roi_dict, width, height):
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
             import time
+            from PIL import Image, ImageDraw
             t0 = time.time()
-            xf = x_coords.astype(np.float64)
-            yf = y_coords.astype(np.float64)
-            # Bounding-box-scoped draw for performance
-            x0 = max(0, int(np.floor(xf.min())))
-            y0 = max(0, int(np.floor(yf.min())))
-            x1 = min(width, int(np.ceil(xf.max())) + 1)
-            y1 = min(height, int(np.ceil(yf.max())) + 1)
-            bw, bh = x1 - x0, y1 - y0
-            print(f"  [mask] Polygon: {len(x_coords)} pts, bbox {bw}x{bh}, drawing...", end='', flush=True)
-            rr, cc = draw_polygon(yf - y0, xf - x0, shape=(bh, bw))
-            mask[rr + y0, cc + x0] = 255
+            print(f"  [mask] Polygon: {len(x_coords)} pts, drawing...", end='', flush=True)
+            img = Image.new('L', (width, height), 0)
+            draw = ImageDraw.Draw(img)
+            xy = list(zip(x_coords.tolist(), y_coords.tolist()))
+            draw.polygon(xy, fill=255)
+            mask[:] = np.array(img)
             print(f" {time.time()-t0:.3f}s")
 
     return mask
