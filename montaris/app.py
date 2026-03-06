@@ -1169,9 +1169,22 @@ class MontarisApp(QMainWindow):
 
 
 def main():
+    # Windows: set AppUserModelID so taskbar uses our icon, not Python's
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('montaris.montaris-x')
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setApplicationName("Montaris-X")
     app.setOrganizationName("Montaris")
+
+    _logo = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+    if os.path.exists(_logo):
+        app.setWindowIcon(QIcon(_logo))
+
     apply_dark_theme(app)
     window = MontarisApp()
     window.show()
