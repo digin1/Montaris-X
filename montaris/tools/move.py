@@ -32,6 +32,13 @@ class MoveTool(BaseTool):
         self._multi_comp_layer = None  # the layer these components belong to
         self._multi_bbox_items = []  # visual bbox indicators for selection
 
+    def on_activate(self, layer, canvas):
+        """Called when the move tool is selected — show bbox for active layer."""
+        if layer is not None and hasattr(layer, 'mask'):
+            bb = layer.get_bbox()
+            if bb is not None:
+                self._show_bbox(bb, canvas)
+
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
         sel = canvas._selection.layers

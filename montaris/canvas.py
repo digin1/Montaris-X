@@ -102,6 +102,8 @@ class ImageCanvas(QGraphicsView):
         self.hide_brush_preview()
         self._hide_stamp_preview()
         self._update_cursor()
+        if tool is not None and hasattr(tool, 'on_activate'):
+            tool.on_activate(self._active_layer, self)
 
     def set_active_layer(self, layer):
         if layer is not self._active_layer:
@@ -109,7 +111,12 @@ class ImageCanvas(QGraphicsView):
             tool = self._tool
             if tool is not None and hasattr(tool, '_clear_handles'):
                 tool._clear_handles(self)
-        self._active_layer = layer
+            self._active_layer = layer
+            # Re-show bbox for new layer if tool supports it
+            if tool is not None and hasattr(tool, 'on_activate'):
+                tool.on_activate(layer, self)
+        else:
+            self._active_layer = layer
 
     def _on_selection_changed(self, layers):
         """Sync _active_layer to primary selection and update highlights."""
