@@ -1,24 +1,24 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QSlider, QSpinBox,
-    QButtonGroup, QHBoxLayout, QStackedWidget, QSizePolicy,
+    QButtonGroup, QHBoxLayout,
 )
 from PySide6.QtCore import Signal, Qt
 from montaris.tools import TOOL_REGISTRY, get_tool_class
 from montaris.tools.polygon import PolygonTool
 
-# Tool icons: Unicode symbols for collapsed icon strip
+# Tool icons: Unicode symbols for collapsed toolbar
 TOOL_ICONS = {
-    'Hand': '✋',
-    'Select': '⬚',
-    'Brush': '✎',
-    'Eraser': '⌫',
-    'Polygon': '⬠',
-    'Bucket Fill': '▼',
-    'Rectangle': '▭',
-    'Circle': '○',
-    'Stamp': '■',
-    'Transform': '⟲',
-    'Move': '✥',
+    'Hand': '\u270b',
+    'Select': '\u2b1a',
+    'Brush': '\u270e',
+    'Eraser': '\u232b',
+    'Polygon': '\u2b20',
+    'Bucket Fill': '\u25bc',
+    'Rectangle': '\u25ad',
+    'Circle': '\u25cb',
+    'Stamp': '\u25a0',
+    'Transform': '\u27f2',
+    'Move': '\u2725',
 }
 
 
@@ -29,35 +29,14 @@ class ToolPanel(QWidget):
         super().__init__(parent)
         self.app = app
         self._tool_buttons = {}
-        self._icon_buttons = {}
-        self._collapsed = False
 
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-
-        # Toggle button at the top
-        self._toggle_btn = QPushButton("◀")
-        self._toggle_btn.setFixedHeight(22)
-        self._toggle_btn.setToolTip("Collapse/Expand tools panel")
-        self._toggle_btn.clicked.connect(self.toggle_collapsed)
-        self._toggle_btn.setStyleSheet(
-            "QPushButton { border: none; font-size: 12px; padding: 2px; }"
-        )
-        root_layout.addWidget(self._toggle_btn)
-
-        # Stacked widget: page 0 = expanded, page 1 = collapsed icon strip
-        self._stack = QStackedWidget()
-        root_layout.addWidget(self._stack)
-
-        # --- Expanded view ---
-        expanded = QWidget()
-        layout = QVBoxLayout(expanded)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(False)
 
+        # Build tool buttons from registry, grouped by category
         categories = {}
         for name, (module, cls_name, shortcut, category) in TOOL_REGISTRY.items():
             categories.setdefault(category, []).append((name, shortcut))
@@ -163,31 +142,6 @@ class ToolPanel(QWidget):
         layout.addWidget(self.deselect_btn)
 
         layout.addStretch()
-        self._stack.addWidget(expanded)
-
-        # --- Collapsed icon strip ---
-        collapsed = QWidget()
-        icon_layout = QVBoxLayout(collapsed)
-        icon_layout.setContentsMargins(2, 2, 2, 2)
-        icon_layout.setSpacing(2)
-
-        for name in TOOL_REGISTRY:
-            shortcut = TOOL_REGISTRY[name][2]
-            icon = TOOL_ICONS.get(name, shortcut)
-            ibtn = QPushButton(icon)
-            ibtn.setCheckable(True)
-            ibtn.setFixedSize(32, 32)
-            ibtn.setToolTip(f"{name} [{shortcut}]")
-            ibtn.setStyleSheet(
-                "QPushButton { font-size: 16px; padding: 0; }"
-                "QPushButton:checked { background-color: #507cc8; }"
-            )
-            ibtn.clicked.connect(lambda checked, t=name: self._select_tool(t))
-            icon_layout.addWidget(ibtn)
-            self._icon_buttons[name] = ibtn
-
-        icon_layout.addStretch()
-        self._stack.addWidget(collapsed)
 
         self._current_tool = None
         self._current_tool_name = None
@@ -207,22 +161,6 @@ class ToolPanel(QWidget):
         layout.addWidget(btn)
         return btn
 
-    def toggle_collapsed(self):
-        self._collapsed = not self._collapsed
-        self._stack.setCurrentIndex(1 if self._collapsed else 0)
-        self._toggle_btn.setText("▶" if self._collapsed else "◀")
-        # Sync icon button states
-        for name, ibtn in self._icon_buttons.items():
-            ibtn.setChecked(name == self._current_tool_name)
-        # Adjust parent dock width
-        dock = self.parent()
-        if dock and hasattr(dock, 'setFixedWidth'):
-            if self._collapsed:
-                dock.setFixedWidth(44)
-            else:
-                dock.setMinimumWidth(0)
-                dock.setMaximumWidth(16777215)
-
     def _select_tool(self, tool_name):
         if tool_name not in TOOL_REGISTRY:
             return
@@ -230,8 +168,6 @@ class ToolPanel(QWidget):
         # Uncheck other buttons (manual exclusive)
         for name, btn in self._tool_buttons.items():
             btn.setChecked(name == tool_name)
-        for name, ibtn in self._icon_buttons.items():
-            ibtn.setChecked(name == tool_name)
 
         tool_cls = get_tool_class(tool_name)
         tool = tool_cls(self.app)
@@ -268,8 +204,6 @@ class ToolPanel(QWidget):
         """Deselect all tools (C.23)."""
         for btn in self._tool_buttons.values():
             btn.setChecked(False)
-        for ibtn in self._icon_buttons.values():
-            ibtn.setChecked(False)
         self._current_tool = None
         self._current_tool_name = None
         self.tool_changed.emit(None)

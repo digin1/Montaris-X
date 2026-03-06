@@ -162,6 +162,35 @@ class MontarisApp(QMainWindow):
         self.layer_panel.set_selection_model(self.canvas._selection)
         self.canvas._selection.changed.connect(self._on_selection_count_changed)
 
+        # Collapsed left toolbar (hidden by default)
+        self._left_toolbar = QToolBar("Tools", self)
+        self._left_toolbar.setOrientation(Qt.Vertical)
+        self._left_toolbar.setMovable(False)
+        self._left_toolbar.setIconSize(self._left_toolbar.iconSize())
+        self.addToolBar(Qt.LeftToolBarArea, self._left_toolbar)
+        self._left_toolbar.setVisible(False)
+        self._left_collapsed = False
+
+        # Expand button
+        from montaris.widgets.tool_panel import TOOL_ICONS
+        expand_act = QAction("▶", self)
+        expand_act.setToolTip("Expand sidebar (Ctrl+[)")
+        expand_act.triggered.connect(self._toggle_left_sidebar)
+        self._left_toolbar.addAction(expand_act)
+        self._left_toolbar.addSeparator()
+
+        # Tool icon actions
+        self._left_tool_actions = {}
+        from montaris.tools import TOOL_REGISTRY
+        for name, (module, cls_name, shortcut, category) in TOOL_REGISTRY.items():
+            icon = TOOL_ICONS.get(name, shortcut)
+            act = QAction(f"{icon}", self)
+            act.setToolTip(f"{name} [{shortcut}]")
+            act.setCheckable(True)
+            act.triggered.connect(lambda checked, t=name: self.tool_panel._select_tool(t))
+            self._left_toolbar.addAction(act)
+            self._left_tool_actions[name] = act
+
         # Connections
         self.tool_panel.tool_changed.connect(self._on_tool_changed)
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
@@ -453,7 +482,18 @@ class MontarisApp(QMainWindow):
         self.statusbar.showMessage(f"X: {x}  Y: {y}  Value: {value}{roi_info}")
 
     def _toggle_left_sidebar(self):
-        self.tool_panel.toggle_collapsed()
+        self._left_collapsed = not getattr(self, '_left_collapsed', False)
+        left_docks = [self._tool_dock, self._minimap_dock]
+        if self._left_collapsed:
+            # Hide docks, show icon toolbar
+            for d in left_docks:
+                d.setVisible(False)
+            self._left_toolbar.setVisible(True)
+        else:
+            # Show docks, hide icon toolbar
+            self._left_toolbar.setVisible(False)
+            for d in left_docks:
+                d.setVisible(True)
 
     def _toggle_right_sidebar(self):
         right_docks = [
@@ -474,6 +514,9 @@ class MontarisApp(QMainWindow):
         if self.canvas._active_layer and hasattr(self.canvas._active_layer, 'name'):
             roi_info = f"  |  {self.canvas._active_layer.name}"
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
+        # Sync collapsed toolbar actions
+        for name, act in self._left_tool_actions.items():
+            act.setChecked(name == tool_name)
 
     def _on_layer_selected(self, layer):
         self.canvas.set_active_layer(layer)
