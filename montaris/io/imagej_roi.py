@@ -133,14 +133,8 @@ def read_imagej_roi(path_or_bytes):
     return result
 
 
-def write_imagej_roi(roi_dict, path):
-    """Write a single ImageJ .roi file.
-
-    Args:
-        roi_dict: dict with 'type', 'top', 'left', 'bottom', 'right',
-                  optionally 'x_coords', 'y_coords'
-        path: output file path
-    """
+def _build_roi_bytes(roi_dict):
+    """Build binary ROI data from a roi_dict. Supports both simple and composite ROIs."""
     buf = io.BytesIO()
 
     roi_type = roi_dict.get('type', ROI_RECT)
@@ -148,65 +142,57 @@ def write_imagej_roi(roi_dict, path):
     left = roi_dict['left']
     bottom = roi_dict['bottom']
     right = roi_dict['right']
+    paths = roi_dict.get('paths')
     x_coords = roi_dict.get('x_coords')
     y_coords = roi_dict.get('y_coords')
     n_coords = len(x_coords) if x_coords is not None else 0
 
-    # Header
+    # Build shape array for composite ROIs
+    shape_floats = []
+    if paths:
+        for path in paths:
+            if len(path) < 3:
+                continue
+            shape_floats.append(0.0)  # SEG_MOVETO
+            shape_floats.append(float(path[0][0]))
+            shape_floats.append(float(path[0][1]))
+            for x, y in path[1:]:
+                shape_floats.append(1.0)  # SEG_LINETO
+                shape_floats.append(float(x))
+                shape_floats.append(float(y))
+            shape_floats.append(4.0)  # SEG_CLOSE
+
+    shape_roi_size = len(shape_floats)
+
+    # Header (offset 0)
     buf.write(MAGIC)
     buf.write(struct.pack('>H', VERSION))
     buf.write(struct.pack('B', roi_type))
     buf.write(b'\x00')  # padding
 
+    # Bounding box + n_coords (offset 8)
     buf.write(struct.pack('>h', top))
     buf.write(struct.pack('>h', left))
     buf.write(struct.pack('>h', bottom))
     buf.write(struct.pack('>h', right))
     buf.write(struct.pack('>H', n_coords))
+
+    # Pad from current position to offset 36
+    current = buf.tell()  # should be 18
+    buf.write(b'\x00' * (36 - current))
+
+    # shape_roi_size at offset 36
+    buf.write(struct.pack('>i', shape_roi_size))
 
     # Pad to 64 bytes
-    current = buf.tell()
+    current = buf.tell()  # should be 40
     buf.write(b'\x00' * (64 - current))
 
-    # Coordinates (relative to top-left)
-    if roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
-        for x in x_coords:
-            buf.write(struct.pack('>h', int(x) - left))
-        for y in y_coords:
-            buf.write(struct.pack('>h', int(y) - top))
-
-    with open(path, 'wb') as f:
-        f.write(buf.getvalue())
-
-
-def write_imagej_roi_bytes(roi_dict):
-    """Write a single ImageJ ROI to bytes (for ZIP export)."""
-    buf = io.BytesIO()
-
-    roi_type = roi_dict.get('type', ROI_RECT)
-    top = roi_dict['top']
-    left = roi_dict['left']
-    bottom = roi_dict['bottom']
-    right = roi_dict['right']
-    x_coords = roi_dict.get('x_coords')
-    y_coords = roi_dict.get('y_coords')
-    n_coords = len(x_coords) if x_coords is not None else 0
-
-    buf.write(MAGIC)
-    buf.write(struct.pack('>H', VERSION))
-    buf.write(struct.pack('B', roi_type))
-    buf.write(b'\x00')
-
-    buf.write(struct.pack('>h', top))
-    buf.write(struct.pack('>h', left))
-    buf.write(struct.pack('>h', bottom))
-    buf.write(struct.pack('>h', right))
-    buf.write(struct.pack('>H', n_coords))
-
-    current = buf.tell()
-    buf.write(b'\x00' * (64 - current))
-
-    if roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
+    # Data section (offset 64)
+    if shape_roi_size > 0:
+        for val in shape_floats:
+            buf.write(struct.pack('>f', val))
+    elif roi_type in (ROI_POLYGON, ROI_FREEHAND, ROI_TRACED) and n_coords > 0:
         for x in x_coords:
             buf.write(struct.pack('>h', int(x) - left))
         for y in y_coords:
@@ -215,12 +201,26 @@ def write_imagej_roi_bytes(roi_dict):
     return buf.getvalue()
 
 
-def mask_to_imagej_roi(mask, name=""):
-    """Convert a binary mask to an ImageJ ROI dict (freehand contour).
+def write_imagej_roi(roi_dict, path):
+    """Write a single ImageJ .roi file."""
+    with open(path, 'wb') as f:
+        f.write(_build_roi_bytes(roi_dict))
 
-    Uses contour tracing to extract the boundary.
-    Returns a dict suitable for write_imagej_roi.
+
+def write_imagej_roi_bytes(roi_dict):
+    """Write a single ImageJ ROI to bytes (for ZIP export)."""
+    return _build_roi_bytes(roi_dict)
+
+
+def mask_to_imagej_roi(mask, name=""):
+    """Convert a binary mask to an ImageJ ROI dict.
+
+    Uses skimage.measure.find_contours for proper contour tracing.
+    Single contour → freehand ROI with x/y coords.
+    Multiple contours (holes) → composite ROI with paths.
     """
+    from skimage.measure import find_contours
+
     ys, xs = np.where(mask > 0)
     if len(ys) == 0:
         return None
@@ -230,44 +230,27 @@ def mask_to_imagej_roi(mask, name=""):
     left = int(xs.min())
     right = int(xs.max()) + 1
 
-    # Simple contour: find boundary pixels
-    boundary_x = []
-    boundary_y = []
-    h, w = mask.shape
-
-    # Edge detection: pixel is boundary if any 4-neighbor is 0 or out-of-bounds
-    padded = np.pad(mask, 1, mode='constant', constant_values=0)
-    for y in range(top, bottom):
-        for x in range(left, right):
-            if mask[y, x] > 0:
-                py, px = y + 1, x + 1  # padded coords
-                if (padded[py - 1, px] == 0 or padded[py + 1, px] == 0 or
-                        padded[py, px - 1] == 0 or padded[py, px + 1] == 0):
-                    boundary_x.append(x)
-                    boundary_y.append(y)
-
-    if not boundary_x:
+    contours = find_contours(mask, 0.5)
+    if not contours:
         return None
 
-    # Sort boundary points by angle from centroid for proper contour ordering
-    cx = np.mean(boundary_x)
-    cy = np.mean(boundary_y)
-    angles = np.arctan2(
-        np.array(boundary_y) - cy,
-        np.array(boundary_x) - cx
-    )
-    order = np.argsort(angles)
-    boundary_x = np.array(boundary_x)[order]
-    boundary_y = np.array(boundary_y)[order]
-
+    # Always use composite ROI with float paths for sub-pixel precision
+    paths = []
+    for c in contours:
+        if np.allclose(c[0], c[-1]) and len(c) > 1:
+            c = c[:-1]
+        # find_contours returns (row, col) = (y, x)
+        path = [(float(pt[1]), float(pt[0])) for pt in c]
+        paths.append(path)
     return {
         'type': ROI_FREEHAND,
         'top': top,
         'left': left,
         'bottom': bottom,
         'right': right,
-        'x_coords': boundary_x.astype(np.int32),
-        'y_coords': boundary_y.astype(np.int32),
+        'x_coords': None,
+        'y_coords': None,
+        'paths': paths,
         'name': name,
     }
 
