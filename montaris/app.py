@@ -164,6 +164,7 @@ class MontarisApp(QMainWindow):
 
         # Collapsed left toolbar (hidden by default)
         self._left_toolbar = QToolBar("Tools", self)
+        self._left_toolbar.setObjectName("LeftToolBar")
         self._left_toolbar.setOrientation(Qt.Vertical)
         self._left_toolbar.setMovable(False)
         self.addToolBar(Qt.LeftToolBarArea, self._left_toolbar)
@@ -190,6 +191,7 @@ class MontarisApp(QMainWindow):
 
         # Collapsed right toolbar (hidden by default)
         self._right_toolbar = QToolBar("Panels", self)
+        self._right_toolbar.setObjectName("RightToolBar")
         self._right_toolbar.setOrientation(Qt.Vertical)
         self._right_toolbar.setMovable(False)
         self.addToolBar(Qt.RightToolBarArea, self._right_toolbar)
