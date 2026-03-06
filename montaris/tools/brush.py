@@ -7,15 +7,13 @@ from montaris.core.multi_undo import CompoundUndoCommand
 
 class BrushTool(BaseTool):
     name = "Brush"
-    zoom_compensated = True
 
     def __init__(self, app):
         super().__init__(app)
-        self.size = 10
+        self.size = 100
         self._painting = False
         self._last_pos = None
         self._snapshot = None
-        self._canvas = None
         self._other_snapshots = {}  # id(layer) -> (layer, snapshot)
         self._stroke_bbox = None  # (y1, y2, x1, x2) accumulated during stroke
 
@@ -24,7 +22,6 @@ class BrushTool(BaseTool):
             return
         self._painting = True
         self._last_pos = pos
-        self._canvas = canvas
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
 
@@ -42,8 +39,7 @@ class BrushTool(BaseTool):
         if not self._painting or layer is None:
             return
         h, w = layer.mask.shape
-        effective = self._effective_size()
-        r = effective // 2
+        r = self.size // 2
         lx, ly = int(self._last_pos.x()), int(self._last_pos.y())
         px, py = int(pos.x()), int(pos.y())
         self._paint_line(self._last_pos, pos, layer)
@@ -105,21 +101,12 @@ class BrushTool(BaseTool):
             canvas.refresh_active_overlay(layer)
 
         self._snapshot = None
-        self._canvas = None
         self._stroke_bbox = None
         self._other_snapshots.clear()
 
-    def _effective_size(self):
-        if self._canvas is not None:
-            zoom = self._canvas.transform().m11()
-            if zoom > 0:
-                return max(1, int(self.size / zoom))
-        return self.size
-
     def _paint(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
-        effective = self._effective_size()
-        r = effective // 2
+        r = self.size // 2
         h, w = layer.mask.shape
 
         y, x = np.ogrid[-r:r + 1, -r:r + 1]
@@ -152,8 +139,7 @@ class BrushTool(BaseTool):
         x1, y1 = p1.x(), p1.y()
         x2, y2 = p2.x(), p2.y()
         dist = max(abs(x2 - x1), abs(y2 - y1))
-        effective = self._effective_size()
-        steps = max(1, int(dist / max(1, effective // 3)))
+        steps = max(1, int(dist / max(1, self.size // 3)))
         for i in range(steps + 1):
             t = i / max(1, steps)
             x = x1 + (x2 - x1) * t

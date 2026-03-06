@@ -6,15 +6,13 @@ from montaris.core.undo import UndoCommand
 
 class EraserTool(BaseTool):
     name = "Eraser"
-    zoom_compensated = True
 
     def __init__(self, app):
         super().__init__(app)
-        self.size = 10
+        self.size = 100
         self._erasing = False
         self._last_pos = None
         self._snapshot = None
-        self._canvas = None
         self._stroke_bbox = None
 
     def on_press(self, pos, layer, canvas):
@@ -22,7 +20,6 @@ class EraserTool(BaseTool):
             return
         self._erasing = True
         self._last_pos = pos
-        self._canvas = canvas
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
         self._erase(pos, layer)
@@ -32,8 +29,7 @@ class EraserTool(BaseTool):
         if not self._erasing or layer is None:
             return
         h, w = layer.mask.shape
-        effective = self._effective_size()
-        r = effective // 2
+        r = self.size // 2
         lx, ly = int(self._last_pos.x()), int(self._last_pos.y())
         px, py = int(pos.x()), int(pos.y())
         self._erase_line(self._last_pos, pos, layer)
@@ -60,20 +56,11 @@ class EraserTool(BaseTool):
                 self.app.undo_stack.push(cmd)
         canvas.refresh_active_overlay(layer)
         self._snapshot = None
-        self._canvas = None
         self._stroke_bbox = None
-
-    def _effective_size(self):
-        if self._canvas is not None:
-            zoom = self._canvas.transform().m11()
-            if zoom > 0:
-                return max(1, int(self.size / zoom))
-        return self.size
 
     def _erase(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
-        effective = self._effective_size()
-        r = effective // 2
+        r = self.size // 2
         h, w = layer.mask.shape
 
         y, x = np.ogrid[-r:r + 1, -r:r + 1]
@@ -106,8 +93,7 @@ class EraserTool(BaseTool):
         x1, y1 = p1.x(), p1.y()
         x2, y2 = p2.x(), p2.y()
         dist = max(abs(x2 - x1), abs(y2 - y1))
-        effective = self._effective_size()
-        steps = max(1, int(dist / max(1, effective // 3)))
+        steps = max(1, int(dist / max(1, self.size // 3)))
         for i in range(steps + 1):
             t = i / max(1, steps)
             x = x1 + (x2 - x1) * t

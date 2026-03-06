@@ -609,11 +609,7 @@ class ImageCanvas(QGraphicsView):
         self._hide_stamp_preview()
 
         if self._tool and hasattr(self._tool, 'size') and not self._is_panning:
-            zoom = self.transform().m11()
-            if zoom > 0 and getattr(self._tool, 'zoom_compensated', False):
-                radius = self._tool.size / zoom / 2
-            else:
-                radius = self._tool.size / 2
+            radius = self._tool.size / 2
             self.show_brush_preview(scene_pos.x(), scene_pos.y(), radius)
         else:
             self.hide_brush_preview()
