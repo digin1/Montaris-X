@@ -923,20 +923,14 @@ class MontarisApp(QMainWindow):
     def load_instructions_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Instructions", "",
-            "JSON (*.json);;Text (*.txt);;All Files (*)",
+            "Text (*.txt);;All Files (*)",
         )
         if not path:
             return
         try:
             with open(path, 'r') as f:
                 self._last_instructions_text = f.read()
-            from montaris.io.instructions import load_instructions, apply_instructions
-            instructions = load_instructions(path)
-            log = apply_instructions(self, instructions)
-            self.layer_panel.refresh()
-            for msg in log:
-                self.debug_console.log(msg)
-            self.toast.show(f"Applied instructions from {os.path.basename(path)}", "success")
+            self.toast.show(f"Loaded instructions: {os.path.basename(path)}", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load instructions:\n{e}")
 
