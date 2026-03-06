@@ -66,13 +66,16 @@ def apply_affine_inplace(dest, snap, matrix):
     """Transform snap and write result into dest in-place.
 
     Uses Pillow's C-accelerated affine transform on the bbox crop only.
+
+    Returns:
+        (src_bbox, dst_bbox) tuple, or (None, None) if no pixels to transform.
     """
     from PIL import Image
 
     h, w = dest.shape
     src_bbox = get_mask_bbox(snap)
     if src_bbox is None:
-        return
+        return None, None
     sy1, sy2, sx1, sx2 = src_bbox
     dest[sy1:sy2, sx1:sx2] = 0
 
@@ -87,7 +90,7 @@ def apply_affine_inplace(dest, snap, matrix):
     try:
         M_inv = np.linalg.inv(M3)
     except np.linalg.LinAlgError:
-        return
+        return src_bbox, None
 
     # Forward-transform source bbox corners to find output region
     corners = np.array([
@@ -101,9 +104,10 @@ def apply_affine_inplace(dest, snap, matrix):
     oy2 = min(h, int(np.ceil(dst_corners[1].max())))
 
     if ox2 <= ox1 or oy2 <= oy1:
-        return
+        return src_bbox, None
 
     out_w, out_h = ox2 - ox1, oy2 - oy1
+    dst_bbox = (oy1, oy2, ox1, ox2)
 
     # Pillow inverse affine: map output pixel (ox, oy) → crop pixel (cx, cy)
     pil_data = (
@@ -122,6 +126,8 @@ def apply_affine_inplace(dest, snap, matrix):
     out_region = dest[oy1:oy2, ox1:ox2]
     nz = result_arr > 0
     out_region[nz] = result_arr[nz]
+
+    return src_bbox, dst_bbox
 
 
 def _apply_affine_bbox(mask, matrix, result, h_out, w_out, bbox=None):

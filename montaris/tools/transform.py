@@ -228,23 +228,24 @@ class TransformTool(BaseTool):
         canvas._progress_bar.show()
         QApplication.processEvents()
 
-        # Rasterize: apply the final transform to the actual mask data
+        # Rasterize and collect bboxes for undo diff (no redundant get_mask_bbox)
         M = getattr(self, '_current_matrix', None)
+        bbox_pairs = {}  # lid -> (src_bbox, dst_bbox)
         if M is not None:
             for lid, (l, snap) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
-                apply_affine_inplace(l.mask, snap, M)
+                src_bb, dst_bb = apply_affine_inplace(l.mask, snap, M)
+                bbox_pairs[lid] = (src_bb, dst_bb)
                 l.invalidate_bbox()
         _t1 = _time.perf_counter()
 
         commands = []
         for lid, (l, snap) in self._snapshots.items():
-            old_bb = get_mask_bbox(snap)
-            new_bb = get_mask_bbox(l.mask)
-            if old_bb is None and new_bb is None:
+            src_bb, dst_bb = bbox_pairs.get(lid, (None, None))
+            if src_bb is None and dst_bb is None:
                 continue
-            bbs = [b for b in (old_bb, new_bb) if b is not None]
+            bbs = [b for b in (src_bb, dst_bb) if b is not None]
             y1 = min(b[0] for b in bbs)
             y2 = max(b[1] for b in bbs)
             x1 = min(b[2] for b in bbs)
@@ -267,16 +268,20 @@ class TransformTool(BaseTool):
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
 
         self._active_handle = None
-        self._snapshots.clear()
         self._start_pos = None
         self._current_matrix = None
         self._preview_items.clear()
         self._hidden_layers = []
 
-        # Show handles immediately (fast)
-        bbox = self._compute_union_bbox(self._target_layers)
-        if bbox:
-            self._show_handles(bbox, canvas)
+        # Show handles using dst_bbox (no extra get_mask_bbox call)
+        new_bboxes = [dst_bb for src_bb, dst_bb in bbox_pairs.values() if dst_bb is not None]
+        if new_bboxes:
+            y1 = min(b[0] for b in new_bboxes)
+            y2 = max(b[1] for b in new_bboxes)
+            x1 = min(b[2] for b in new_bboxes)
+            x2 = max(b[3] for b in new_bboxes)
+            self._show_handles((y1, y2, x1, x2), canvas)
+        self._snapshots.clear()
         _t3 = _time.perf_counter()
         print(f"[TRANSFORM release] affine={_t1-_t0:.3f}s undo={_t2-_t1:.3f}s handles={_t3-_t2:.3f}s sync_total={_t3-_t0:.3f}s")
 
