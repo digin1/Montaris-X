@@ -281,9 +281,14 @@ class MoveTool(BaseTool):
                 pass
         canvas._update_selection_highlights()
 
-        # Show persistent bbox around moved component(s)
+        # Show persistent bbox around moved content
         if self._multi_comp_mask is not None:
             self._show_multi_selection_bbox(canvas)
+        elif len(affected) == 1:
+            # Whole-layer move: show bbox around the layer's content
+            bb = affected[0].get_bbox()
+            if bb is not None:
+                self._show_bbox(bb, canvas)
 
     def _create_previews(self, canvas):
         """Use existing ROI pixmap items as live preview (zero scene changes)."""
@@ -457,6 +462,18 @@ class MoveTool(BaseTool):
         if bb is None:
             return
         cy1, cy2, cx1, cx2 = bb
+        scene = canvas.scene()
+        pen = QPen(QColor(0, 180, 255), 1.5)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+        item = scene.addRect(QRectF(cx1, cy1, cx2 - cx1, cy2 - cy1), pen)
+        item.setZValue(999)
+        self._multi_bbox_items.append(item)
+
+    def _show_bbox(self, bbox, canvas):
+        """Show a dashed bbox around the given region."""
+        self._clear_multi_bbox_items(canvas)
+        cy1, cy2, cx1, cx2 = bbox
         scene = canvas.scene()
         pen = QPen(QColor(0, 180, 255), 1.5)
         pen.setCosmetic(True)
