@@ -246,12 +246,13 @@ class MoveTool(BaseTool):
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
 
-        # Update multi-component selection mask to new positions
-        had_multi = (self._multi_comp_mask is not None
-                     and self._component_mask is self._multi_comp_mask)
-        if had_multi:
+        # Update component selection mask to new positions and promote
+        # single-component drags to a persistent multi-selection
+        comp_mask_used = self._component_mask
+        moved_layer = self._target_layers[0] if self._target_layers else None
+        if comp_mask_used is not None and moved_layer is not None:
             idx_dy, idx_dx = int(round(dy)), int(round(dx))
-            old_mask = self._multi_comp_mask
+            old_mask = comp_mask_used
             new_mask = np.zeros_like(old_mask)
             ys, xs = np.where(old_mask)
             nys, nxs = ys + idx_dy, xs + idx_dx
@@ -259,6 +260,7 @@ class MoveTool(BaseTool):
             valid = (nys >= 0) & (nys < mh) & (nxs >= 0) & (nxs < mw)
             new_mask[nys[valid], nxs[valid]] = True
             self._multi_comp_mask = new_mask
+            self._multi_comp_layer = moved_layer
 
         self._snapshots.clear()
         self._old_bboxes = {}
@@ -279,8 +281,8 @@ class MoveTool(BaseTool):
                 pass
         canvas._update_selection_highlights()
 
-        # Re-show multi-selection bbox at new position
-        if had_multi:
+        # Show persistent bbox around moved component(s)
+        if self._multi_comp_mask is not None:
             self._show_multi_selection_bbox(canvas)
 
     def _create_previews(self, canvas):
