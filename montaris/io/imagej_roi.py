@@ -277,9 +277,8 @@ def imagej_roi_to_mask(roi_dict, width, height):
                 xs = [p[0] for p in path]
                 ys = [p[1] for p in path]
                 rr, cc = draw_polygon(ys, xs, shape=(height, width))
-                sub = np.zeros((height, width), dtype=np.uint8)
-                sub[rr, cc] = 255
-                mask ^= sub
+                if len(rr) > 0:
+                    mask[rr, cc] ^= 255
         return mask
 
     roi_type = roi_dict['type']
