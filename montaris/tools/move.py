@@ -1,5 +1,6 @@
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRectF, QLineF
+from PySide6.QtGui import QPen, QColor, QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -18,11 +19,14 @@ class MoveTool(BaseTool):
         self._snapshots = {}  # id(layer) -> (layer, snapshot)
         self._target_layers = []
         self._component_mask = None  # If moving a single component
+        self._component_bbox = None  # bbox of clicked component
         self._preview_items = []
         self._old_bboxes = {}  # id(layer) -> bbox at press time
 
         self._hidden_layers = []
         self._preview_offsets = []  # (bx1, by1) per preview item
+        self._temp_scene_items = []  # temporary items (remainder pixmap, bbox)
+        self._bbox_item = None
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -54,7 +58,12 @@ class MoveTool(BaseTool):
                     total_pixels = np.count_nonzero(crop)
                     comp_pixels = np.count_nonzero(comp_crop)
                     if comp_pixels < total_pixels:
+                        # Compute tight component bbox
+                        cys, cxs = np.where(comp_crop)
+                        comp_bb = (int(cys.min()) + by1, int(cys.max()) + 1 + by1,
+                                   int(cxs.min()) + bx1, int(cxs.max()) + 1 + bx1)
                         self._component_mask = comp
+                        self._component_bbox = comp_bb
                         self._target_layers = [layer]
                         self._moving = True
                         self._start_pos = pos
@@ -94,6 +103,11 @@ class MoveTool(BaseTool):
         for i, item in enumerate(self._preview_items):
             bx1, by1 = self._preview_offsets[i]
             item.setOffset(bx1 + dx, by1 + dy)
+
+        # Move bbox indicator
+        if self._bbox_item and self._component_bbox:
+            cy1, cy2, cx1, cx2 = self._component_bbox
+            self._bbox_item.setRect(QRectF(cx1 + dx, cy1 + dy, cx2 - cx1, cy2 - cy1))
 
     def on_release(self, pos, layer, canvas):
         if not self._moving:
@@ -208,6 +222,7 @@ class MoveTool(BaseTool):
         self._target_layers.clear()
         self._start_pos = None
         self._component_mask = None
+        self._component_bbox = None
 
         # Re-render only the affected ROI items (mask now updated)
         lod = canvas._current_lod_level()
@@ -233,6 +248,10 @@ class MoveTool(BaseTool):
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
 
+        if self._component_mask is not None:
+            self._create_component_previews(canvas)
+            return
+
         for lid, (l, snap_data, sb) in self._snapshots.items():
             rid = id(l)
             if rid in canvas._roi_items:
@@ -242,13 +261,102 @@ class MoveTool(BaseTool):
                 self._preview_offsets.append((off.x(), off.y()))
             self._hidden_layers.append((l, True))
 
+    def _create_component_previews(self, canvas):
+        """Split ROI into component (draggable) and remainder (static) pixmaps."""
+        l = self._target_layers[0]
+        lid = id(l)
+        rid = id(l)
+        comp = self._component_mask
+        scene = canvas.scene()
+
+        # Hide the real ROI item
+        real_item = canvas._roi_items.get(rid)
+        z = real_item.zValue() if real_item else 10
+        if real_item:
+            real_item.setVisible(False)
+        self._hidden_layers.append((l, True))
+
+        r, g, b = l.color
+        gof = canvas.layer_stack._global_opacity_factor
+        eff = int(l.opacity * gof)
+
+        layer_bb = l.get_bbox()
+        if layer_bb is None:
+            return
+        ly1, ly2, lx1, lx2 = layer_bb
+        lh, lw = ly2 - ly1, lx2 - lx1
+        mask_crop = l.mask[ly1:ly2, lx1:lx2]
+        comp_crop = comp[ly1:ly2, lx1:lx2]
+
+        current_comp = (mask_crop > 0) & comp_crop
+        non_comp = (mask_crop > 0) & ~comp_crop
+
+        # Component-only pixmap (moves with drag)
+        cys, cxs = np.where(current_comp)
+        if len(cys) > 0:
+            cy1 = int(cys.min()) + ly1
+            cy2 = int(cys.max()) + 1 + ly1
+            cx1 = int(cxs.min()) + lx1
+            cx2 = int(cxs.max()) + 1 + lx1
+            ch, cw = cy2 - cy1, cx2 - cx1
+            comp_region = current_comp[cy1 - ly1:cy2 - ly1, cx1 - lx1:cx2 - lx1]
+            rgba = np.zeros((ch, cw, 4), dtype=np.uint8)
+            rgba[comp_region] = [r, g, b, eff]
+            rgba = np.ascontiguousarray(rgba)
+            qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
+            comp_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+            comp_item.setOffset(cx1, cy1)
+            comp_item.setZValue(z)
+            comp_item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(comp_item)
+            self._preview_items.append(comp_item)
+            self._preview_offsets.append((cx1, cy1))
+            self._temp_scene_items.append(comp_item)
+
+        # Remainder pixmap (static)
+        if np.any(non_comp):
+            rem_rgba = np.zeros((lh, lw, 4), dtype=np.uint8)
+            rem_rgba[non_comp] = [r, g, b, eff]
+            rem_rgba = np.ascontiguousarray(rem_rgba)
+            qimg2 = QImage(rem_rgba.data, lw, lh, lw * 4, QImage.Format_RGBA8888)
+            rem_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg2))
+            rem_item.setOffset(lx1, ly1)
+            rem_item.setZValue(z - 1)
+            rem_item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(rem_item)
+            self._temp_scene_items.append(rem_item)
+
+        # Bbox indicator around the component
+        if self._component_bbox:
+            cy1, cy2, cx1, cx2 = self._component_bbox
+            pen = QPen(QColor(0, 180, 255), 1.5)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.DashLine)
+            self._bbox_item = scene.addRect(
+                QRectF(cx1, cy1, cx2 - cx1, cy2 - cy1), pen
+            )
+            self._bbox_item.setZValue(999)
+            self._temp_scene_items.append(self._bbox_item)
+
     def _remove_previews(self, canvas, re_render=True):
         """Reset preview offsets. If re_render, also rebuild affected ROI items."""
+        # Remove temporary scene items (component mode)
+        scene = canvas.scene()
+        for item in self._temp_scene_items:
+            scene.removeItem(item)
+        self._temp_scene_items.clear()
+        self._bbox_item = None
+        # Reset non-temp preview items
         for i, item in enumerate(self._preview_items):
-            if i < len(self._preview_offsets):
+            if item.scene() and i < len(self._preview_offsets):
                 bx1, by1 = self._preview_offsets[i]
                 item.setOffset(bx1, by1)
         self._preview_items.clear()
+        # Restore visibility of hidden real items
+        for l, _ in self._hidden_layers:
+            rid = id(l)
+            if rid in canvas._roi_items:
+                canvas._roi_items[rid].setVisible(True)
         if re_render:
             lod = canvas._current_lod_level()
             for l, _ in self._hidden_layers:
