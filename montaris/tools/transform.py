@@ -268,7 +268,34 @@ class TransformTool(BaseTool):
 
         # Rasterize from session snapshot using cumulative matrix (preserves OOB pixels)
         bbox_pairs = {}  # lid -> (src_bbox, dst_bbox)
-        if M is not None:
+        if M is not None and self._component_mask is not None:
+            # Component-aware: transform only the clicked component
+            l = self._target_layers[0]
+            lid = id(l)
+            session_snap = self._session_snapshots.get(lid)
+            snap_bb = self._snap_bboxes.get(lid)  # bbox before this drag
+            if session_snap is not None and self._cumulative_matrix is not None:
+                cum_2x3 = self._cumulative_matrix[:2]
+                comp = self._component_mask
+                # Restore non-component pixels from session snapshot
+                l.mask[:] = session_snap
+                l.mask[comp] = 0
+                # Transform only component pixels (don't clear dest — non-component pixels live there)
+                comp_snap = np.zeros_like(session_snap)
+                comp_snap[comp] = session_snap[comp]
+                src_bb, dst_bb = apply_affine_inplace(
+                    l.mask, comp_snap, cum_2x3,
+                    src_bbox=self._session_bboxes.get(lid),
+                    clear_src=False)
+                # For undo diff, include snap bbox (previous component position)
+                # so the union region covers both old and new component locations
+                if snap_bb is not None:
+                    src_bb = snap_bb if src_bb is None else (
+                        min(src_bb[0], snap_bb[0]), max(src_bb[1], snap_bb[1]),
+                        min(src_bb[2], snap_bb[2]), max(src_bb[3], snap_bb[3]))
+                bbox_pairs[lid] = (src_bb, dst_bb)
+                l.invalidate_bbox()
+        elif M is not None:
             for lid, (l, snap_data, sb) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
