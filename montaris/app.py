@@ -513,6 +513,18 @@ class MontarisApp(QMainWindow):
         self._doc_combo.currentIndexChanged.connect(self._switch_to_document)
         toolbar.addWidget(self._doc_combo)
 
+        toolbar.addSeparator()
+
+        # Move tool hint — only visible when Move is active
+        self._move_hint = QLabel(
+            " Hint: Drag outside components to move all selected ROIs. "
+            "Drag a component to move it independently. "
+            "Ctrl+click to multi-select components."
+        )
+        self._move_hint.setStyleSheet("color: #888; font-size: 11px;")
+        self._move_hint.setVisible(False)
+        toolbar.addWidget(self._move_hint)
+
     def _update_cursor_info(self, x, y, value):
         roi_info = ""
         if self.canvas._active_layer and hasattr(self.canvas._active_layer, 'mask'):
@@ -559,6 +571,7 @@ class MontarisApp(QMainWindow):
         if self.canvas._active_layer and hasattr(self.canvas._active_layer, 'name'):
             roi_info = f"  |  {self.canvas._active_layer.name}"
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
+        self._move_hint.setVisible(tool_name == 'Move')
         # Sync collapsed toolbar actions
         for name, act in self._left_tool_actions.items():
             act.setChecked(name == tool_name)

@@ -159,19 +159,6 @@ class ToolPanel(QWidget):
 
         layout.addLayout(stamp_layout)
 
-        # Move tool hint
-        self.move_hint = QLabel(
-            "Hint: Drag outside components to move all selected ROIs. "
-            "Drag inside a component to move it independently (single ROI). "
-            "Ctrl+click to select multiple components."
-        )
-        self.move_hint.setWordWrap(True)
-        self.move_hint.setStyleSheet(
-            "color: #888; font-size: 11px; margin-top: 4px;"
-        )
-        self.move_hint.setVisible(False)
-        layout.addWidget(self.move_hint)
-
         self.finish_polygon_btn = QPushButton("Close Polygon (Enter)")
         self.finish_polygon_btn.clicked.connect(self._finish_polygon)
         self.finish_polygon_btn.setVisible(False)
@@ -259,7 +246,6 @@ class ToolPanel(QWidget):
         self.tolerance_label.setVisible(is_bucket)
         self.tolerance_slider.setVisible(is_bucket)
         self.tolerance_spin.setVisible(is_bucket)
-        self.move_hint.setVisible(tool_name == "Move")
         is_stamp = tool_name == "Stamp"
         self.stamp_label.setVisible(is_stamp)
         self._stamp_w_label.setVisible(is_stamp)
