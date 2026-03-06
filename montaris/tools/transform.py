@@ -264,8 +264,9 @@ class TransformTool(BaseTool):
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
 
-        # Accumulate rotation
+        # Accumulate rotation and preserve original bbox for visual
         was_rotate = self._active_handle and self._active_handle.handle_type == 'rotate'
+        saved_bbox = self._bbox  # preserve before _clear_handles resets it
         if was_rotate:
             self._rotation += getattr(self, '_drag_angle', 0.0)
         self._drag_angle = 0.0
@@ -278,14 +279,19 @@ class TransformTool(BaseTool):
         self._preview_items.clear()
         self._hidden_layers = []
 
-        # Show handles using dst_bbox (no extra get_mask_bbox call)
-        new_bboxes = [dst_bb for src_bb, dst_bb in bbox_pairs.values() if dst_bb is not None]
-        if new_bboxes:
-            y1 = min(b[0] for b in new_bboxes)
-            y2 = max(b[1] for b in new_bboxes)
-            x1 = min(b[2] for b in new_bboxes)
-            x2 = max(b[3] for b in new_bboxes)
-            self._show_handles((y1, y2, x1, x2), canvas)
+        # After rotation: keep original bbox (don't use inflated axis-aligned bbox)
+        # After scale: use new rasterized bbox, reset rotation
+        if was_rotate and saved_bbox is not None:
+            self._show_handles(saved_bbox, canvas)
+        else:
+            self._rotation = 0.0
+            new_bboxes = [dst_bb for src_bb, dst_bb in bbox_pairs.values() if dst_bb is not None]
+            if new_bboxes:
+                y1 = min(b[0] for b in new_bboxes)
+                y2 = max(b[1] for b in new_bboxes)
+                x1 = min(b[2] for b in new_bboxes)
+                x2 = max(b[3] for b in new_bboxes)
+                self._show_handles((y1, y2, x1, x2), canvas)
         self._snapshots.clear()
 
         # Defer expensive visual rebuild to next frame (render + highlights)
