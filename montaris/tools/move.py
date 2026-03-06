@@ -30,19 +30,20 @@ class MoveTool(BaseTool):
         # Persistent multi-component selection (survives between drags)
         self._multi_comp_mask = None  # combined bool mask of Ctrl+clicked components
         self._multi_comp_layer = None  # the layer these components belong to
-        # Marching ants overlay
-        self._ants_item = None
+        # Marching ants overlay (supports multiple layers)
+        self._ants_entries = []  # list of (item, ey, ex, bbox, buf)
         self._ants_timer = None
         self._ants_phase = 0
-        self._ants_ey = None  # edge pixel y-coords (relative to crop)
-        self._ants_ex = None  # edge pixel x-coords (relative to crop)
-        self._ants_bbox = None  # (y1, y2, x1, x2) of the crop
-        self._ants_buf = None  # reusable indexed image buffer
 
     def on_activate(self, layer, canvas):
-        """Called when the move tool is selected — show ants for active layer."""
-        if layer is not None and hasattr(layer, 'mask'):
-            self._show_marching_ants_for_layer(layer, canvas)
+        """Called when the move tool is selected — show ants for selected layers."""
+        sel = canvas._selection.layers
+        layers = sel if sel else ([layer] if layer is not None else [])
+        layers = [l for l in layers if hasattr(l, 'mask') and l.get_bbox() is not None]
+        if layers:
+            self._show_marching_ants_multi(layers, canvas)
+        else:
+            self._clear_marching_ants(canvas)
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -306,10 +307,11 @@ class MoveTool(BaseTool):
             self._show_marching_ants_for_mask(
                 self._multi_comp_mask, moved_layer, canvas)
         else:
-            # Show ants for the active layer (works for single and multi-layer)
-            active = canvas._active_layer
-            if active is not None and hasattr(active, 'mask'):
-                self._show_marching_ants_for_layer(active, canvas)
+            # Show ants for all affected layers
+            visible = [l for l in affected
+                       if hasattr(l, 'mask') and l.get_bbox() is not None]
+            if visible:
+                self._show_marching_ants_multi(visible, canvas)
 
     def _create_previews(self, canvas):
         """Use existing ROI pixmap items as live preview (zero scene changes)."""
@@ -444,51 +446,75 @@ class MoveTool(BaseTool):
         self._preview_offsets = []
 
     # ------------------------------------------------------------------
-    # Marching ants overlay
+    # Marching ants overlay (supports multiple layers)
     # ------------------------------------------------------------------
 
-    def _show_marching_ants_for_layer(self, layer, canvas):
-        """Show marching ants around the full layer mask boundary."""
-        bbox = layer.get_bbox()
-        if bbox is None:
-            self._clear_marching_ants(canvas)
+    def _show_marching_ants_multi(self, layers, canvas):
+        """Show marching ants around one or more layers."""
+        self._clear_marching_ants(canvas)
+        from scipy.ndimage import binary_erosion
+
+        scene = canvas.scene()
+        for layer in layers:
+            bbox = layer.get_bbox()
+            if bbox is None:
+                continue
+            y1, y2, x1, x2 = bbox
+            crop = layer.mask[y1:y2, x1:x2]
+            binary = crop > 0
+            eroded = binary_erosion(binary)
+            edge = binary & ~eroded
+            ey, ex = np.where(edge)
+            if len(ey) == 0:
+                continue
+            h, w = y2 - y1, x2 - x1
+            buf = np.zeros((h, w), dtype=np.uint8)
+            item = QGraphicsPixmapItem()
+            item.setOffset(x1, y1)
+            item.setZValue(999)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(item)
+            self._ants_entries.append((item, ey, ex, bbox, buf))
+
+        if not self._ants_entries:
             return
-        y1, y2, x1, x2 = bbox
-        crop = layer.mask[y1:y2, x1:x2]
-        self._show_marching_ants(crop, bbox, canvas)
+
+        self._ants_phase = 0
+        self._build_ants_frame(canvas)
+
+        self._ants_timer = QTimer()
+        self._ants_timer.timeout.connect(lambda: self._tick_ants(canvas))
+        self._ants_timer.start(150)
 
     def _show_marching_ants_for_mask(self, mask, layer, canvas):
         """Show marching ants around an arbitrary boolean mask."""
+        self._clear_marching_ants(canvas)
+        from scipy.ndimage import binary_erosion
         from montaris.core.roi_transform import get_mask_bbox
+
         bbox = get_mask_bbox(mask.view(np.uint8) if mask.dtype == np.bool_ else mask)
         if bbox is None:
-            self._clear_marching_ants(canvas)
             return
         y1, y2, x1, x2 = bbox
         crop = mask[y1:y2, x1:x2]
-        self._show_marching_ants(crop, bbox, canvas)
-
-    def _show_marching_ants(self, crop, bbox, canvas):
-        """Compute edge pixels and start marching ants animation."""
-        self._clear_marching_ants(canvas)
-
-        from scipy.ndimage import binary_erosion
         binary = crop > 0 if crop.dtype != np.bool_ else crop
         eroded = binary_erosion(binary)
         edge = binary & ~eroded
-
         ey, ex = np.where(edge)
         if len(ey) == 0:
             return
 
-        y1, y2, x1, x2 = bbox
         h, w = y2 - y1, x2 - x1
-        self._ants_ey = ey
-        self._ants_ex = ex
-        self._ants_bbox = bbox
-        self._ants_phase = 0
-        self._ants_buf = np.zeros((h, w), dtype=np.uint8)
+        buf = np.zeros((h, w), dtype=np.uint8)
+        scene = canvas.scene()
+        item = QGraphicsPixmapItem()
+        item.setOffset(x1, y1)
+        item.setZValue(999)
+        item.setAcceptedMouseButtons(Qt.NoButton)
+        scene.addItem(item)
+        self._ants_entries.append((item, ey, ex, bbox, buf))
 
+        self._ants_phase = 0
         self._build_ants_frame(canvas)
 
         self._ants_timer = QTimer()
@@ -496,51 +522,33 @@ class MoveTool(BaseTool):
         self._ants_timer.start(150)
 
     def _build_ants_frame(self, canvas):
-        """Build one frame of the marching ants animation."""
-        buf = self._ants_buf
-        buf[:] = 0
-        ey, ex = self._ants_ey, self._ants_ex
+        """Build one frame of the marching ants animation for all entries."""
         phase = self._ants_phase
-
-        # Diagonal stripe pattern: marches 1px per frame
-        pattern = ((ex.astype(np.int32) + ey.astype(np.int32) + phase) % 8) < 4
-        buf[ey[pattern], ex[pattern]] = 1   # black
-        buf[ey[~pattern], ex[~pattern]] = 2  # white
-
-        y1, _, x1, _ = self._ants_bbox
-        h, w = buf.shape
-        qimg = QImage(buf.data, w, h, w, QImage.Format_Indexed8)
-        qimg.setColorTable([0x00000000, 0xFF000000, 0xFFFFFFFF])
-        pixmap = QPixmap.fromImage(qimg)
-
-        scene = canvas.scene()
-        if self._ants_item is None:
-            self._ants_item = QGraphicsPixmapItem(pixmap)
-            self._ants_item.setOffset(x1, y1)
-            self._ants_item.setZValue(999)
-            self._ants_item.setAcceptedMouseButtons(Qt.NoButton)
-            scene.addItem(self._ants_item)
-        else:
-            self._ants_item.setPixmap(pixmap)
+        for item, ey, ex, bbox, buf in self._ants_entries:
+            buf[:] = 0
+            pattern = ((ex.astype(np.int32) + ey.astype(np.int32) + phase) % 8) < 4
+            buf[ey[pattern], ex[pattern]] = 1   # black
+            buf[ey[~pattern], ex[~pattern]] = 2  # white
+            h, w = buf.shape
+            qimg = QImage(buf.data, w, h, w, QImage.Format_Indexed8)
+            qimg.setColorTable([0x00000000, 0xFF000000, 0xFFFFFFFF])
+            item.setPixmap(QPixmap.fromImage(qimg))
 
     def _tick_ants(self, canvas):
         """Advance animation by one frame."""
         self._ants_phase = (self._ants_phase + 1) % 8
-        if self._ants_item and self._ants_item.scene():
+        if self._ants_entries:
             self._build_ants_frame(canvas)
 
     def _clear_marching_ants(self, canvas):
-        """Stop animation and remove overlay."""
+        """Stop animation and remove all overlays."""
         if self._ants_timer is not None:
             self._ants_timer.stop()
             self._ants_timer = None
-        if self._ants_item is not None:
-            canvas.scene().removeItem(self._ants_item)
-            self._ants_item = None
-        self._ants_buf = None
-        self._ants_ey = None
-        self._ants_ex = None
-        self._ants_bbox = None
+        scene = canvas.scene()
+        for item, _, _, _, _ in self._ants_entries:
+            scene.removeItem(item)
+        self._ants_entries.clear()
 
     # ------------------------------------------------------------------
     # Multi-component selection
