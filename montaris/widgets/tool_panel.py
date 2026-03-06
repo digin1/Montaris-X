@@ -58,9 +58,23 @@ class ToolPanel(QWidget):
                 "font-weight: bold; font-size: 11px; margin-top: 6px;"
             )
             layout.addWidget(cat_label)
-            for name, shortcut in tools:
-                btn = self._add_tool_button(name, shortcut, layout)
-                self._tool_buttons[name] = btn
+            # Lay out buttons in rows of 2
+            for i in range(0, len(tools), 2):
+                pair = tools[i:i + 2]
+                if len(pair) == 2:
+                    row = QHBoxLayout()
+                    row.setContentsMargins(0, 0, 0, 0)
+                    row.setSpacing(4)
+                    for name, shortcut in pair:
+                        btn = self._add_tool_button(name, shortcut)
+                        self._tool_buttons[name] = btn
+                        row.addWidget(btn)
+                    layout.addLayout(row)
+                else:
+                    name, shortcut = pair[0]
+                    btn = self._add_tool_button(name, shortcut)
+                    self._tool_buttons[name] = btn
+                    layout.addWidget(btn)
 
         layout.addSpacing(10)
 
@@ -162,7 +176,7 @@ class ToolPanel(QWidget):
             self._tool_buttons['Hand'].setChecked(True)
             self._select_tool('Hand')
 
-    def _add_tool_button(self, text, shortcut, layout):
+    def _add_tool_button(self, text, shortcut):
         icon = TOOL_ICONS.get(text, '')
         btn = QPushButton(f"{icon}  {text}" if icon else text)
         btn.setCheckable(True)
@@ -170,7 +184,6 @@ class ToolPanel(QWidget):
         btn.setToolTip(f"{text} [{shortcut}]")
         self.tool_group.addButton(btn)
         btn.clicked.connect(lambda checked, t=text: self._select_tool(t))
-        layout.addWidget(btn)
         return btn
 
     def _select_tool(self, tool_name):
