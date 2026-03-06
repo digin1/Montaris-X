@@ -36,7 +36,9 @@ class BrushTool(BaseTool):
                     self._other_snapshots[id(other)] = (other, other.mask.copy())
 
         self._paint(pos, layer)
-        canvas.refresh_active_overlay(layer)
+        effective = self._effective_size()
+        r = effective // 2
+        canvas.paint_on_roi_pixmap(layer, int(pos.x()), int(pos.y()), r)
 
     def on_move(self, pos, layer, canvas):
         if not self._painting or layer is None:

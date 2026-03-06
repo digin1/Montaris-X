@@ -25,7 +25,10 @@ class StampTool(BaseTool):
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
         self._stamp(pos, layer)
-        canvas.refresh_active_overlay(layer)
+        canvas.stamp_on_roi_pixmap(
+            layer, int(pos.x()), int(pos.y()),
+            self.width // 2, self.height // 2,
+        )
 
     def on_move(self, pos, layer, canvas):
         if not self._stamping or layer is None:

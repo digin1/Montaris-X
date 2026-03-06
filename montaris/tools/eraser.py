@@ -26,7 +26,9 @@ class EraserTool(BaseTool):
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
         self._erase(pos, layer)
-        canvas.refresh_active_overlay(layer)
+        effective = self._effective_size()
+        r = effective // 2
+        canvas.erase_on_roi_pixmap(layer, int(pos.x()), int(pos.y()), r)
 
     def on_move(self, pos, layer, canvas):
         if not self._erasing or layer is None:
