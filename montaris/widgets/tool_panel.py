@@ -6,19 +6,19 @@ from PySide6.QtCore import Signal, Qt
 from montaris.tools import TOOL_REGISTRY, get_tool_class
 from montaris.tools.polygon import PolygonTool
 
-# Tool icons: Unicode symbols for collapsed toolbar
+# Tool icons: emojis matching the web app (threejsroieditor)
 TOOL_ICONS = {
-    'Hand': '\u270b',
-    'Select': '\u2b1a',
-    'Brush': '\u270e',
-    'Eraser': '\u232b',
-    'Polygon': '\u2b20',
-    'Bucket Fill': '\u25bc',
-    'Rectangle': '\u25ad',
-    'Circle': '\u25cb',
-    'Stamp': '\u25a0',
-    'Transform': '\u27f2',
-    'Move': '\u2725',
+    'Hand': '✋',
+    'Select': '🔲',
+    'Brush': '🖌️',
+    'Eraser': '🧹',
+    'Polygon': '⬟',
+    'Bucket Fill': '🪣',
+    'Rectangle': '▭',
+    'Circle': '⬤',
+    'Stamp': '■',
+    'Transform': '🔧',
+    'Move': '🖐️',
 }
 
 
