@@ -1203,7 +1203,7 @@ class MontarisApp(QMainWindow):
             return
         dlg = QDialog(self)
         dlg.setWindowTitle("Instructions")
-        dlg.resize(600, 400)
+        dlg.resize(800, 600)
         layout = QVBoxLayout(dlg)
         te = QTextEdit()
         te.setReadOnly(True)
