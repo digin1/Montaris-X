@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QSlider, QSpinBox,
     QButtonGroup, QHBoxLayout,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QTimer
 from montaris.tools import TOOL_REGISTRY, get_tool_class
 from montaris.tools.polygon import PolygonTool
 
@@ -180,22 +180,22 @@ class ToolPanel(QWidget):
 
         montage_btn = QPushButton("🖼️  Load Montage")
         montage_btn.setToolTip("Open a montage image")
-        montage_btn.clicked.connect(lambda: self.open_montage_requested.emit())
+        montage_btn.clicked.connect(lambda: QTimer.singleShot(0, self.open_montage_requested.emit))
         layout.addWidget(montage_btn)
 
         roi_zip_btn = QPushButton("📦  Import ROI ZIP")
         roi_zip_btn.setToolTip("Import ROIs from a ZIP file")
-        roi_zip_btn.clicked.connect(lambda: self.import_roi_zip_requested.emit())
+        roi_zip_btn.clicked.connect(lambda: QTimer.singleShot(0, self.import_roi_zip_requested.emit))
         layout.addWidget(roi_zip_btn)
 
         instr_btn = QPushButton("📝  Load Instructions")
         instr_btn.setToolTip("Load instructions file (.json/.txt)")
-        instr_btn.clicked.connect(lambda: self.load_instructions_requested.emit())
+        instr_btn.clicked.connect(lambda: QTimer.singleShot(0, self.load_instructions_requested.emit))
         layout.addWidget(instr_btn)
 
         view_instr_btn = QPushButton("👁️  View Instructions")
         view_instr_btn.setToolTip("View loaded instructions")
-        view_instr_btn.clicked.connect(lambda: self.view_instructions_requested.emit())
+        view_instr_btn.clicked.connect(lambda: QTimer.singleShot(0, self.view_instructions_requested.emit))
         layout.addWidget(view_instr_btn)
 
         layout.addStretch()
