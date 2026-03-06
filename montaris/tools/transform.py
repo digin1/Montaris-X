@@ -624,7 +624,7 @@ class TransformTool(BaseTool):
         return cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a
 
     def _show_handles(self, bbox, canvas):
-        self._clear_handles(canvas)
+        self._clear_handle_visuals(canvas)
         self._bbox = bbox
         y1, y2, x1, x2 = bbox
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -709,7 +709,8 @@ class TransformTool(BaseTool):
                 item.setZValue(1000)
                 self._handle_items.append((item, rx, ry))
 
-    def _clear_handles(self, canvas):
+    def _clear_handle_visuals(self, canvas):
+        """Remove handle scene items without resetting session/component state."""
         scene = canvas.scene()
         for item, _, _ in self._handle_items:
             scene.removeItem(item)
@@ -721,6 +722,9 @@ class TransformTool(BaseTool):
         self._hovered_handle = None
         if self._preview_items:
             self._remove_previews(canvas)
+
+    def _clear_handles(self, canvas):
+        self._clear_handle_visuals(canvas)
         # Reset session state so it doesn't carry to a different layer
         self._component_mask = None
         self._component_bbox = None
