@@ -260,35 +260,59 @@ class ImageCanvas(QGraphicsView):
         if layer in self._selection.layers:
             self._update_selection_highlights()
 
-    def _ensure_roi_pixmap(self, layer):
-        """Ensure the ROI has a pixmap item, creating one if needed.
+    def refresh_active_overlay_partial(self, layer, dirty_bbox):
+        """Fast partial refresh: update only dirty region from mask data.
 
-        Returns the QGraphicsPixmapItem or None.
+        Renders solid fill only (no edge detection) for the dirty_bbox,
+        composited onto the existing pixmap. Pixel-accurate to the mask.
         """
+        if layer is None or not hasattr(layer, 'mask'):
+            return
+
+        dy1, dy2, dx1, dx2 = dirty_bbox
+        dh, dw = dy2 - dy1, dx2 - dx1
+        if dh <= 0 or dw <= 0:
+            return
+
         rid = id(layer)
-        if rid not in self._roi_items:
-            self.refresh_active_overlay(layer)
-        return self._roi_items.get(rid)
+        existing = self._roi_items.get(rid)
 
-    def paint_on_roi_pixmap(self, layer, cx, cy, radius):
-        """QPainter: draw filled circle on ROI pixmap (brush preview)."""
-        item = self._ensure_roi_pixmap(layer)
-        if item is None:
-            return
-        pixmap = item.pixmap()
-        ox, oy = int(item.offset().x()), int(item.offset().y())
         r, g, b = layer.color
         gof = self.layer_stack._global_opacity_factor
         alpha = int(layer.opacity * gof)
 
-        # Expand pixmap if circle extends beyond current bounds
+        # Build RGBA tile for dirty region from actual mask data
+        mask_crop = layer.mask[dy1:dy2, dx1:dx2]
+        rgba = np.zeros((dh, dw, 4), dtype=np.uint8)
+        painted = mask_crop > 0
+        rgba[painted] = [r, g, b, alpha]
+        rgba = np.ascontiguousarray(rgba)
+        qimg = QImage(rgba.data, dw, dh, dw * 4, QImage.Format_RGBA8888)
+        dirty_pm = QPixmap.fromImage(qimg)
+
+        if existing is None:
+            # First paint on empty ROI — create item from dirty region
+            try:
+                index = self.layer_stack.roi_layers.index(layer)
+            except ValueError:
+                return
+            item = QGraphicsPixmapItem(dirty_pm)
+            item.setOffset(dx1, dy1)
+            item.setZValue(1 + index * 0.001)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self._scene.addItem(item)
+            self._roi_items[rid] = item
+            return
+
+        pixmap = existing.pixmap()
+        ox, oy = int(existing.offset().x()), int(existing.offset().y())
+        pw, ph = pixmap.width(), pixmap.height()
+
+        # Expand pixmap if dirty region extends beyond current bounds
         px1, py1 = ox, oy
-        px2, py2 = ox + pixmap.width(), oy + pixmap.height()
-        h, w = layer.mask.shape
-        nx1 = max(0, min(px1, cx - radius))
-        ny1 = max(0, min(py1, cy - radius))
-        nx2 = min(w, max(px2, cx + radius + 1))
-        ny2 = min(h, max(py2, cy + radius + 1))
+        px2, py2 = ox + pw, oy + ph
+        nx1, ny1 = min(px1, dx1), min(py1, dy1)
+        nx2, ny2 = max(px2, dx2), max(py2, dy2)
 
         if nx1 < px1 or ny1 < py1 or nx2 > px2 or ny2 > py2:
             new_pm = QPixmap(nx2 - nx1, ny2 - ny1)
@@ -297,76 +321,15 @@ class ImageCanvas(QGraphicsView):
             p.drawPixmap(px1 - nx1, py1 - ny1, pixmap)
             p.end()
             pixmap = new_pm
-            item.setOffset(nx1, ny1)
+            existing.setOffset(nx1, ny1)
             ox, oy = nx1, ny1
 
+        # Composite dirty tile onto pixmap
         p = QPainter(pixmap)
         p.setCompositionMode(QPainter.CompositionMode_Source)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(r, g, b, alpha))
-        p.drawEllipse(cx - radius - ox, cy - radius - oy,
-                       radius * 2 + 1, radius * 2 + 1)
+        p.drawPixmap(dx1 - ox, dy1 - oy, dirty_pm)
         p.end()
-        item.setPixmap(pixmap)
-
-    def erase_on_roi_pixmap(self, layer, cx, cy, radius):
-        """QPainter: erase circle on ROI pixmap (eraser preview)."""
-        item = self._roi_items.get(id(layer))
-        if item is None:
-            return
-        pixmap = item.pixmap()
-        ox, oy = int(item.offset().x()), int(item.offset().y())
-
-        p = QPainter(pixmap)
-        p.setCompositionMode(QPainter.CompositionMode_Clear)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 0, 0, 0))
-        p.drawEllipse(cx - radius - ox, cy - radius - oy,
-                       radius * 2 + 1, radius * 2 + 1)
-        p.end()
-        item.setPixmap(pixmap)
-
-    def stamp_on_roi_pixmap(self, layer, cx, cy, half_w, half_h):
-        """QPainter: draw filled rect on ROI pixmap (stamp preview)."""
-        item = self._ensure_roi_pixmap(layer)
-        if item is None:
-            return
-        pixmap = item.pixmap()
-        ox, oy = int(item.offset().x()), int(item.offset().y())
-        r, g, b = layer.color
-        gof = self.layer_stack._global_opacity_factor
-        alpha = int(layer.opacity * gof)
-        h, w = layer.mask.shape
-
-        # Stamp rect in mask coordinates
-        rx1 = max(0, cx - half_w)
-        ry1 = max(0, cy - half_h)
-        rx2 = min(w, cx + half_w)
-        ry2 = min(h, cy + half_h)
-
-        # Expand pixmap if stamp extends beyond current bounds
-        px1, py1 = ox, oy
-        px2, py2 = ox + pixmap.width(), oy + pixmap.height()
-        nx1, ny1 = min(px1, rx1), min(py1, ry1)
-        nx2, ny2 = max(px2, rx2), max(py2, ry2)
-
-        if nx1 < px1 or ny1 < py1 or nx2 > px2 or ny2 > py2:
-            new_pm = QPixmap(nx2 - nx1, ny2 - ny1)
-            new_pm.fill(QColor(0, 0, 0, 0))
-            p = QPainter(new_pm)
-            p.drawPixmap(px1 - nx1, py1 - ny1, pixmap)
-            p.end()
-            pixmap = new_pm
-            item.setOffset(nx1, ny1)
-            ox, oy = nx1, ny1
-
-        p = QPainter(pixmap)
-        p.setCompositionMode(QPainter.CompositionMode_Source)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(r, g, b, alpha))
-        p.drawRect(rx1 - ox, ry1 - oy, rx2 - rx1, ry2 - ry1)
-        p.end()
-        item.setPixmap(pixmap)
+        existing.setPixmap(pixmap)
 
     def _refresh_roi_item(self, roi, index, gof=None):
         """Create or update the QGraphicsPixmapItem for a single ROI."""

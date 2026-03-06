@@ -25,20 +25,22 @@ class StampTool(BaseTool):
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
         self._stamp(pos, layer)
-        canvas.stamp_on_roi_pixmap(
-            layer, int(pos.x()), int(pos.y()),
-            self.width // 2, self.height // 2,
-        )
+        canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
 
     def on_move(self, pos, layer, canvas):
         if not self._stamping or layer is None:
             return
+        h, w = layer.mask.shape
+        hw, hh = self.width // 2, self.height // 2
+        lx, ly = int(self._last_pos.x()), int(self._last_pos.y())
+        px, py = int(pos.x()), int(pos.y())
         self._stamp_line(self._last_pos, pos, layer)
         self._last_pos = pos
-        canvas.stamp_on_roi_pixmap(
-            layer, int(pos.x()), int(pos.y()),
-            self.width // 2, self.height // 2,
-        )
+        dy1 = max(0, min(ly, py) - hh)
+        dy2 = min(h, max(ly, py) - hh + self.height)
+        dx1 = max(0, min(lx, px) - hw)
+        dx2 = min(w, max(lx, px) - hw + self.width)
+        canvas.refresh_active_overlay_partial(layer, (dy1, dy2, dx1, dx2))
 
     def on_release(self, pos, layer, canvas):
         if not self._stamping or layer is None:

@@ -18,7 +18,7 @@ class MockCanvas:
     def refresh_active_overlay(self, layer):
         pass
 
-    def stamp_on_roi_pixmap(self, layer, cx, cy, half_w, half_h):
+    def refresh_active_overlay_partial(self, layer, dirty_bbox):
         pass
 
 
