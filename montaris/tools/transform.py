@@ -95,6 +95,10 @@ class TransformTool(BaseTool):
             self._active_handle = handle
             self._start_pos = pos
             self._dragging = True
+            # Save bbox_item's current transform so we can compose during drag
+            self._bbox_base_transform = (
+                self._bbox_item.transform() if self._bbox_item else QTransform()
+            )
             self._target_layers = self._get_target_layers(layer, canvas)
             # Use session snapshots (original state) for OOB recovery;
             # current mask state for undo diff (crop-only for speed)
@@ -236,18 +240,24 @@ class TransformTool(BaseTool):
             )
             item.setTransform(item_t)
 
-        # Move bbox rect with transform (pos is 0,0)
+        # Move bbox rect: compose prior rotation with current drag transform
         if self._bbox_item:
-            self._bbox_item.setTransform(qt_t)
+            base = getattr(self, '_bbox_base_transform', QTransform())
+            self._bbox_item.setTransform(base * qt_t)
         # Move handles by mapping original positions through matrix
         for item, ox, oy in self._handle_items:
-            if ox is not None:
+            if isinstance(ox, tuple):
+                # Line item: map both endpoints through M
+                lx1, ly1, lx2, ly2 = ox
+                nx1 = M[0, 0] * lx1 + M[0, 1] * ly1 + M[0, 2]
+                ny1 = M[1, 0] * lx1 + M[1, 1] * ly1 + M[1, 2]
+                nx2 = M[0, 0] * lx2 + M[0, 1] * ly2 + M[0, 2]
+                ny2 = M[1, 0] * lx2 + M[1, 1] * ly2 + M[1, 2]
+                item.setLine(QLineF(nx1, ny1, nx2, ny2))
+            elif ox is not None:
                 nx = M[0, 0] * ox + M[0, 1] * oy + M[0, 2]
                 ny = M[1, 0] * ox + M[1, 1] * oy + M[1, 2]
                 item.setPos(nx, ny)
-            else:
-                # Line items (pos 0,0): apply scene transform
-                item.setTransform(qt_t)
 
     def on_release(self, pos, layer, canvas):
         if not self._dragging or not self._snapshots:
@@ -671,7 +681,8 @@ class TransformTool(BaseTool):
                 line_pen.setCosmetic(True)
                 line_item = scene.addLine(QLineF(tcx, tcy, rx, ry), line_pen)
                 line_item.setZValue(1000)
-                self._handle_items.append((line_item, None, None))
+                # Store line endpoints for direct mapping in on_move
+                self._handle_items.append((line_item, (tcx, tcy, rx, ry), None))
             else:
                 if htype in ('tl', 'tr', 'bl', 'br'):
                     s = 7
