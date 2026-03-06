@@ -10,7 +10,7 @@ from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
 from montaris.core.roi_transform import (
-    get_mask_bbox, compute_handles, apply_affine_to_mask,
+    TransformHandle, get_mask_bbox, compute_handles, apply_affine_to_mask,
     apply_affine_inplace, make_scale_matrix, make_rotation_matrix,
 )
 
@@ -49,6 +49,7 @@ class TransformTool(BaseTool):
         self._component_mask = None
         self._preview_items = []  # references to ROI items for live preview
         self._hidden_layers = []
+        self._rotation = 0.0  # cumulative rotation angle in radians
 
     def _get_target_layers(self, layer, canvas):
         """Return selected layers if in selection, else [layer]."""
@@ -99,6 +100,7 @@ class TransformTool(BaseTool):
             return
 
         # First click: show handles — component-aware (D.14)
+        self._rotation = 0.0
         self._target_layers = self._get_target_layers(layer, canvas)
         self._component_mask = None
 
@@ -153,13 +155,13 @@ class TransformTool(BaseTool):
         handle_type = self._active_handle.handle_type
 
         if handle_type == 'rotate':
-            angle = math.atan2(pos.x() - cx, -(pos.y() - cy)) - math.atan2(
+            self._drag_angle = math.atan2(pos.x() - cx, -(pos.y() - cy)) - math.atan2(
                 self._start_pos.x() - cx, -(self._start_pos.y() - cy)
             )
             if self._shift_held:
                 snap_a = math.radians(15)
-                angle = round(angle / snap_a) * snap_a
-            M = make_rotation_matrix(angle, cx, cy)
+                self._drag_angle = round(self._drag_angle / snap_a) * snap_a
+            M = make_rotation_matrix(self._drag_angle, cx, cy)
         else:
             sx, sy = 1.0, 1.0
             if 'l' in handle_type:
@@ -255,6 +257,12 @@ class TransformTool(BaseTool):
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
 
+        # Accumulate rotation
+        was_rotate = self._active_handle and self._active_handle.handle_type == 'rotate'
+        if was_rotate:
+            self._rotation += getattr(self, '_drag_angle', 0.0)
+        self._drag_angle = 0.0
+
         self._active_handle = None
         self._start_pos = None
         self._current_matrix = None
@@ -304,14 +312,33 @@ class TransformTool(BaseTool):
                     self._show_handles(bbox, canvas)
             return True  # consumed
 
+    def _get_rotated_handles(self):
+        """Get handle positions from stored items (already rotated)."""
+        if not self._bbox:
+            return []
+        y1, y2, x1, x2 = self._bbox
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        angle = self._rotation
+        scale = self._view_scale(self._canvas) if self._canvas else 1.0
+        rotate_dist = max(30, 50 / max(scale, 0.01))
+        raw = [
+            (x1, y1, 'tl'), (x2, y1, 'tr'), (x1, y2, 'bl'), (x2, y2, 'br'),
+            (cx, y1, 'tm'), (cx, y2, 'bm'), (x1, cy, 'ml'), (x2, cy, 'mr'),
+            (cx, y1 - rotate_dist, 'rotate'),
+        ]
+        result = []
+        for hx, hy, htype in raw:
+            rx, ry = self._rotate_point(hx, hy, cx, cy, angle)
+            result.append(TransformHandle(rx, ry, htype))
+        return result
+
     def _update_hover(self, pos, canvas):
         """Hit-test handles and change cursor on hover."""
         if not self._bbox:
             return
         scale = self._view_scale(canvas)
         hit_r = HANDLE_HIT_RADIUS / max(scale, 0.01)
-        handles = compute_handles(self._bbox)
-        for h in handles:
+        for h in self._get_rotated_handles():
             dist = math.hypot(pos.x() - h.x, pos.y() - h.y)
             if dist <= hit_r:
                 if self._hovered_handle != h.handle_type:
@@ -328,8 +355,7 @@ class TransformTool(BaseTool):
             return None
         scale = self._view_scale(self._canvas) if self._canvas else 1.0
         hit_r = HANDLE_HIT_RADIUS / max(scale, 0.01)
-        handles = compute_handles(self._bbox)
-        for h in handles:
+        for h in self._get_rotated_handles():
             dist = math.hypot(pos.x() - h.x, pos.y() - h.y)
             if dist <= hit_r:
                 return h
@@ -372,13 +398,22 @@ class TransformTool(BaseTool):
         """Return the current view scale factor (pixels per scene unit)."""
         return canvas.transform().m11() or 1.0
 
+    def _rotate_point(self, x, y, cx, cy, angle):
+        """Rotate point (x,y) around (cx,cy) by angle radians."""
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        dx, dy = x - cx, y - cy
+        return cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a
+
     def _show_handles(self, bbox, canvas):
         self._clear_handles(canvas)
         self._bbox = bbox
         y1, y2, x1, x2 = bbox
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        angle = self._rotation
         scene = canvas.scene()
 
-        # Bounding box outline
+        # Rotated bounding box outline
         pen = QPen(QColor(0, 180, 255), 1.5)
         pen.setCosmetic(True)
         pen.setStyle(Qt.DashLine)
@@ -386,61 +421,74 @@ class TransformTool(BaseTool):
             QRectF(x1, y1, x2 - x1, y2 - y1), pen
         )
         self._bbox_item.setZValue(999)
+        if angle != 0:
+            bbox_t = QTransform()
+            bbox_t.translate(cx, cy)
+            bbox_t.rotateRadians(angle)
+            bbox_t.translate(-cx, -cy)
+            self._bbox_item.setTransform(bbox_t)
 
-        handles = compute_handles(bbox)
+        # Rotate handle distance scales with zoom (constant screen distance)
+        scale = self._view_scale(canvas)
+        rotate_dist = max(30, 50 / max(scale, 0.01))
+
+        # Compute handle positions (axis-aligned), then rotate
+        raw_handles = [
+            (x1, y1, 'tl'), (x2, y1, 'tr'), (x1, y2, 'bl'), (x2, y2, 'br'),
+            (cx, y1, 'tm'), (cx, y2, 'bm'), (x1, cy, 'ml'), (x2, cy, 'mr'),
+            (cx, y1 - rotate_dist, 'rotate'),
+        ]
         handle_pen = QPen(QColor(255, 255, 255), 2)
         handle_brush = QBrush(QColor(0, 180, 255))
         rotate_pen = QPen(QColor(0, 0, 0), 2)
         rotate_brush = QBrush(QColor(255, 180, 0))
 
-        for h in handles:
-            if h.handle_type == 'rotate':
+        for hx, hy, htype in raw_handles:
+            # Rotate handle position around center
+            rx, ry = self._rotate_point(hx, hy, cx, cy, angle)
+
+            if htype == 'rotate':
                 r = 10
                 item = scene.addEllipse(
                     QRectF(-r, -r, r * 2, r * 2),
                     rotate_pen, rotate_brush,
                 )
-                item.setPos(h.x, h.y)
+                item.setPos(rx, ry)
                 item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 item.setZValue(1001)
-                self._handle_items.append((item, h.x, h.y))
-                # Line from top-center to rotate handle (cosmetic)
-                cx = (x1 + x2) / 2
+                self._handle_items.append((item, rx, ry))
+                # Line from rotated top-center to rotate handle
+                tcx, tcy = self._rotate_point(cx, y1, cx, cy, angle)
                 line_pen = QPen(QColor(255, 180, 0), 1.5)
                 line_pen.setCosmetic(True)
-                line_item = scene.addLine(QLineF(cx, y1, cx, h.y), line_pen)
+                line_item = scene.addLine(QLineF(tcx, tcy, rx, ry), line_pen)
                 line_item.setZValue(1000)
                 self._handle_items.append((line_item, None, None))
-            elif h.handle_type in ('tl', 'tr', 'bl', 'br'):
-                s = 7
-                item = scene.addRect(
-                    QRectF(-s, -s, s * 2, s * 2),
-                    handle_pen, handle_brush,
-                )
-                item.setPos(h.x, h.y)
+            else:
+                if htype in ('tl', 'tr', 'bl', 'br'):
+                    s = 7
+                    item = scene.addRect(
+                        QRectF(-s, -s, s * 2, s * 2),
+                        handle_pen, handle_brush,
+                    )
+                elif htype in ('tm', 'bm'):
+                    w_h, h_h = 9, 5
+                    item = scene.addRect(
+                        QRectF(-w_h, -h_h, w_h * 2, h_h * 2),
+                        handle_pen, handle_brush,
+                    )
+                elif htype in ('ml', 'mr'):
+                    w_h, h_h = 5, 9
+                    item = scene.addRect(
+                        QRectF(-w_h, -h_h, w_h * 2, h_h * 2),
+                        handle_pen, handle_brush,
+                    )
+                else:
+                    continue
+                item.setPos(rx, ry)
                 item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 item.setZValue(1000)
-                self._handle_items.append((item, h.x, h.y))
-            elif h.handle_type in ('tm', 'bm'):
-                w_h, h_h = 9, 5
-                item = scene.addRect(
-                    QRectF(-w_h, -h_h, w_h * 2, h_h * 2),
-                    handle_pen, handle_brush,
-                )
-                item.setPos(h.x, h.y)
-                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
-                item.setZValue(1000)
-                self._handle_items.append((item, h.x, h.y))
-            elif h.handle_type in ('ml', 'mr'):
-                w_h, h_h = 5, 9
-                item = scene.addRect(
-                    QRectF(-w_h, -h_h, w_h * 2, h_h * 2),
-                    handle_pen, handle_brush,
-                )
-                item.setPos(h.x, h.y)
-                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
-                item.setZValue(1000)
-                self._handle_items.append((item, h.x, h.y))
+                self._handle_items.append((item, rx, ry))
 
     def _clear_handles(self, canvas):
         scene = canvas.scene()
