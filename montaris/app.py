@@ -463,6 +463,16 @@ class MontarisApp(QMainWindow):
         self._tool_status_label.setStyleSheet("font-size: 11px; padding: 0 8px;")
         self.statusbar.addPermanentWidget(self._tool_status_label)
 
+        # Move tool hint — shown in status bar only when Move is active
+        self._move_hint = QLabel(
+            "Hint: Drag outside to move all selected ROIs | "
+            "Drag a component to move independently | "
+            "Ctrl+click to multi-select"
+        )
+        self._move_hint.setStyleSheet("color: #888; font-size: 11px; padding: 0 8px;")
+        self._move_hint.setVisible(False)
+        self.statusbar.addPermanentWidget(self._move_hint)
+
     def _setup_toolbar(self):
         """Add main toolbar with brush size and opacity controls (G.19, G.20)."""
         toolbar = QToolBar("Main Toolbar", self)
@@ -513,20 +523,6 @@ class MontarisApp(QMainWindow):
         self._doc_combo.currentIndexChanged.connect(self._switch_to_document)
         toolbar.addWidget(self._doc_combo)
 
-        # Move tool hint toolbar — separate row, only visible when Move is active
-        self._move_hint_toolbar = QToolBar("Move Hint", self)
-        self._move_hint_toolbar.setObjectName("MoveHintToolbar")
-        self._move_hint_toolbar.setMovable(False)
-        self._move_hint_toolbar.setVisible(False)
-        self.addToolBarBreak(Qt.TopToolBarArea)
-        self.addToolBar(Qt.TopToolBarArea, self._move_hint_toolbar)
-        self._move_hint = QLabel(
-            " Hint: Drag outside components to move all selected ROIs. "
-            "Drag a component to move it independently. "
-            "Ctrl+click to multi-select components."
-        )
-        self._move_hint.setStyleSheet("color: #888; font-size: 11px;")
-        self._move_hint_toolbar.addWidget(self._move_hint)
 
     def _update_cursor_info(self, x, y, value):
         roi_info = ""
@@ -574,7 +570,7 @@ class MontarisApp(QMainWindow):
         if self.canvas._active_layer and hasattr(self.canvas._active_layer, 'name'):
             roi_info = f"  |  {self.canvas._active_layer.name}"
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
-        self._move_hint_toolbar.setVisible(tool_name == 'Move')
+        self._move_hint.setVisible(tool_name == 'Move')
         # Sync collapsed toolbar actions
         for name, act in self._left_tool_actions.items():
             act.setChecked(name == tool_name)
@@ -1351,7 +1347,6 @@ class MontarisApp(QMainWindow):
 
         self._right_toolbar.setVisible(False)
         self._right_collapsed = False
-        self._move_hint_toolbar.setVisible(False)
         for d in [self._layer_dock, self._props_dock,
                   self._display_dock, self._adj_dock]:
             d.setVisible(True)
