@@ -22,7 +22,7 @@ class ToastNotification(QFrame):
         self.setStyleSheet(
             f"QFrame {{ background: #2a2a2a; border: 2px solid {color};"
             f" border-radius: 6px; }}"
-            f" QLabel {{ color: #dcdcdc; font-size: 12px; }}"
+            f" QLabel {{ color: #dcdcdc; font-size: 12px; border: none; }}"
         )
 
         layout = QHBoxLayout(self)
