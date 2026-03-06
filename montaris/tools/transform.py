@@ -14,7 +14,7 @@ from montaris.core.roi_transform import (
     apply_affine_inplace, make_scale_matrix, make_rotation_matrix,
 )
 
-HANDLE_HIT_RADIUS = 12
+HANDLE_HIT_RADIUS = 24
 
 # Cursor map per handle type
 _HANDLE_CURSORS = {
@@ -382,29 +382,25 @@ class TransformTool(BaseTool):
 
         for h in handles:
             if h.handle_type == 'rotate':
-                # Circle handle for rotation — larger and more visible
-                r = 7
+                r = 12
                 item = scene.addEllipse(
                     QRectF(h.x - r, h.y - r, r * 2, r * 2),
                     rotate_pen, rotate_brush,
                 )
                 item.setZValue(1001)
                 self._handle_items.append(item)
-                # Line connecting rotate handle to bbox top center
                 cx = (x1 + x2) / 2
                 line_pen = QPen(QColor(255, 180, 0), 1.5)
                 line_pen.setCosmetic(True)
                 line_item = scene.addLine(QLineF(cx, y1, cx, h.y + r), line_pen)
                 line_item.setZValue(1000)
                 self._handle_items.append(line_item)
-                # Expand scene rect to ensure rotate handle is visible
                 sr = scene.sceneRect()
                 if h.y - r < sr.top():
                     sr.setTop(h.y - r - 5)
                     scene.setSceneRect(sr)
             elif h.handle_type in ('tl', 'tr', 'bl', 'br'):
-                # 8x8 square for corner handles
-                s = 4
+                s = 8
                 item = scene.addRect(
                     QRectF(h.x - s, h.y - s, s * 2, s * 2),
                     handle_pen, handle_brush,
@@ -412,8 +408,7 @@ class TransformTool(BaseTool):
                 item.setZValue(1000)
                 self._handle_items.append(item)
             elif h.handle_type in ('tm', 'bm'):
-                # 10x6 rect for top/bottom mid handles
-                w_h, h_h = 5, 3
+                w_h, h_h = 10, 6
                 item = scene.addRect(
                     QRectF(h.x - w_h, h.y - h_h, w_h * 2, h_h * 2),
                     handle_pen, handle_brush,
@@ -421,8 +416,7 @@ class TransformTool(BaseTool):
                 item.setZValue(1000)
                 self._handle_items.append(item)
             elif h.handle_type in ('ml', 'mr'):
-                # 6x10 rect for left/right mid handles
-                w_h, h_h = 3, 5
+                w_h, h_h = 6, 10
                 item = scene.addRect(
                     QRectF(h.x - w_h, h.y - h_h, w_h * 2, h_h * 2),
                     handle_pen, handle_brush,
