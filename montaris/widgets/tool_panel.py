@@ -24,6 +24,7 @@ TOOL_ICONS = {
 
 class ToolPanel(QWidget):
     tool_changed = Signal(object)
+    collapse_requested = Signal()
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -32,6 +33,16 @@ class ToolPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+
+        # Collapse button at top
+        collapse_btn = QPushButton("\u25c0")  # ◀
+        collapse_btn.setFixedHeight(22)
+        collapse_btn.setToolTip("Collapse sidebar (Ctrl+[)")
+        collapse_btn.setStyleSheet(
+            "QPushButton { border: none; font-size: 12px; padding: 2px; }"
+        )
+        collapse_btn.clicked.connect(self.collapse_requested.emit)
+        layout.addWidget(collapse_btn, alignment=Qt.AlignLeft)
 
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(False)
@@ -152,7 +163,8 @@ class ToolPanel(QWidget):
             self._select_tool('Hand')
 
     def _add_tool_button(self, text, shortcut, layout):
-        btn = QPushButton(text)
+        icon = TOOL_ICONS.get(text, '')
+        btn = QPushButton(f"{icon}  {text}" if icon else text)
         btn.setCheckable(True)
         btn.setShortcut(shortcut)
         btn.setToolTip(f"{text} [{shortcut}]")

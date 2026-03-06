@@ -4,7 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileDialog,
     QStatusBar, QMessageBox, QProgressDialog, QDialog, QVBoxLayout, QTextEdit,
-    QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget,
+    QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget, QPushButton,
     QComboBox, QInputDialog,
 )
 from PySide6.QtCore import Qt, QSettings, QRectF
@@ -166,20 +166,17 @@ class MontarisApp(QMainWindow):
         self._left_toolbar = QToolBar("Tools", self)
         self._left_toolbar.setOrientation(Qt.Vertical)
         self._left_toolbar.setMovable(False)
-        self._left_toolbar.setIconSize(self._left_toolbar.iconSize())
         self.addToolBar(Qt.LeftToolBarArea, self._left_toolbar)
         self._left_toolbar.setVisible(False)
         self._left_collapsed = False
 
-        # Expand button
         from montaris.widgets.tool_panel import TOOL_ICONS
-        expand_act = QAction("▶", self)
-        expand_act.setToolTip("Expand sidebar (Ctrl+[)")
-        expand_act.triggered.connect(self._toggle_left_sidebar)
-        self._left_toolbar.addAction(expand_act)
+        expand_left_act = QAction("\u25b6", self)  # ▶
+        expand_left_act.setToolTip("Expand sidebar (Ctrl+[)")
+        expand_left_act.triggered.connect(self._toggle_left_sidebar)
+        self._left_toolbar.addAction(expand_left_act)
         self._left_toolbar.addSeparator()
 
-        # Tool icon actions
         self._left_tool_actions = {}
         from montaris.tools import TOOL_REGISTRY
         for name, (module, cls_name, shortcut, category) in TOOL_REGISTRY.items():
@@ -191,7 +188,36 @@ class MontarisApp(QMainWindow):
             self._left_toolbar.addAction(act)
             self._left_tool_actions[name] = act
 
+        # Collapsed right toolbar (hidden by default)
+        self._right_toolbar = QToolBar("Panels", self)
+        self._right_toolbar.setOrientation(Qt.Vertical)
+        self._right_toolbar.setMovable(False)
+        self.addToolBar(Qt.RightToolBarArea, self._right_toolbar)
+        self._right_toolbar.setVisible(False)
+        self._right_collapsed = False
+
+        expand_right_act = QAction("\u25c0", self)  # ◀
+        expand_right_act.setToolTip("Expand sidebar (Ctrl+])")
+        expand_right_act.triggered.connect(self._toggle_right_sidebar)
+        self._right_toolbar.addAction(expand_right_act)
+
+        # Collapse button inside right sidebar (added to layer dock title)
+        self._right_collapse_btn = QPushButton("\u25b6")  # ▶
+        self._right_collapse_btn.setFixedSize(22, 22)
+        self._right_collapse_btn.setToolTip("Collapse sidebar (Ctrl+])")
+        self._right_collapse_btn.setStyleSheet(
+            "QPushButton { border: none; font-size: 12px; padding: 2px; }"
+        )
+        self._right_collapse_btn.clicked.connect(self._toggle_right_sidebar)
+        collapse_widget = QWidget()
+        collapse_layout = QHBoxLayout(collapse_widget)
+        collapse_layout.setContentsMargins(0, 0, 0, 0)
+        collapse_layout.addWidget(self._right_collapse_btn)
+        collapse_layout.addStretch()
+        self._layer_dock.setTitleBarWidget(collapse_widget)
+
         # Connections
+        self.tool_panel.collapse_requested.connect(self._toggle_left_sidebar)
         self.tool_panel.tool_changed.connect(self._on_tool_changed)
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
         self.layer_panel.visibility_changed.connect(self.canvas.refresh_overlays)
@@ -496,14 +522,19 @@ class MontarisApp(QMainWindow):
                 d.setVisible(True)
 
     def _toggle_right_sidebar(self):
+        self._right_collapsed = not getattr(self, '_right_collapsed', False)
         right_docks = [
             self._layer_dock, self._props_dock,
             self._display_dock, self._adj_dock,
         ]
-        # If any visible, hide all; otherwise show all
-        any_visible = any(d.isVisible() for d in right_docks)
-        for d in right_docks:
-            d.setVisible(not any_visible)
+        if self._right_collapsed:
+            for d in right_docks:
+                d.setVisible(False)
+            self._right_toolbar.setVisible(True)
+        else:
+            self._right_toolbar.setVisible(False)
+            for d in right_docks:
+                d.setVisible(True)
 
     def _on_tool_changed(self, tool):
         self.active_tool = tool
