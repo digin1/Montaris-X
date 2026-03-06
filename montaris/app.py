@@ -224,6 +224,7 @@ class MontarisApp(QMainWindow):
         self.tool_panel.open_montage_requested.connect(self.open_image)
         self.tool_panel.import_roi_zip_requested.connect(self.import_roi_zip)
         self.tool_panel.load_instructions_requested.connect(self.load_instructions_file)
+        self.tool_panel.view_instructions_requested.connect(self._view_instructions)
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
         self.layer_panel.visibility_changed.connect(self.canvas.refresh_overlays)
         self.layer_panel.roi_added.connect(self._on_roi_added)

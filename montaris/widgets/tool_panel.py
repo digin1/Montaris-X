@@ -28,6 +28,7 @@ class ToolPanel(QWidget):
     open_montage_requested = Signal()
     import_roi_zip_requested = Signal()
     load_instructions_requested = Signal()
+    view_instructions_requested = Signal()
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -191,6 +192,11 @@ class ToolPanel(QWidget):
         instr_btn.setToolTip("Load instructions file (.json/.txt)")
         instr_btn.clicked.connect(self.load_instructions_requested.emit)
         layout.addWidget(instr_btn)
+
+        view_instr_btn = QPushButton("👁️  View Instructions")
+        view_instr_btn.setToolTip("View loaded instructions")
+        view_instr_btn.clicked.connect(self.view_instructions_requested.emit)
+        layout.addWidget(view_instr_btn)
 
         layout.addStretch()
 
