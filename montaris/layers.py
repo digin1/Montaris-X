@@ -247,6 +247,9 @@ class LayerStack(QObject):
 
     def insert_roi(self, index, roi):
         """Insert ROI at specific position."""
+        if roi.color == ROI_COLORS[0] and self._color_index < len(ROI_COLORS):
+            roi.color = ROI_COLORS[self._color_index]
+            self._color_index = (self._color_index + 1) % len(ROI_COLORS)
         self.roi_layers.insert(index, roi)
         self.changed.emit()
 
