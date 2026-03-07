@@ -431,11 +431,21 @@ class MoveTool(BaseTool):
         scene = canvas.scene()
         sr = scene.sceneRect()
         margin = 200
-        for l in self._target_layers:
-            dbbox = l.get_display_bbox()
-            if dbbox is None:
-                continue
-            y1, y2, x1, x2 = dbbox
+
+        # Collect bounding boxes to check
+        bboxes = []
+        if self._component_mask is not None and self._component_bbox is not None:
+            # Component move: use the dragged bbox item position
+            if self._comp_bbox_item:
+                r = self._comp_bbox_item.rect()
+                bboxes.append((r.top(), r.bottom(), r.left(), r.right()))
+        else:
+            for l in self._target_layers:
+                dbbox = l.get_display_bbox()
+                if dbbox is not None:
+                    bboxes.append(dbbox)
+
+        for y1, y2, x1, x2 in bboxes:
             if x1 < sr.left() + margin or x2 > sr.right() - margin \
                     or y1 < sr.top() + margin or y2 > sr.bottom() - margin:
                 new_left = min(sr.left(), x1 - margin)
@@ -444,7 +454,7 @@ class MoveTool(BaseTool):
                 new_bottom = max(sr.bottom(), y2 + margin)
                 scene.setSceneRect(QRectF(new_left, new_top,
                                           new_right - new_left, new_bottom - new_top))
-                break  # one expansion per move event is enough
+                break
 
     # ------------------------------------------------------------------
     # Auto-scroll
