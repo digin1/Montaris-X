@@ -27,6 +27,10 @@ class MoveTool(BaseTool):
         self._preview_offsets = []  # (bx1, by1) per preview item
         self._temp_scene_items = []  # temporary items (remainder pixmap, bbox)
         self._bbox_item = None
+        # Session snapshots: preserve full mask state at first move for OOB recovery
+        self._session_snapshots = {}  # id(layer) -> full mask copy
+        self._session_bboxes = {}    # id(layer) -> bbox at session start
+        self._cumulative_offset = {}  # id(layer) -> (total_dx, total_dy)
         # Persistent multi-component selection (survives between drags)
         self._multi_comp_mask = None  # combined bool mask of Ctrl+clicked components
         self._multi_comp_layer = None  # the layer these components belong to
@@ -127,38 +131,25 @@ class MoveTool(BaseTool):
         self._snapshots = {}
         self._old_bboxes = {}
         for l in self._target_layers:
+            lid = id(l)
             bb = l.get_bbox()
-            self._old_bboxes[id(l)] = bb
+            self._old_bboxes[lid] = bb
             if bb is not None:
-                self._snapshots[id(l)] = (l, l.mask[bb[0]:bb[1], bb[2]:bb[3]].copy(), bb)
+                self._snapshots[lid] = (l, l.mask[bb[0]:bb[1], bb[2]:bb[3]].copy(), bb)
             else:
-                self._snapshots[id(l)] = (l, None, None)
+                self._snapshots[lid] = (l, None, None)
+            # Session snapshot: taken once on first move (preserves OOB pixels)
+            if lid not in self._session_snapshots:
+                self._session_snapshots[lid] = l.mask.copy()
+                self._session_bboxes[lid] = bb
+                self._cumulative_offset[lid] = (0, 0)
         self._create_previews(canvas)
-
-    def _clamp_delta(self, dx, dy, canvas):
-        """Clamp dx/dy so no ROI bbox goes out of image bounds."""
-        h, w = canvas.layer_stack.roi_layers[0].mask.shape if canvas.layer_stack.roi_layers else (0, 0)
-        if h == 0 or w == 0:
-            return dx, dy
-        if self._component_mask is not None and self._component_bbox is not None:
-            y1, y2, x1, x2 = self._component_bbox
-            dx = max(-x1, min(w - x2, dx))
-            dy = max(-y1, min(h - y2, dy))
-        else:
-            for lid, bb in self._old_bboxes.items():
-                if bb is None:
-                    continue
-                y1, y2, x1, x2 = bb
-                dx = max(-x1, min(w - x2, dx))
-                dy = max(-y1, min(h - y2, dy))
-        return dx, dy
 
     def on_move(self, pos, layer, canvas):
         if not self._moving:
             return
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
-        dx, dy = self._clamp_delta(dx, dy, canvas)
 
         # Move preview items
         if self._component_mask is not None:
@@ -188,10 +179,9 @@ class MoveTool(BaseTool):
         self._remove_previews(canvas, re_render=False)
         canvas.flash_progress("Applying move…")
 
-        # Rasterize the final position (clamped to image bounds)
+        # Rasterize the final position
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
-        dx, dy = self._clamp_delta(dx, dy, canvas)
 
         if self._component_mask is not None:
             l = self._target_layers[0]
@@ -216,35 +206,47 @@ class MoveTool(BaseTool):
             l.mask[new_ys[valid], new_xs[valid]] = snap_data[ys[valid] - sb[0], xs[valid] - sb[2]] if snap_data is not None else 255
             l.invalidate_bbox()
         else:
-            # Fast numpy shift for translation (avoids Pillow affine overhead)
+            # Use session snapshots with cumulative offset to preserve OOB pixels
             idx_dy, idx_dx = int(round(dy)), int(round(dx))
             for lid, (l, snap_data, sb) in self._snapshots.items():
                 old_bb = self._old_bboxes.get(lid)
                 if old_bb is not None and (idx_dy != 0 or idx_dx != 0):
                     h, w = l.mask.shape
-                    l.mask[:] = 0
-                    sy1, sy2, sx1, sx2 = old_bb
-                    bh, bw = sy2 - sy1, sx2 - sx1
-                    # Destination region
-                    d_y1, d_y2 = sy1 + idx_dy, sy2 + idx_dy
-                    d_x1, d_x2 = sx1 + idx_dx, sx2 + idx_dx
-                    # Clip to bounds
-                    cy1 = max(0, -d_y1)
-                    cy2 = bh - max(0, d_y2 - h)
-                    cx1 = max(0, -d_x1)
-                    cx2 = bw - max(0, d_x2 - w)
-                    if cy2 > cy1 and cx2 > cx1:
-                        src = snap_data[cy1:cy2, cx1:cx2] if snap_data is not None else l.mask[sy1+cy1:sy1+cy2, sx1+cx1:sx1+cx2]
-                        l.mask[d_y1+cy1:d_y1+cy2, d_x1+cx1:d_x1+cx2] = src
-                else:
-                    M = make_translation_matrix(dx, dy)
-                    # Reconstruct full mask from crop for affine fallback
-                    if snap_data is not None and sb is not None and snap_data.shape != l.mask.shape:
-                        full = np.zeros_like(l.mask)
-                        full[sb[0]:sb[1], sb[2]:sb[3]] = snap_data
-                        l.mask[:] = apply_affine_to_mask(full, M, l.mask.shape)
+                    # Accumulate offset
+                    prev_dx, prev_dy = self._cumulative_offset.get(lid, (0, 0))
+                    cum_dx = prev_dx + idx_dx
+                    cum_dy = prev_dy + idx_dy
+                    self._cumulative_offset[lid] = (cum_dx, cum_dy)
+                    # Rasterize from session snapshot using cumulative offset
+                    session_snap = self._session_snapshots.get(lid)
+                    session_bb = self._session_bboxes.get(lid)
+                    if session_snap is not None and session_bb is not None:
+                        l.mask[:] = 0
+                        sy1, sy2, sx1, sx2 = session_bb
+                        bh, bw = sy2 - sy1, sx2 - sx1
+                        d_y1, d_y2 = sy1 + cum_dy, sy2 + cum_dy
+                        d_x1, d_x2 = sx1 + cum_dx, sx2 + cum_dx
+                        cy1 = max(0, -d_y1)
+                        cy2 = bh - max(0, d_y2 - h)
+                        cx1 = max(0, -d_x1)
+                        cx2 = bw - max(0, d_x2 - w)
+                        if cy2 > cy1 and cx2 > cx1:
+                            src = session_snap[sy1 + cy1:sy1 + cy2, sx1 + cx1:sx1 + cx2]
+                            l.mask[d_y1 + cy1:d_y1 + cy2, d_x1 + cx1:d_x1 + cx2] = src
                     else:
-                        l.mask[:] = apply_affine_to_mask(snap_data, M, l.mask.shape)
+                        # Fallback: no session snapshot
+                        l.mask[:] = 0
+                        sy1, sy2, sx1, sx2 = old_bb
+                        bh, bw = sy2 - sy1, sx2 - sx1
+                        d_y1, d_y2 = sy1 + idx_dy, sy2 + idx_dy
+                        d_x1, d_x2 = sx1 + idx_dx, sx2 + idx_dx
+                        cy1 = max(0, -d_y1)
+                        cy2 = bh - max(0, d_y2 - h)
+                        cx1 = max(0, -d_x1)
+                        cx2 = bw - max(0, d_x2 - w)
+                        if cy2 > cy1 and cx2 > cx1:
+                            src = snap_data[cy1:cy2, cx1:cx2] if snap_data is not None else l.mask[sy1+cy1:sy1+cy2, sx1+cx1:sx1+cx2]
+                            l.mask[d_y1+cy1:d_y1+cy2, d_x1+cx1:d_x1+cx2] = src
                 l.invalidate_bbox()
 
         commands = []
@@ -612,6 +614,9 @@ class MoveTool(BaseTool):
     def _clear_handles(self, canvas):
         """Called by canvas on tool/layer switch to clean up state."""
         self._clear_multi_selection(canvas)
+        self._session_snapshots.clear()
+        self._session_bboxes.clear()
+        self._cumulative_offset.clear()
 
     def cursor(self):
         return Qt.SizeAllCursor
