@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import (
-    QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush,
+    QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush, QPainterPath,
 )
 from montaris.core.selection import SelectionModel
 
@@ -520,13 +520,16 @@ class ImageCanvas(QGraphicsView):
         self.clear_polygon_preview()
         if len(vertices) < 1:
             return
-        points = [QPointF(x, y) for x, y in vertices]
-        if hover_point:
-            points.append(QPointF(hover_point[0], hover_point[1]))
-        polygon = QPolygonF(points)
         pen = QPen(QColor(255, 255, 0), 1.5)
         pen.setCosmetic(True)
-        self._polygon_item = self._scene.addPolygon(polygon, pen)
+        # Draw open polyline (not closed polygon) so it doesn't auto-close
+        path = QPainterPath()
+        path.moveTo(QPointF(vertices[0][0], vertices[0][1]))
+        for x, y in vertices[1:]:
+            path.lineTo(QPointF(x, y))
+        if hover_point:
+            path.lineTo(QPointF(hover_point[0], hover_point[1]))
+        self._polygon_item = self._scene.addPath(path, pen)
         self._polygon_item.setZValue(1000)
 
     def clear_polygon_preview(self):
