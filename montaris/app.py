@@ -253,6 +253,11 @@ class MontarisApp(QMainWindow):
         open_act.triggered.connect(self.open_image)
         file_menu.addAction(open_act)
 
+        close_img_act = QAction("&Close Image", self)
+        close_img_act.setShortcut(QKeySequence("Ctrl+W"))
+        close_img_act.triggered.connect(self.close_image)
+        file_menu.addAction(close_img_act)
+
         file_menu.addSeparator()
 
         load_roi_act = QAction("Load &ROI Set...", self)
@@ -482,6 +487,19 @@ class MontarisApp(QMainWindow):
         toolbar.setObjectName("MainToolbar")
         toolbar.setMovable(True)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+        # Undo / Redo buttons (shortcuts already in Edit menu)
+        undo_btn = QAction("⟲ Undo", self)
+        undo_btn.setToolTip("Undo (Ctrl+Z)")
+        undo_btn.triggered.connect(self.undo)
+        toolbar.addAction(undo_btn)
+
+        redo_btn = QAction("⟳ Redo", self)
+        redo_btn.setToolTip("Redo (Ctrl+Shift+Z)")
+        redo_btn.triggered.connect(self.redo)
+        toolbar.addAction(redo_btn)
+
+        toolbar.addSeparator()
 
         # Brush size in toolbar — synced with tool_panel
         toolbar.addWidget(QLabel(" Brush Size: "))
@@ -740,12 +758,22 @@ class MontarisApp(QMainWindow):
                 # Save current document state
                 self._save_current_document()
 
-                self._downsample_factor = ds_factor
-                self.canvas._selection.clear()
-                self.layer_stack.set_image(ImageLayer(os.path.basename(path), data))
-                self.canvas.refresh_image()
-                self.canvas.fit_to_window()
-                self.layer_panel.refresh()
+                new_layer = ImageLayer(os.path.basename(path), data)
+
+                # If same dimensions as current image, add to stack (shared ROIs)
+                cur = self.layer_stack.image_layer
+                if cur is not None and data.shape[:2] == cur.data.shape[:2]:
+                    self.layer_stack.image_layer = new_layer
+                    self.canvas.refresh_image()
+                else:
+                    # Different dimensions or first image — full reset
+                    self._downsample_factor = ds_factor
+                    self.canvas._selection.clear()
+                    self.layer_stack.set_image(new_layer)
+                    self.canvas.refresh_image()
+                    self.canvas.fit_to_window()
+                    self.layer_panel.refresh()
+
                 self.undo_stack.clear()
                 self.minimap.set_image(data)
                 self._update_minimap_viewport()
@@ -754,8 +782,7 @@ class MontarisApp(QMainWindow):
                 # Create montage document (A.10)
                 doc = MontageDocument(
                     name=os.path.basename(path),
-                    image_layer=self.layer_stack.image_layer,
-                    roi_layers=self.layer_stack.roi_layers,
+                    image_layer=new_layer,
                     downsample_factor=ds_factor,
                     original_shape=original_shape,
                 )
@@ -771,6 +798,42 @@ class MontarisApp(QMainWindow):
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
+
+    def close_image(self):
+        """Close the current image and all ROIs, with save prompt."""
+        if self.layer_stack.image_layer is None:
+            return
+
+        if self.layer_stack.roi_layers:
+            reply = QMessageBox.question(
+                self, "Close Image",
+                "Save ROIs before closing?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.Save:
+                self.save_rois()
+
+        self.canvas._selection.clear()
+        self.layer_stack.set_image(None)
+        self.canvas.refresh_image()
+        self.canvas.refresh_overlays()
+        self.layer_panel.refresh()
+        self.undo_stack.clear()
+        self.minimap.set_image(None)
+        self.adjustments_panel.set_image_data(None)
+        self.properties_panel.set_layer(None)
+        self.canvas._active_layer = None
+        # Clear image stack
+        self._documents.clear()
+        self._active_doc_index = -1
+        self._doc_combo.blockSignals(True)
+        self._doc_combo.clear()
+        self._doc_combo.blockSignals(False)
+        self.setWindowTitle("Montaris-X")
+        self.statusbar.showMessage("Image closed")
 
     def load_rois(self):
         if self.layer_stack.image_layer is None:
@@ -1243,8 +1306,6 @@ class MontarisApp(QMainWindow):
             return
         doc = self._documents[self._active_doc_index]
         doc.image_layer = self.layer_stack.image_layer
-        doc.roi_layers = list(self.layer_stack.roi_layers)
-        doc.color_index = self.layer_stack._color_index
         doc.adjustments = {
             'brightness': self._adjustments.brightness,
             'contrast': self._adjustments.contrast,
@@ -1254,26 +1315,20 @@ class MontarisApp(QMainWindow):
         doc.downsample_factor = self._downsample_factor
 
     def _switch_to_document(self, index):
-        """Switch to a different MontageDocument."""
+        """Switch to a different MontageDocument (shared ROIs, swap image only)."""
         if index < 0 or index >= len(self._documents):
             return
         if index == self._active_doc_index:
             return
         # Save current
         self._save_current_document()
-        # Load new
+        # Load new — only swap image, ROIs stay shared
         doc = self._documents[index]
         self._active_doc_index = index
         self._downsample_factor = doc.downsample_factor
-        self.canvas._selection.clear()
         self.layer_stack.image_layer = doc.image_layer
-        self.layer_stack.roi_layers = doc.roi_layers
-        self.layer_stack._color_index = doc.color_index
-        self.layer_stack.changed.emit()
         self.canvas.refresh_image()
         self.canvas.refresh_overlays()
-        self.canvas.fit_to_window()
-        self.layer_panel.refresh()
         self.undo_stack.clear()
         if doc.image_layer:
             self.minimap.set_image(doc.image_layer.data)
