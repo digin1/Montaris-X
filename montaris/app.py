@@ -510,9 +510,16 @@ class MontarisApp(QMainWindow):
         tb_opacity_slider.setFixedWidth(120)
         toolbar.addWidget(tb_opacity_slider)
 
+        tb_opacity_spin = QSpinBox()
+        tb_opacity_spin.setRange(0, 255)
+        tb_opacity_spin.setValue(128)
+        toolbar.addWidget(tb_opacity_spin)
+
         pp_slider = self.properties_panel.opacity_slider
         tb_opacity_slider.valueChanged.connect(pp_slider.setValue)
         pp_slider.valueChanged.connect(tb_opacity_slider.setValue)
+        tb_opacity_spin.valueChanged.connect(tb_opacity_slider.setValue)
+        tb_opacity_slider.valueChanged.connect(tb_opacity_spin.setValue)
 
         toolbar.addSeparator()
 
