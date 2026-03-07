@@ -386,11 +386,8 @@ class TransformTool(BaseTool):
         for item in self._temp_scene_items:
             scene.removeItem(item)
         self._temp_scene_items.clear()
-        # Restore real item visibility
-        for l, _ in self._hidden_layers:
-            rid = id(l)
-            if rid in canvas._roi_items:
-                canvas._roi_items[rid].setVisible(True)
+        # Keep real items hidden until deferred rebuild re-renders them
+        hidden_layers = self._hidden_layers[:]
         self._hidden_layers = []
 
         # After rotation: keep original bbox (don't use inflated axis-aligned bbox)
@@ -419,6 +416,11 @@ class TransformTool(BaseTool):
                     canvas._roi_lod[id(l)] = target_lod
                 except ValueError:
                     pass
+            # Restore real item visibility after re-render (avoids old-pixmap flash)
+            for l, _ in hidden_layers:
+                rid = id(l)
+                if rid in canvas._roi_items:
+                    canvas._roi_items[rid].setVisible(True)
             canvas._update_selection_highlights()
 
         QTimer.singleShot(0, _deferred_rebuild)
