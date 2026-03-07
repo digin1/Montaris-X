@@ -467,6 +467,12 @@ class LayerPanel(QWidget):
 
         menu.addSeparator()
 
+        bin_action = QAction("Bin ROI...", self)
+        bin_action.triggered.connect(lambda: self._bin_roi(data[1]))
+        menu.addAction(bin_action)
+
+        menu.addSeparator()
+
         delete_action = QAction("Delete", self)
         delete_action.triggered.connect(self._remove_selected)
         menu.addAction(delete_action)
@@ -649,6 +655,72 @@ class LayerPanel(QWidget):
         app = self.window()
         if hasattr(app, 'toast'):
             app.toast.show(f"Exported {count} ROI(s)", "success")
+
+    def _bin_roi(self, roi_index):
+        roi = self.layer_stack.get_roi(roi_index)
+        if roi is None:
+            return
+        from PySide6.QtWidgets import QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QComboBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Bin ROI")
+        form = QFormLayout(dlg)
+
+        h_spin = QSpinBox()
+        h_spin.setRange(2, 64)
+        h_spin.setValue(2)
+        form.addRow("Horizontal bin:", h_spin)
+
+        v_spin = QSpinBox()
+        v_spin.setRange(2, 64)
+        v_spin.setValue(2)
+        form.addRow("Vertical bin:", v_spin)
+
+        method_combo = QComboBox()
+        method_combo.addItems(["Average (threshold)", "Max"])
+        form.addRow("Method:", method_combo)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        bx = h_spin.value()
+        by = v_spin.value()
+        method = method_combo.currentText()
+        mask = roi.mask
+        h, w = mask.shape
+
+        # Trim to exact multiple
+        h_trim = (h // by) * by
+        w_trim = (w // bx) * bx
+        trimmed = mask[:h_trim, :w_trim]
+
+        # Bin down
+        reshaped = trimmed.reshape(h_trim // by, by, w_trim // bx, bx)
+        if method.startswith("Max"):
+            binned = reshaped.max(axis=(1, 3))
+        else:
+            binned = reshaped.mean(axis=(1, 3))
+            binned = (binned > 127).astype(np.uint8) * 255
+
+        # Scale back up to original size (nearest neighbor — keeps blocky bins)
+        result = np.zeros_like(mask)
+        scaled = np.repeat(np.repeat(binned, by, axis=0), bx, axis=1)
+        rh, rw = min(h, scaled.shape[0]), min(w, scaled.shape[1])
+        result[:rh, :rw] = scaled[:rh, :rw]
+
+        roi.mask = result
+        roi.invalidate_bbox()
+        self.refresh()
+        self.visibility_changed.emit()
+        app = self.window()
+        if hasattr(app, 'canvas'):
+            app.canvas.refresh_overlays()
+        if hasattr(app, 'toast'):
+            app.toast.show(f"Binned {roi.name} ({bx}x{by})", "success")
 
     def _change_color(self):
         """Open color palette dialog (B.12)."""
