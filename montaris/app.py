@@ -779,6 +779,7 @@ class MontarisApp(QMainWindow):
                 rois = load_roi_set(path)
                 for roi in rois:
                     self.layer_stack.add_roi(roi)
+                self._auto_fit_rois()
                 self.canvas.refresh_overlays()
                 self.layer_panel.refresh()
                 self.statusbar.showMessage(f"Loaded {len(rois)} ROIs from {path}")
