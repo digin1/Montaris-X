@@ -96,6 +96,151 @@ class ROINavBar(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# ROI binning helpers
+# ---------------------------------------------------------------------------
+
+def _voronoi_bin(mask, n_bins):
+    """Split an ROI mask into n_bins region-aware sub-regions using Voronoi
+    tessellation with Lloyd's relaxation for balanced area.
+
+    Seeds are initialized from distance-transform peaks (maximally interior
+    points), then iteratively moved to region centroids so that each region
+    converges to roughly equal area.
+
+    Returns list of (sub_mask, y_offset, x_offset) tuples, where sub_mask
+    is a cropped uint8 array and offsets locate it within the original mask.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    binary = mask > 0
+    if not binary.any():
+        return []
+
+    # Crop to bounding box for efficiency
+    ys, xs = np.where(binary)
+    by1, by2 = int(ys.min()), int(ys.max()) + 1
+    bx1, bx2 = int(xs.min()), int(xs.max()) + 1
+    crop = binary[by1:by2, bx1:bx2]
+
+    # Distance transform — peaks are maximally interior points
+    dist = distance_transform_edt(crop)
+
+    # Suppress radius: scale with bounding box diagonal / sqrt(n_bins)
+    diag = np.sqrt(crop.shape[0] ** 2 + crop.shape[1] ** 2)
+    suppress_radius = max(3, int(diag / np.sqrt(max(n_bins, 1)) * 0.5))
+
+    # Find initial seed points via iterative peak suppression
+    seeds = []
+    dist_work = dist.copy()
+    for _ in range(n_bins):
+        peak_idx = np.unravel_index(np.argmax(dist_work), dist_work.shape)
+        if dist_work[peak_idx] <= 0:
+            break
+        seeds.append(list(peak_idx))
+        py, px = peak_idx
+        ch, cw = dist_work.shape
+        r = suppress_radius
+        y_lo, y_hi = max(0, py - r), min(ch, py + r + 1)
+        x_lo, x_hi = max(0, px - r), min(cw, px + r + 1)
+        yy, xx = np.ogrid[y_lo:y_hi, x_lo:x_hi]
+        circ = (yy - py) ** 2 + (xx - px) ** 2 <= r * r
+        dist_work[y_lo:y_hi, x_lo:x_hi][circ] = 0
+
+    if len(seeds) < 2:
+        sub = mask[by1:by2, bx1:bx2].copy()
+        return [(sub, by1, bx1)]
+
+    # Pixel coordinates of all mask points (computed once)
+    mask_ys, mask_xs = np.where(crop)
+    mask_ys_f = mask_ys.astype(np.float64)
+    mask_xs_f = mask_xs.astype(np.float64)
+    n_pixels = len(mask_ys)
+
+    # Lloyd's relaxation: assign → recompute centroids → repeat
+    seeds_arr = np.array(seeds, dtype=np.float64)  # (K, 2)
+    for _iteration in range(15):
+        # Assign each pixel to nearest seed
+        best_label = np.zeros(n_pixels, dtype=np.int32)
+        best_dist = np.full(n_pixels, np.finfo(np.float64).max)
+        for i in range(len(seeds_arr)):
+            d = (mask_ys_f - seeds_arr[i, 0]) ** 2 + (mask_xs_f - seeds_arr[i, 1]) ** 2
+            closer = d < best_dist
+            best_dist[closer] = d[closer]
+            best_label[closer] = i
+
+        # Move seeds to region centroids
+        converged = True
+        for i in range(len(seeds_arr)):
+            members = best_label == i
+            if not members.any():
+                continue
+            cy = mask_ys_f[members].mean()
+            cx = mask_xs_f[members].mean()
+            # Ensure centroid stays inside the mask
+            if not crop[int(round(cy)), int(round(cx))]:
+                # Snap to nearest mask pixel to centroid
+                dists = (mask_ys_f - cy) ** 2 + (mask_xs_f - cx) ** 2
+                nearest = np.argmin(dists)
+                cy, cx = mask_ys_f[nearest], mask_xs_f[nearest]
+            if abs(seeds_arr[i, 0] - cy) > 0.5 or abs(seeds_arr[i, 1] - cx) > 0.5:
+                converged = False
+            seeds_arr[i] = [cy, cx]
+        if converged:
+            break
+
+    # Final assignment with converged seeds
+    best_label = np.zeros(n_pixels, dtype=np.int32)
+    best_dist = np.full(n_pixels, np.finfo(np.float64).max)
+    for i in range(len(seeds_arr)):
+        d = (mask_ys_f - seeds_arr[i, 0]) ** 2 + (mask_xs_f - seeds_arr[i, 1]) ** 2
+        closer = d < best_dist
+        best_dist[closer] = d[closer]
+        best_label[closer] = i + 1
+
+    labels = np.zeros(crop.shape, dtype=np.int32)
+    labels[mask_ys, mask_xs] = best_label
+
+    # Extract each labeled region as a cropped sub-mask
+    results = []
+    for i in range(1, len(seeds_arr) + 1):
+        region = labels == i
+        if not region.any():
+            continue
+        rys, rxs = np.where(region)
+        ry1, ry2 = int(rys.min()), int(rys.max()) + 1
+        rx1, rx2 = int(rxs.min()), int(rxs.max()) + 1
+        sub = np.zeros((ry2 - ry1, rx2 - rx1), dtype=np.uint8)
+        sub[region[ry1:ry2, rx1:rx2]] = 255
+        results.append((sub, by1 + ry1, bx1 + rx1))
+
+    return results
+
+
+def _grid_bin(mask, cols, rows):
+    """Split an ROI mask into a cols x rows grid.
+
+    Returns list of (sub_mask, y_offset, x_offset) tuples for non-empty cells.
+    """
+    h, w = mask.shape
+    bx = (w + cols - 1) // cols
+    by = (h + rows - 1) // rows
+    results = []
+
+    for gy in range(rows):
+        for gx in range(cols):
+            y0 = gy * by
+            y1 = min(y0 + by, h)
+            x0 = gx * bx
+            x1 = min(x0 + bx, w)
+            cell = mask[y0:y1, x0:x1]
+            if cell.max() == 0:
+                continue
+            results.append((cell.copy(), y0, x0))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Layer panel
 # ---------------------------------------------------------------------------
 
@@ -672,24 +817,45 @@ class LayerPanel(QWidget):
         roi = self.layer_stack.get_roi(roi_index)
         if roi is None:
             return
-        from PySide6.QtWidgets import QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QComboBox
+        from PySide6.QtWidgets import (
+            QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QComboBox,
+            QStackedWidget, QWidget, QLabel,
+        )
         dlg = QDialog(self)
-        dlg.setWindowTitle("Bin ROI — Split into Grid")
+        dlg.setWindowTitle("Bin ROI — Split into Regions")
         form = QFormLayout(dlg)
 
+        method_combo = QComboBox()
+        method_combo.addItems(["Region-aware (Voronoi)", "Grid"])
+        form.addRow("Method:", method_combo)
+
+        # Region-aware controls
+        region_widget = QWidget()
+        region_form = QFormLayout(region_widget)
+        region_form.setContentsMargins(0, 0, 0, 0)
+        n_bins_spin = QSpinBox()
+        n_bins_spin.setRange(2, 500)
+        n_bins_spin.setValue(10)
+        region_form.addRow("Number of regions:", n_bins_spin)
+
+        # Grid controls
+        grid_widget = QWidget()
+        grid_form = QFormLayout(grid_widget)
+        grid_form.setContentsMargins(0, 0, 0, 0)
         h_spin = QSpinBox()
         h_spin.setRange(2, 512)
         h_spin.setValue(10)
-        form.addRow("Columns (horizontal):", h_spin)
-
+        grid_form.addRow("Columns:", h_spin)
         v_spin = QSpinBox()
         v_spin.setRange(2, 512)
         v_spin.setValue(10)
-        form.addRow("Rows (vertical):", v_spin)
+        grid_form.addRow("Rows:", v_spin)
 
-        method_combo = QComboBox()
-        method_combo.addItems(["Any pixel (Max)", "Majority (Average)"])
-        form.addRow("Include cell if:", method_combo)
+        stack = QStackedWidget()
+        stack.addWidget(region_widget)
+        stack.addWidget(grid_widget)
+        method_combo.currentIndexChanged.connect(stack.setCurrentIndex)
+        form.addRow(stack)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept)
@@ -699,64 +865,51 @@ class LayerPanel(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
 
-        cols = h_spin.value()
-        rows = v_spin.value()
-        method = method_combo.currentText()
         mask = roi.mask
         h, w = mask.shape
-
-        # Compute cell size from grid dimensions
-        bx = (w + cols - 1) // cols  # cell width
-        by = (h + rows - 1) // rows  # cell height
-        count = 0
         insert_at = roi_index + 1
 
-        for gy in range(rows):
-            for gx in range(cols):
-                y0 = gy * by
-                y1 = min(y0 + by, h)
-                x0 = gx * bx
-                x1 = min(x0 + bx, w)
-                cell = mask[y0:y1, x0:x1]
+        if method_combo.currentIndex() == 0:
+            # Region-aware Voronoi binning
+            sub_regions = _voronoi_bin(mask, n_bins_spin.value())
+        else:
+            # Grid binning
+            sub_regions = _grid_bin(mask, h_spin.value(), v_spin.value())
 
-                # Check if cell has mask content
-                if method.startswith("Any"):
-                    has_content = cell.max() > 0
-                else:
-                    has_content = cell.mean() > 127
-
-                if not has_content:
-                    continue
-
-                # Create cell-sized mask with offset (avoids full-size allocation)
-                cell_h, cell_w = y1 - y0, x1 - x0
-                name = generate_unique_roi_name(
-                    f"{roi.name}_r{gy}c{gx}", self.layer_stack.roi_layers
-                )
-                new_roi = ROILayer(name, cell_w, cell_h)
-                new_roi.mask = cell.copy()
-                new_roi.offset_x = x0
-                new_roi.offset_y = y0
-                new_roi.opacity = roi.opacity
-                new_roi.fill_mode = roi.fill_mode
-                self.layer_stack.insert_roi(insert_at + count, new_roi)
-                count += 1
-
-        if count == 0:
+        if not sub_regions:
+            app = self.window()
+            if hasattr(app, 'toast'):
+                app.toast.show("No regions created (mask empty?)", "warning")
             return
+
+        count = 0
+        for label_idx, (sub_mask, y0, x0) in enumerate(sub_regions):
+            cell_h, cell_w = sub_mask.shape
+            name = generate_unique_roi_name(
+                f"{roi.name}_bin{label_idx + 1}", self.layer_stack.roi_layers
+            )
+            new_roi = ROILayer(name, cell_w, cell_h)
+            new_roi.mask = sub_mask
+            new_roi.offset_x = x0
+            new_roi.offset_y = y0
+            new_roi.opacity = roi.opacity
+            new_roi.fill_mode = roi.fill_mode
+            self.layer_stack.insert_roi(insert_at + count, new_roi)
+            count += 1
 
         app = self.window()
         if hasattr(app, 'canvas'):
-            last_roi = self.layer_stack.get_roi(insert_at)
-            if last_roi:
-                app.canvas.set_active_layer(last_roi)
+            first_new = self.layer_stack.get_roi(insert_at)
+            if first_new:
+                app.canvas.set_active_layer(first_new)
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: (
                 app.canvas.refresh_overlays(),
                 self.refresh(),
             ))
+        method_name = "Voronoi" if method_combo.currentIndex() == 0 else "Grid"
         if hasattr(app, 'toast'):
-            app.toast.show(f"Split into {count} ROI(s) ({cols}x{rows} grid)", "success")
+            app.toast.show(f"Split into {count} region(s) ({method_name})", "success")
 
     def _change_color(self):
         """Open color palette dialog (B.12)."""
