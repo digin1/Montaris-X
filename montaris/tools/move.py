@@ -141,7 +141,8 @@ class MoveTool(BaseTool):
         dy = pos.y() - self._start_pos.y()
 
         if self._component_mask is not None:
-            # Component move: free preview, clamped on release
+            # Component move: clamp to mask bounds
+            dx, dy = self._clamp_component_delta(dx, dy)
             for i, item in enumerate(self._comp_preview_items):
                 bx1, by1 = self._comp_preview_offsets[i]
                 item.setOffset(bx1 + dx, by1 + dy)
@@ -149,14 +150,14 @@ class MoveTool(BaseTool):
                 cy1, cy2, cx1, cx2 = self._component_bbox
                 self._comp_bbox_item.setRect(QRectF(cx1 + dx, cy1 + dy, cx2 - cx1, cy2 - cy1))
         else:
-            # Whole-layer: update offsets and reposition real scene items
+            # Whole-layer: clamp to mask bounds
+            dx, dy = self._clamp_layer_delta(dx, dy)
             idx_dx, idx_dy = int(round(dx)), int(round(dy))
             for l in self._target_layers:
                 lid = id(l)
                 old_ox, old_oy = self._old_offsets[lid]
                 l.offset_x = old_ox + idx_dx
                 l.offset_y = old_oy + idx_dy
-                # Reposition the real scene item directly
                 rid = id(l)
                 real_item = canvas._roi_items.get(rid)
                 if real_item:
@@ -165,7 +166,6 @@ class MoveTool(BaseTool):
                         y1, y2, x1, x2 = bbox
                         real_item.setOffset(x1 + l.offset_x, y1 + l.offset_y)
 
-        self._expand_scene_rect_for_pos(pos, canvas)
         self._auto_scroll(pos, canvas)
         if self._target_layers:
             canvas.ensureVisible(QRectF(pos.x() - 10, pos.y() - 10, 20, 20), 50, 50)
@@ -427,7 +427,7 @@ class MoveTool(BaseTool):
         self._comp_hidden_layers = []
 
     # ------------------------------------------------------------------
-    # Component delta clamping
+    # Delta clamping (keep all pixels within mask bounds)
     # ------------------------------------------------------------------
 
     def _clamp_component_delta(self, dx, dy):
@@ -443,24 +443,22 @@ class MoveTool(BaseTool):
         idx = max(-cx1, min(idx, w - cx2))
         return float(idx), float(idy)
 
-    # ------------------------------------------------------------------
-    # Scene rect expansion for OOB moves
-    # ------------------------------------------------------------------
-
-    def _expand_scene_rect_for_pos(self, pos, canvas):
-        """Grow the scene rect when the drag position nears the boundary."""
-        scene = canvas.scene()
-        sr = scene.sceneRect()
-        margin = 400
-        px, py = pos.x(), pos.y()
-        if px < sr.left() + margin or px > sr.right() - margin \
-                or py < sr.top() + margin or py > sr.bottom() - margin:
-            new_left = min(sr.left(), px - margin)
-            new_top = min(sr.top(), py - margin)
-            new_right = max(sr.right(), px + margin)
-            new_bottom = max(sr.bottom(), py + margin)
-            scene.setSceneRect(QRectF(new_left, new_top,
-                                      new_right - new_left, new_bottom - new_top))
+    def _clamp_layer_delta(self, dx, dy):
+        """Clamp dx/dy so all target layers' bboxes stay within mask bounds."""
+        idx = int(round(dx))
+        idy = int(round(dy))
+        for l in self._target_layers:
+            bbox = l.get_bbox()
+            if bbox is None:
+                continue
+            y1, y2, x1, x2 = bbox
+            h, w = l.mask.shape
+            lid = id(l)
+            old_ox, old_oy = self._old_offsets.get(lid, (0, 0))
+            # Display position = bbox + old_offset + delta
+            idy = max(-y1 - old_oy, min(idy, h - y2 - old_oy))
+            idx = max(-x1 - old_ox, min(idx, w - x2 - old_ox))
+        return float(idx), float(idy)
 
     # ------------------------------------------------------------------
     # Auto-scroll
