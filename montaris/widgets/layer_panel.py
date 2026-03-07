@@ -419,13 +419,27 @@ class LayerPanel(QWidget):
 
         menu.addSeparator()
 
-        insert_above_action = QAction("Insert ROI Above", self)
-        insert_above_action.triggered.connect(lambda: self._insert_roi_at(data[1]))
-        menu.addAction(insert_above_action)
+        insert_above_menu = menu.addMenu("Insert Above")
+        ins_above_blank = QAction("Empty ROI", self)
+        ins_above_blank.triggered.connect(lambda: self._insert_roi_at(data[1]))
+        insert_above_menu.addAction(ins_above_blank)
+        ins_above_roi = QAction("From .roi File...", self)
+        ins_above_roi.triggered.connect(lambda: self._insert_roi_from_file(data[1], "roi"))
+        insert_above_menu.addAction(ins_above_roi)
+        ins_above_png = QAction("From PNG Mask...", self)
+        ins_above_png.triggered.connect(lambda: self._insert_roi_from_file(data[1], "png"))
+        insert_above_menu.addAction(ins_above_png)
 
-        insert_below_action = QAction("Insert ROI Below", self)
-        insert_below_action.triggered.connect(lambda: self._insert_roi_at(data[1] + 1))
-        menu.addAction(insert_below_action)
+        insert_below_menu = menu.addMenu("Insert Below")
+        ins_below_blank = QAction("Empty ROI", self)
+        ins_below_blank.triggered.connect(lambda: self._insert_roi_at(data[1] + 1))
+        insert_below_menu.addAction(ins_below_blank)
+        ins_below_roi = QAction("From .roi File...", self)
+        ins_below_roi.triggered.connect(lambda: self._insert_roi_from_file(data[1] + 1, "roi"))
+        insert_below_menu.addAction(ins_below_roi)
+        ins_below_png = QAction("From PNG Mask...", self)
+        ins_below_png.triggered.connect(lambda: self._insert_roi_from_file(data[1] + 1, "png"))
+        insert_below_menu.addAction(ins_below_png)
 
         # Move to position (B.22)
         move_to_action = QAction("Move To Position...", self)
@@ -523,6 +537,52 @@ class LayerPanel(QWidget):
         name = generate_unique_roi_name(base, self.layer_stack.roi_layers)
         roi = ROILayer(name, w, h, color)
         self.layer_stack.insert_roi(index, roi)
+
+    def _insert_roi_from_file(self, index, fmt):
+        import os
+        from PySide6.QtWidgets import QFileDialog
+        img = self.layer_stack.image_layer
+        if img is None:
+            return
+        h, w = img.shape[:2]
+        if fmt == "roi":
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "Import ImageJ ROI", "",
+                "ImageJ ROI (*.roi);;All Files (*)",
+            )
+            if not paths:
+                return
+            from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
+            for i, path in enumerate(paths):
+                roi_dict = read_imagej_roi(path)
+                mask = imagej_roi_to_mask(roi_dict, w, h)
+                name = os.path.splitext(os.path.basename(path))[0]
+                roi = ROILayer(name, w, h)
+                roi.mask = mask
+                self.layer_stack.insert_roi(index + i, roi)
+        elif fmt == "png":
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "Import PNG Mask", "",
+                "PNG (*.png);;All Files (*)",
+            )
+            if not paths:
+                return
+            from PIL import Image
+            for i, path in enumerate(paths):
+                pil_img = Image.open(path).convert('L')
+                arr = np.array(pil_img)
+                if arr.shape != (h, w):
+                    arr = np.array(pil_img.resize((w, h), Image.NEAREST))
+                mask = (arr > 0).astype(np.uint8) * 255
+                name = os.path.splitext(os.path.basename(path))[0]
+                roi = ROILayer(name, w, h)
+                roi.mask = mask
+                self.layer_stack.insert_roi(index + i, roi)
+        self.refresh()
+        self.visibility_changed.emit()
+        app = self.window()
+        if hasattr(app, 'canvas'):
+            app.canvas.refresh_overlays()
 
     def _rename_selected(self):
         row = self.list_widget.currentRow()
