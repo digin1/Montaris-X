@@ -729,75 +729,93 @@ class MontarisApp(QMainWindow):
     # -- File operations --
 
     def open_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Image", "",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open Image(s)", "",
             "Image Files (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
         )
-        if path:
+        if not paths:
+            return
+        # Ask downsample once for the batch
+        first_data = load_image(paths[0])
+        ds_factor = 1
+        if first_data.shape[0] * first_data.shape[1] > 4_000_000:
+            items = ["1x (Original)", "2x", "4x", "8x"]
+            item, ok = QInputDialog.getItem(
+                self, "Downsample", "Image is large. Choose downsample factor:",
+                items, 0, False,
+            )
+            if ok and item != items[0]:
+                ds_factor = int(item[0])
+        skipped = []
+        for path in paths:
             try:
-                data = load_image(path)
-                # Apply flip/rotate on load (E.21, E.22)
-                if self._flip_on_load_act.isChecked():
-                    data = np.flip(data, axis=1).copy()
-                if self._rotate_on_load_act.isChecked():
-                    data = np.rot90(data, k=-1).copy()
-                original_shape = data.shape
-
-                # Downsample dialog (A.13)
-                ds_factor = 1
-                if data.shape[0] * data.shape[1] > 4_000_000:
-                    items = ["1x (Original)", "2x", "4x", "8x"]
-                    item, ok = QInputDialog.getItem(
-                        self, "Downsample", "Image is large. Choose downsample factor:",
-                        items, 0, False,
-                    )
-                    if ok and item != items[0]:
-                        ds_factor = int(item[0])
-                        data = data[::ds_factor, ::ds_factor]
-
-                # Save current document state
-                self._save_current_document()
-
-                new_layer = ImageLayer(os.path.basename(path), data)
-
-                # If same dimensions as current image, add to stack (shared ROIs)
-                cur = self.layer_stack.image_layer
-                if cur is not None and data.shape[:2] == cur.data.shape[:2]:
-                    self.layer_stack.image_layer = new_layer
-                    self.canvas.refresh_image()
-                else:
-                    # Different dimensions or first image — full reset
-                    self._downsample_factor = ds_factor
-                    self.canvas._selection.clear()
-                    self.layer_stack.set_image(new_layer)
-                    self.canvas.refresh_image()
-                    self.canvas.fit_to_window()
-                    self.layer_panel.refresh()
-
-                self.undo_stack.clear()
-                self.minimap.set_image(data)
-                self._update_minimap_viewport()
-                self.adjustments_panel.set_image_data(data)
-
-                # Create montage document (A.10)
-                doc = MontageDocument(
-                    name=os.path.basename(path),
-                    image_layer=new_layer,
-                    downsample_factor=ds_factor,
-                    original_shape=original_shape,
-                )
-                self._documents.append(doc)
-                self._active_doc_index = len(self._documents) - 1
-                self._doc_combo.blockSignals(True)
-                self._doc_combo.addItem(doc.name)
-                self._doc_combo.setCurrentIndex(self._active_doc_index)
-                self._doc_combo.blockSignals(False)
-
-                self.toast.show(
-                    f"Loaded: {os.path.basename(path)}  {data.shape}", "success"
-                )
+                self._load_single_image(path, ds_factor, skipped)
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
+                QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
+        if skipped:
+            QMessageBox.warning(
+                self, "Dimension Mismatch",
+                f"Skipped {len(skipped)} image(s) with different dimensions:\n"
+                + "\n".join(skipped),
+            )
+        n = len(self._documents)
+        if n > 1:
+            self.toast.show(f"Loaded {n} images in stack", "success")
+
+    def _load_single_image(self, path, ds_factor, skipped):
+        """Load one image into the image stack."""
+        data = load_image(path)
+        if self._flip_on_load_act.isChecked():
+            data = np.flip(data, axis=1).copy()
+        if self._rotate_on_load_act.isChecked():
+            data = np.rot90(data, k=-1).copy()
+        original_shape = data.shape
+        if ds_factor > 1:
+            data = data[::ds_factor, ::ds_factor]
+
+        # Validate dimensions match existing stack
+        cur = self.layer_stack.image_layer
+        if cur is not None and data.shape[:2] != cur.data.shape[:2]:
+            skipped.append(f"{os.path.basename(path)} ({data.shape[1]}x{data.shape[0]})")
+            return
+
+        self._save_current_document()
+        new_layer = ImageLayer(os.path.basename(path), data)
+
+        if cur is not None:
+            # Same dimensions — add to stack, keep ROIs
+            self.layer_stack.image_layer = new_layer
+            self.canvas.refresh_image()
+        else:
+            # First image — full reset
+            self._downsample_factor = ds_factor
+            self.canvas._selection.clear()
+            self.layer_stack.set_image(new_layer)
+            self.canvas.refresh_image()
+            self.canvas.fit_to_window()
+            self.layer_panel.refresh()
+
+        self.undo_stack.clear()
+        self.minimap.set_image(data)
+        self._update_minimap_viewport()
+        self.adjustments_panel.set_image_data(data)
+
+        doc = MontageDocument(
+            name=os.path.basename(path),
+            image_layer=new_layer,
+            downsample_factor=ds_factor,
+            original_shape=original_shape,
+        )
+        self._documents.append(doc)
+        self._active_doc_index = len(self._documents) - 1
+        self._doc_combo.blockSignals(True)
+        self._doc_combo.addItem(doc.name)
+        self._doc_combo.setCurrentIndex(self._active_doc_index)
+        self._doc_combo.blockSignals(False)
+
+        self.toast.show(
+            f"Loaded: {os.path.basename(path)}  {data.shape}", "success"
+        )
 
     def close_image(self):
         """Close the current image and all ROIs, with save prompt."""
