@@ -164,8 +164,12 @@ class MoveTool(BaseTool):
             cy1, cy2, cx1, cx2 = self._component_bbox
             self._bbox_item.setRect(QRectF(cx1 + dx, cy1 + dy, cx2 - cx1, cy2 - cy1))
 
-        # Auto-scroll viewport to keep preview visible during OOB drag
+        # Auto-scroll viewport to keep cursor/preview visible during drag
         self._auto_scroll(pos, canvas)
+
+        # Ensure the preview center is visible in viewport
+        if self._preview_items:
+            canvas.ensureVisible(QRectF(pos.x() - 10, pos.y() - 10, 20, 20), 50, 50)
 
     def on_release(self, pos, layer, canvas):
         if not self._moving:
@@ -354,12 +358,12 @@ class MoveTool(BaseTool):
         ch, cw = sy2 - sy1, sx2 - sx1
         r, g, b = layer.color
         gof = canvas.layer_stack._global_opacity_factor
-        eff = max(30, int(layer.opacity * gof) // 3)  # faint ghost
+        eff = max(80, int(layer.opacity * gof) // 2)  # semi-transparent ghost
         rgba = np.zeros((ch, cw, 4), dtype=np.uint8)
         rgba[crop > 0] = [r, g, b, eff]
         rgba = np.ascontiguousarray(rgba)
         qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
-        item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+        item = QGraphicsPixmapItem(QPixmap.fromImage(qimg.copy()))
         off_x = sx1 + cum_dx
         off_y = sy1 + cum_dy
         item.setOffset(off_x, off_y)
@@ -377,10 +381,11 @@ class MoveTool(BaseTool):
 
     def _auto_scroll(self, pos, canvas):
         """Auto-scroll viewport when dragging near edges."""
+        from PySide6.QtCore import QPointF as _QPointF
         vp = canvas.viewport()
-        vp_pos = canvas.mapFromScene(pos.x(), pos.y())
-        margin = 40
-        scroll_speed = 15
+        vp_pos = canvas.mapFromScene(_QPointF(pos.x(), pos.y()))
+        margin = 50
+        scroll_speed = 20
         hs = canvas.horizontalScrollBar()
         vs = canvas.verticalScrollBar()
         if vp_pos.x() < margin:
@@ -447,7 +452,8 @@ class MoveTool(BaseTool):
                 continue
             rgba = np.ascontiguousarray(rgba)
             qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
-            item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+            pixmap = QPixmap.fromImage(qimg.copy())  # .copy() to detach from numpy buffer
+            item = QGraphicsPixmapItem(pixmap)
             item.setOffset(off_x, off_y)
             item.setZValue(z)
             item.setAcceptedMouseButtons(Qt.NoButton)
@@ -499,7 +505,7 @@ class MoveTool(BaseTool):
             rgba[comp_region] = [r, g, b, eff]
             rgba = np.ascontiguousarray(rgba)
             qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
-            comp_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+            comp_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg.copy()))
             comp_item.setOffset(cx1, cy1)
             comp_item.setZValue(z)
             comp_item.setAcceptedMouseButtons(Qt.NoButton)
@@ -514,7 +520,7 @@ class MoveTool(BaseTool):
             rem_rgba[non_comp] = [r, g, b, eff]
             rem_rgba = np.ascontiguousarray(rem_rgba)
             qimg2 = QImage(rem_rgba.data, lw, lh, lw * 4, QImage.Format_RGBA8888)
-            rem_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg2))
+            rem_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg2.copy()))
             rem_item.setOffset(lx1, ly1)
             rem_item.setZValue(z - 1)
             rem_item.setAcceptedMouseButtons(Qt.NoButton)
