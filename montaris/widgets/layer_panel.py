@@ -712,18 +712,24 @@ class LayerPanel(QWidget):
         rh, rw = min(h, scaled.shape[0]), min(w, scaled.shape[1])
         result[:rh, :rw] = scaled[:rh, :rw]
 
-        roi.mask = result
-        roi.invalidate_bbox()
+        # Create new ROI with binned result, keep original unchanged
+        new_name = generate_unique_roi_name(f"{roi.name} (bin {bx}x{by})", self.layer_stack.roi_layers)
+        new_roi = ROILayer(new_name, w, h)
+        new_roi.mask = result
+        new_roi.opacity = roi.opacity
+        new_roi.fill_mode = roi.fill_mode
+        self.layer_stack.insert_roi(roi_index + 1, new_roi)
+
         app = self.window()
         if hasattr(app, 'canvas'):
-            app.canvas.set_active_layer(roi)
+            app.canvas.set_active_layer(new_roi)
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: (
                 app.canvas.refresh_overlays(),
                 self.refresh(),
             ))
         if hasattr(app, 'toast'):
-            app.toast.show(f"Binned {roi.name} ({bx}x{by})", "success")
+            app.toast.show(f"Created {new_name}", "success")
 
     def _change_color(self):
         """Open color palette dialog (B.12)."""
