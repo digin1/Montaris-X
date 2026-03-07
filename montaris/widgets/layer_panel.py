@@ -498,9 +498,21 @@ class LayerPanel(QWidget):
                                      QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
-        # Remove in reverse order to preserve indices
+        # Batch remove without per-item signal/refresh
         for idx in sorted(indices, reverse=True):
-            self.roi_removed.emit(idx)
+            removed = self.layer_stack.get_roi(idx)
+            if removed:
+                if 0 <= idx < len(self.layer_stack.roi_layers):
+                    self.layer_stack.roi_layers.pop(idx)
+        self.layer_stack.changed.emit()
+        app = self.window()
+        if hasattr(app, 'canvas'):
+            app.canvas._selection.clear()
+            app.canvas.set_active_layer(None)
+            app.canvas.refresh_overlays()
+        self.refresh()
+        if hasattr(app, 'properties_panel'):
+            app.properties_panel.set_layer(None)
 
     def _clear_all(self):
         """Remove all ROIs (B.7)."""

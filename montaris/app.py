@@ -1684,8 +1684,11 @@ class MontarisApp(QMainWindow):
         first_idx = min(indices)
         self.canvas._active_layer = None
         self.canvas._selection.clear()
+        # Batch remove without emitting signals per removal
         for idx in sorted(indices, reverse=True):
-            self.layer_stack.remove_roi(idx)
+            if 0 <= idx < len(self.layer_stack.roi_layers):
+                self.layer_stack.roi_layers.pop(idx)
+        self.layer_stack.changed.emit()
         # Select adjacent ROI if available
         if self.layer_stack.roi_layers:
             new_idx = min(first_idx, len(self.layer_stack.roi_layers) - 1)
