@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileDialog,
     QStatusBar, QMessageBox, QProgressDialog, QDialog, QVBoxLayout, QTextEdit,
     QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget, QPushButton,
-    QComboBox, QInputDialog,
+    QComboBox, QInputDialog, QColorDialog,
 )
 from PySide6.QtCore import Qt, QSettings, QRectF
 from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
@@ -551,6 +551,13 @@ class MontarisApp(QMainWindow):
         self._doc_combo.currentIndexChanged.connect(self._switch_to_document)
         toolbar.addWidget(self._doc_combo)
 
+        self._tint_btn = QPushButton("Tint")
+        self._tint_btn.setFixedWidth(50)
+        self._tint_btn.setToolTip("Set display tint color for current channel (right-click to clear)")
+        self._tint_btn.clicked.connect(self._pick_tint_color)
+        self._tint_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tint_btn.customContextMenuRequested.connect(self._clear_tint_color)
+        toolbar.addWidget(self._tint_btn)
 
     def _update_cursor_info(self, x, y, value):
         roi_info = ""
@@ -1345,6 +1352,7 @@ class MontarisApp(QMainWindow):
         self._active_doc_index = index
         self._downsample_factor = doc.downsample_factor
         self.layer_stack.image_layer = doc.image_layer
+        self.canvas.set_tint_color(doc.tint_color)
         self.canvas.refresh_image()
         self.canvas.refresh_overlays()
         self.undo_stack.clear()
@@ -1357,7 +1365,46 @@ class MontarisApp(QMainWindow):
         if hasattr(self.adjustments_panel, '_adjustments'):
             self.adjustments_panel._adjustments = self._adjustments
             self.adjustments_panel._sync_sliders()
+        self._update_tint_btn()
         self.toast.show(f"Switched to: {doc.name}", "info")
+
+    def _get_active_tint(self):
+        """Return tint_color of the active document, or None."""
+        if 0 <= self._active_doc_index < len(self._documents):
+            return self._documents[self._active_doc_index].tint_color
+        return None
+
+    def _pick_tint_color(self):
+        if self._active_doc_index < 0 or self._active_doc_index >= len(self._documents):
+            return
+        doc = self._documents[self._active_doc_index]
+        initial = QColor(*(doc.tint_color or (255, 255, 255)))
+        color = QColorDialog.getColor(initial, self, "Channel Tint Color")
+        if color.isValid():
+            doc.tint_color = (color.red(), color.green(), color.blue())
+            self._update_tint_btn()
+            self.canvas.set_tint_color(doc.tint_color)
+            self.canvas.refresh_image()
+
+    def _clear_tint_color(self):
+        if self._active_doc_index < 0 or self._active_doc_index >= len(self._documents):
+            return
+        doc = self._documents[self._active_doc_index]
+        doc.tint_color = None
+        self._update_tint_btn()
+        self.canvas.set_tint_color(None)
+        self.canvas.refresh_image()
+
+    def _update_tint_btn(self):
+        tint = self._get_active_tint()
+        if tint:
+            r, g, b = tint
+            text_color = "white" if (r * 0.299 + g * 0.587 + b * 0.114) < 128 else "black"
+            self._tint_btn.setStyleSheet(
+                f"background-color: rgb({r},{g},{b}); color: {text_color};"
+            )
+        else:
+            self._tint_btn.setStyleSheet("")
 
     def _auto_fit_rois(self):
         if self.layer_stack.image_layer is None:

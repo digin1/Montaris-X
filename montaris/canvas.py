@@ -79,6 +79,7 @@ class ImageCanvas(QGraphicsView):
         self._dirty_timer.setInterval(16)  # ~60fps max
         self._dirty_timer.timeout.connect(self._flush_dirty)
 
+        self._tint_color = None
         self._tool = None
         self._active_layer = None
         self._is_panning = False
@@ -284,6 +285,10 @@ class ImageCanvas(QGraphicsView):
     # Image display — single QGraphicsPixmapItem (no tile pyramid)
     # ------------------------------------------------------------------
 
+    def set_tint_color(self, tint_color):
+        """Set the display tint for the background image (None for grayscale)."""
+        self._tint_color = tint_color
+
     def refresh_image(self):
         if self._image_item:
             self._scene.removeItem(self._image_item)
@@ -293,7 +298,12 @@ class ImageCanvas(QGraphicsView):
         if img_layer is None:
             return
 
-        qimg = numpy_to_qimage(img_layer.data)
+        data = img_layer.data
+        tint = getattr(self, '_tint_color', None)
+        if tint is not None and data.ndim == 2:
+            data = _apply_tint(data, tint)
+
+        qimg = numpy_to_qimage(data)
         pixmap = QPixmap.fromImage(qimg)
         self._image_item = QGraphicsPixmapItem(pixmap)
         self._image_item.setZValue(0)
@@ -1038,6 +1048,24 @@ def numpy_to_qimage(array):
             return img.copy()
 
     raise ValueError(f"Unsupported array shape: {array.shape}")
+
+
+def _apply_tint(array, tint_color):
+    """Apply an (R, G, B) tint to a 2D grayscale array, returning an (H, W, 3) uint8 array."""
+    if array.dtype != np.uint8:
+        mn, mx = float(array.min()), float(array.max())
+        if mx > mn:
+            gray = ((array.astype(np.float32) - mn) / (mx - mn) * 255).astype(np.uint8)
+        else:
+            gray = np.zeros_like(array, dtype=np.uint8)
+    else:
+        gray = array
+    r, g, b = tint_color
+    rgb = np.empty((*gray.shape, 3), dtype=np.uint8)
+    rgb[:, :, 0] = (gray.astype(np.uint16) * r // 255).astype(np.uint8)
+    rgb[:, :, 1] = (gray.astype(np.uint16) * g // 255).astype(np.uint8)
+    rgb[:, :, 2] = (gray.astype(np.uint16) * b // 255).astype(np.uint8)
+    return rgb
 
 
 def _compute_edge(mask):

@@ -263,3 +263,4 @@ class MontageDocument:
     color_index: int = 0
     downsample_factor: int = 1
     original_shape: tuple = None
+    tint_color: tuple = None  # (R, G, B) or None for grayscale
