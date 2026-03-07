@@ -518,10 +518,7 @@ class LayerPanel(QWidget):
         if img is None:
             return
         h, w = img.shape[:2]
-        color_idx = self.layer_stack._color_index
-        color = ROI_COLORS[color_idx % len(ROI_COLORS)]
-        self.layer_stack._color_index = (color_idx + 1) % len(ROI_COLORS)
-        # Auto-generate unique name (B.37)
+        color = self.layer_stack.next_color()
         base = f"ROI {len(self.layer_stack.roi_layers) + 1}"
         name = generate_unique_roi_name(base, self.layer_stack.roi_layers)
         roi = ROILayer(name, w, h, color)

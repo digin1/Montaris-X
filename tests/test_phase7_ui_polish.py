@@ -14,7 +14,7 @@ class TestHelpModal:
         dlg = HelpModal(None)
         tabs = dlg.findChild(QTabWidget)
         assert tabs is not None
-        assert tabs.count() == 4
+        assert tabs.count() == 5
 
 
 class TestToolStatusWidget:

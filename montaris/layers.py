@@ -2,28 +2,118 @@ import numpy as np
 from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
 
-ROI_COLORS = [
-    (255, 50, 50),
-    (50, 255, 50),
-    (50, 100, 255),
-    (255, 255, 50),
-    (255, 50, 255),
-    (50, 255, 255),
-    (255, 150, 50),
-    (150, 50, 255),
-    (50, 255, 150),
-    (255, 150, 150),
-    (100, 200, 100),
-    (200, 100, 200),
-    (100, 200, 255),
-    (255, 200, 100),
-    (180, 80, 80),
-    (80, 180, 80),
-    (80, 80, 180),
-    (200, 200, 100),
-    (100, 150, 200),
-    (200, 150, 100),
-]
+# --- Napari-compatible label colormap (LAB + low-discrepancy sequence) ---
+
+_LABMIN = np.array([0.0, -86.18302974, -107.85730021])
+_LABMAX = np.array([100.0, 98.23305386, 94.47812228])
+_LABRNG = _LABMAX - _LABMIN
+
+
+def _low_discrepancy(dim, n, seed=0.5):
+    """Quasi-random sequence in [0,1]^dim using generalized golden ratios."""
+    phi1 = 1.6180339887498948482
+    phi2 = 1.32471795724474602596
+    phi3 = 1.22074408460575947536
+    seed = np.broadcast_to(seed, (1, dim))
+    g = 1.0 / np.array([phi1, phi2, phi3])
+    n_arr = np.arange(n).reshape((n, 1))
+    return (seed + (n_arr * g[:dim])) % 1
+
+
+def _lab_to_rgb_batch(lab):
+    """Convert LAB array (N,3) to RGB (N,3) float. Out-of-gamut -> negative."""
+    # LAB -> XYZ (D65)
+    fy = (lab[:, 0] + 16.0) / 116.0
+    fx = lab[:, 1] / 500.0 + fy
+    fz = fy - lab[:, 2] / 200.0
+    delta = 6.0 / 29.0
+
+    def finv(t):
+        mask = t > delta
+        out = np.where(mask, t ** 3, 3.0 * delta ** 2 * (t - 4.0 / 29.0))
+        return out
+
+    X = 0.95047 * finv(fx)
+    Y = 1.00000 * finv(fy)
+    Z = 1.08883 * finv(fz)
+    # XYZ -> linear sRGB
+    r = 3.2404542 * X - 1.5371385 * Y - 0.4985314 * Z
+    g = -0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z
+    b = 0.0556434 * X - 0.2040259 * Y + 1.0572252 * Z
+    rgb = np.stack([r, g, b], axis=1)
+    # sRGB gamma
+    mask = rgb <= 0.0031308
+    rgb = np.where(mask, 12.92 * rgb, 1.055 * np.sign(rgb) * np.abs(rgb) ** (1.0 / 2.4) - 0.055)
+    return rgb
+
+
+def _color_random_lab(n, seed=0.5):
+    """Generate n valid RGB colors from quasi-random LAB sampling (napari algorithm)."""
+    factor = 6
+    rgb = np.zeros((0, 3))
+    while len(rgb) < n:
+        pts = _low_discrepancy(3, n * factor, seed=seed)
+        lab = pts * _LABRNG + _LABMIN
+        raw_rgb = _lab_to_rgb_batch(lab)
+        valid = np.all((raw_rgb > 0) & (raw_rgb < 1), axis=1)
+        rgb = np.clip(raw_rgb[valid], 0, 1)
+        factor *= 2
+    return rgb[:n]
+
+
+def _low_discrepancy_image(image, seed=0.5, margin=1.0 / 256):
+    """Napari's golden-ratio reorder for maximal consecutive color separation."""
+    phi_mod = 0.6180339887498948482
+    image_float = np.float32(image)
+    image_float = seed + image_float * phi_mod
+    image_out = margin + (1 - 2 * margin) * (image_float - np.floor(image_float))
+    image_out[image == 0] = 0.0
+    return image_out
+
+
+def _build_color_table(n=512, seed=0.5):
+    """Build napari-compatible label color table with low-discrepancy reorder."""
+    colors_rgb = _color_random_lab(n + 2, seed=seed)
+    colors_rgba = np.concatenate((colors_rgb, np.ones((len(colors_rgb), 1))), axis=1)
+    values = np.arange(n + 2)
+    randomized = _low_discrepancy_image(values, seed=seed)
+    control_points = np.concatenate((
+        np.array([0]),
+        np.linspace(0.00001, 1 - 0.00001, n + 1),
+        np.array([1.0]),
+    ))
+    indices = np.clip(
+        np.searchsorted(control_points, randomized, side='right') - 1,
+        0, len(control_points) - 1,
+    )
+    reordered = colors_rgba[indices][:-1]
+    # Quantize to uint8 like napari
+    rgb8 = (reordered[:, :3] * 255).astype(np.uint8)
+    return [(int(rgb8[i, 0]), int(rgb8[i, 1]), int(rgb8[i, 2])) for i in range(len(rgb8))]
+
+
+_COLOR_TABLE = None
+
+
+def _generate_color(index):
+    """Return a perceptually distinct color for any ROI index (napari-compatible)."""
+    global _COLOR_TABLE
+    if _COLOR_TABLE is None:
+        _COLOR_TABLE = _build_color_table(512)
+    if index < len(_COLOR_TABLE):
+        return _COLOR_TABLE[index]
+    # Fallback beyond table: extend with golden ratio HSV
+    import colorsys
+    golden = 0.6180339887498948482
+    hue = (index * golden) % 1.0
+    sat = 0.7 + 0.3 * ((index % 3) / 2.0)
+    val = 0.8 + 0.2 * ((index % 2) / 1.0)
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+# Keep ROI_COLORS as the first 20 for any code referencing it
+ROI_COLORS = [_generate_color(i) for i in range(20)]
 
 
 def generate_unique_roi_name(base, existing_layers):
@@ -191,10 +281,15 @@ class LayerStack(QObject):
         self._color_index = 0
         self.changed.emit()
 
+    def next_color(self):
+        """Return the next distinct color and advance the index."""
+        color = _generate_color(self._color_index)
+        self._color_index += 1
+        return color
+
     def add_roi(self, roi):
-        if roi.color == ROI_COLORS[0] and self._color_index < len(ROI_COLORS):
-            roi.color = ROI_COLORS[self._color_index]
-            self._color_index = (self._color_index + 1) % len(ROI_COLORS)
+        if roi.color == ROI_COLORS[0]:
+            roi.color = self.next_color()
         self.roi_layers.append(roi)
         self.changed.emit()
 
@@ -225,11 +320,11 @@ class LayerStack(QObject):
         self.changed.emit()
 
     def duplicate_roi(self, index):
-        """Duplicate ROI layer."""
+        """Duplicate ROI layer with a new distinct color."""
         if 0 <= index < len(self.roi_layers):
             src = self.roi_layers[index]
             h, w = src.mask.shape
-            new_roi = ROILayer(f"{src.name} (copy)", w, h, src.color)
+            new_roi = ROILayer(f"{src.name} (copy)", w, h, self.next_color())
             new_roi.mask = src.mask.copy()
             new_roi.opacity = src.opacity
             new_roi.fill_mode = src.fill_mode
@@ -247,9 +342,8 @@ class LayerStack(QObject):
 
     def insert_roi(self, index, roi):
         """Insert ROI at specific position."""
-        if roi.color == ROI_COLORS[0] and self._color_index < len(ROI_COLORS):
-            roi.color = ROI_COLORS[self._color_index]
-            self._color_index = (self._color_index + 1) % len(ROI_COLORS)
+        if roi.color == ROI_COLORS[0]:
+            roi.color = self.next_color()
         self.roi_layers.insert(index, roi)
         self.changed.emit()
 

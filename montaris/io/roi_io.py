@@ -1,6 +1,6 @@
 import json
 import numpy as np
-from montaris.layers import ROILayer, ROI_COLORS
+from montaris.layers import ROILayer, _generate_color
 
 
 def save_roi_set(path, roi_layers):
@@ -38,11 +38,11 @@ def load_roi_set(path):
         if i < len(metadata):
             meta = metadata[i]
             name = meta.get('name', f'ROI {i + 1}')
-            color = tuple(meta.get('color', ROI_COLORS[i % len(ROI_COLORS)]))
+            color = tuple(meta.get('color', _generate_color(i)))
             opacity = meta.get('opacity', 128)
         else:
             name = f'ROI {i + 1}'
-            color = ROI_COLORS[i % len(ROI_COLORS)]
+            color = _generate_color(i)
             opacity = 128
 
         roi = ROILayer(name, w, h, color)
