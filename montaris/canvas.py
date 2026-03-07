@@ -43,8 +43,9 @@ class _ROIOverlayItem(QGraphicsItem):
 
     def paint(self, painter, option, widget=None):
         if self._image:
-            exposed = option.exposedRect.toAlignedRect()
-            painter.drawImage(exposed, self._image, exposed)
+            exposed = option.exposedRect.toAlignedRect() & self._image.rect()
+            if not exposed.isEmpty():
+                painter.drawImage(exposed, self._image, exposed)
 
     def updateDirty(self, rect):
         """Invalidate only the dirty sub-region."""
@@ -322,6 +323,8 @@ class ImageCanvas(QGraphicsView):
 
     def _do_refresh_overlays(self):
         """Internal: actual rebuild of all ROI pixmap items."""
+        # Cancel any pending partial dirty — full rebuild supersedes
+        self._pending_dirty.clear()
         if self.layer_stack.image_layer is None:
             for item in self._roi_items.values():
                 self._scene.removeItem(item)
@@ -418,6 +421,8 @@ class ImageCanvas(QGraphicsView):
             return
         rid = id(layer)
         self._roi_stale.discard(rid)
+        # Cancel any pending partial dirty for this layer — full rebuild supersedes
+        self._pending_dirty.pop(id(layer), None)
         self._refresh_roi_item(layer, index)
         self._roi_lod[rid] = 0
         if layer in self._selection.layers:

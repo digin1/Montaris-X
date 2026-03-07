@@ -28,7 +28,8 @@ class EraserTool(BaseTool):
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
         self._erase(pos, layer)
-        canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
+        if self._stroke_bbox is not None:
+            canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
 
     def on_move(self, pos, layer, canvas):
         if not self._erasing or layer is None:
