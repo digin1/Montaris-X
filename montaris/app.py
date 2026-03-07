@@ -866,9 +866,16 @@ class MontarisApp(QMainWindow):
                 composite[:, :, :c] = bg
                 composite[:, :, 3] = 255
 
-            for roi in self.layer_stack.roi_layers:
-                if not roi.visible:
-                    continue
+            visible_rois = [r for r in self.layer_stack.roi_layers if r.visible]
+            n = len(visible_rois)
+            if n > 1:
+                progress = QProgressDialog("Exporting PNG...", "Cancel", 0, n, self)
+                progress.setWindowModality(Qt.WindowModal)
+            else:
+                progress = None
+            for i, roi in enumerate(visible_rois):
+                if progress and progress.wasCanceled():
+                    return
                 mask = roi.mask > 0
                 alpha = roi.opacity / 255.0
                 r, g, b = roi.color
@@ -876,6 +883,10 @@ class MontarisApp(QMainWindow):
                     composite[:, :, c_idx][mask] = (
                         composite[:, :, c_idx][mask] * (1 - alpha) + c_val * alpha
                     ).astype(np.uint8)
+                if progress:
+                    progress.setValue(i + 1)
+            if progress:
+                progress.close()
 
             img = Image.fromarray(composite)
             img.save(path)
@@ -898,13 +909,25 @@ class MontarisApp(QMainWindow):
         try:
             from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
             h, w = self.layer_stack.image_layer.shape[:2]
-            for path in paths:
+            n = len(paths)
+            if n > 1:
+                progress = QProgressDialog("Importing ImageJ ROIs...", "Cancel", 0, n, self)
+                progress.setWindowModality(Qt.WindowModal)
+            else:
+                progress = None
+            for i, path in enumerate(paths):
+                if progress and progress.wasCanceled():
+                    break
                 roi_dict = read_imagej_roi(path)
                 mask = imagej_roi_to_mask(roi_dict, w, h)
                 name = os.path.splitext(os.path.basename(path))[0]
                 roi = ROILayer(name, w, h)
                 roi.mask = mask
                 self.layer_stack.add_roi(roi)
+                if progress:
+                    progress.setValue(i + 1)
+            if progress:
+                progress.close()
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             self.statusbar.showMessage(f"Imported {len(paths)} ImageJ ROI(s)")
@@ -921,13 +944,25 @@ class MontarisApp(QMainWindow):
             return
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
+            n = len(self.layer_stack.roi_layers)
+            if n > 1:
+                progress = QProgressDialog("Exporting ImageJ ROIs...", "Cancel", 0, n, self)
+                progress.setWindowModality(Qt.WindowModal)
+            else:
+                progress = None
             count = 0
-            for roi in self.layer_stack.roi_layers:
+            for i, roi in enumerate(self.layer_stack.roi_layers):
+                if progress and progress.wasCanceled():
+                    break
                 roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
                 if roi_dict:
                     safe_name = roi.name.replace("/", "_").replace("\\", "_")
                     write_imagej_roi(roi_dict, os.path.join(dir_path, f"{safe_name}.roi"))
                     count += 1
+                if progress:
+                    progress.setValue(i + 1)
+            if progress:
+                progress.close()
             self.statusbar.showMessage(f"Exported {count} ImageJ ROI(s) to {dir_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
@@ -1026,7 +1061,15 @@ class MontarisApp(QMainWindow):
         try:
             from PIL import Image
             h, w = self.layer_stack.image_layer.shape[:2]
-            for path in paths:
+            n = len(paths)
+            if n > 1:
+                progress = QProgressDialog("Importing PNG masks...", "Cancel", 0, n, self)
+                progress.setWindowModality(Qt.WindowModal)
+            else:
+                progress = None
+            for i, path in enumerate(paths):
+                if progress and progress.wasCanceled():
+                    break
                 img = Image.open(path).convert('L')
                 arr = np.array(img)
                 if arr.shape != (h, w):
@@ -1037,6 +1080,10 @@ class MontarisApp(QMainWindow):
                 roi = ROILayer(name, w, h)
                 roi.mask = mask
                 self.layer_stack.add_roi(roi)
+                if progress:
+                    progress.setValue(i + 1)
+            if progress:
+                progress.close()
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             self.toast.show(f"Imported {len(paths)} PNG mask(s)", "success")
@@ -1174,14 +1221,26 @@ class MontarisApp(QMainWindow):
             import zipfile
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi_bytes
             n = len(self.layer_stack.roi_layers)
+            if n > 1:
+                progress = QProgressDialog("Exporting ROIs to ZIP...", "Cancel", 0, n, self)
+                progress.setWindowModality(Qt.WindowModal)
+            else:
+                progress = None
             cancelled = False
             with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for i, roi in enumerate(self.layer_stack.roi_layers):
+                    if progress and progress.wasCanceled():
+                        cancelled = True
+                        break
                     roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
                     if roi_dict:
                         safe_name = roi.name.replace("/", "_").replace("\\", "_")
                         data = write_imagej_roi_bytes(roi_dict)
                         zf.writestr(f"{safe_name}.roi", data)
+                    if progress:
+                        progress.setValue(i + 1)
+            if progress:
+                progress.close()
             if cancelled:
                 os.remove(path)
                 self.toast.show("Export cancelled", "warning")
