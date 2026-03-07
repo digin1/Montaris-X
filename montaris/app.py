@@ -250,12 +250,12 @@ class MontarisApp(QMainWindow):
         # File
         file_menu = menubar.addMenu("&File")
 
-        open_act = QAction("&Open Image...", self)
+        open_act = QAction("&Open Image(s)...", self)
         open_act.setShortcut(QKeySequence.Open)
         open_act.triggered.connect(self.open_image)
         file_menu.addAction(open_act)
 
-        close_img_act = QAction("&Close Image", self)
+        close_img_act = QAction("&Close Image(s)", self)
         close_img_act.setShortcut(QKeySequence("Ctrl+W"))
         close_img_act.triggered.connect(self.close_image)
         file_menu.addAction(close_img_act)
