@@ -593,7 +593,7 @@ class MontarisApp(QMainWindow):
         roi_info = f"  |  {layer.name}" if layer and hasattr(layer, 'name') else ""
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
 
-    _NON_DRAWING_TOOLS = {'Hand', 'Select', 'Transform', 'Move', 'Bucket Fill'}
+    _NON_DRAWING_TOOLS = {'Hand', 'Select', 'Transform', 'Move'}
 
     def _on_roi_added(self):
         if self.layer_stack.image_layer is None:
