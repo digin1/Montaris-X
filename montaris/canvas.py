@@ -369,8 +369,7 @@ class ImageCanvas(QGraphicsView):
         self._pending_dirty.clear()
         if self.layer_stack.image_layer is None:
             for item in self._roi_items.values():
-                self._scene.removeItem(item)
-            self._roi_items.clear()
+                item.setVisible(False)
             self._roi_stale.clear()
             self._roi_lod.clear()
             self._roi_lod_pending.clear()
