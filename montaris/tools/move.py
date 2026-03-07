@@ -34,6 +34,8 @@ class MoveTool(BaseTool):
         # Persistent multi-component selection (survives between drags)
         self._multi_comp_mask = None  # combined bool mask of Ctrl+clicked components
         self._multi_comp_layer = None  # the layer these components belong to
+        # Ghost overlay for OOB ROIs (shows full extent after release)
+        self._ghost_items = []  # temporary scene items showing OOB extent
         # Marching ants overlay (supports multiple layers)
         self._ants_entries = []  # list of (item, ey, ex, bbox, buf)
         self._ants_timer = None
@@ -122,7 +124,8 @@ class MoveTool(BaseTool):
         self._clear_multi_selection(canvas)
         self._target_layers = self._get_target_layers(layer, canvas)
         has_content = any(
-            l.get_bbox() is not None for l in self._target_layers
+            l.get_bbox() is not None or id(l) in self._session_snapshots
+            for l in self._target_layers
         )
         if not has_content:
             return
@@ -160,6 +163,9 @@ class MoveTool(BaseTool):
         if self._bbox_item and self._component_bbox:
             cy1, cy2, cx1, cx2 = self._component_bbox
             self._bbox_item.setRect(QRectF(cx1 + dx, cy1 + dy, cx2 - cx1, cy2 - cy1))
+
+        # Auto-scroll viewport to keep preview visible during OOB drag
+        self._auto_scroll(pos, canvas)
 
     def on_release(self, pos, layer, canvas):
         if not self._moving:
@@ -316,20 +322,80 @@ class MoveTool(BaseTool):
                 pass
         canvas._update_selection_highlights()
 
-        # Show marching ants around moved content
+        # Show ghost overlay for OOB ROIs and marching ants
+        self._clear_ghost_items(canvas)
         if self._multi_comp_mask is not None and moved_layer is not None:
             self._show_marching_ants_for_mask(
                 self._multi_comp_mask, moved_layer, canvas)
         else:
-            # Show ants for all affected layers
+            # Show ants + ghost for all affected layers
             visible = [l for l in affected
                        if hasattr(l, 'mask') and l.get_bbox() is not None]
             if visible:
                 self._show_marching_ants_multi(visible, canvas)
+            # Show ghost overlay for any OOB layers
+            for l in affected:
+                self._show_ghost_if_oob(l, canvas)
+
+    def _show_ghost_if_oob(self, layer, canvas):
+        """Show a semi-transparent ghost of the full ROI extent when OOB."""
+        lid = id(layer)
+        cum_dx, cum_dy = self._cumulative_offset.get(lid, (0, 0))
+        if cum_dx == 0 and cum_dy == 0:
+            return  # Not OOB
+        session_snap = self._session_snapshots.get(lid)
+        session_bb = self._session_bboxes.get(lid)
+        if session_snap is None or session_bb is None:
+            return
+        sy1, sy2, sx1, sx2 = session_bb
+        crop = session_snap[sy1:sy2, sx1:sx2]
+        if not np.any(crop > 0):
+            return
+        ch, cw = sy2 - sy1, sx2 - sx1
+        r, g, b = layer.color
+        gof = canvas.layer_stack._global_opacity_factor
+        eff = max(30, int(layer.opacity * gof) // 3)  # faint ghost
+        rgba = np.zeros((ch, cw, 4), dtype=np.uint8)
+        rgba[crop > 0] = [r, g, b, eff]
+        rgba = np.ascontiguousarray(rgba)
+        qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
+        item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+        off_x = sx1 + cum_dx
+        off_y = sy1 + cum_dy
+        item.setOffset(off_x, off_y)
+        item.setZValue(0.5)  # Below real ROI items but above image
+        item.setAcceptedMouseButtons(Qt.NoButton)
+        canvas.scene().addItem(item)
+        self._ghost_items.append(item)
+
+    def _clear_ghost_items(self, canvas):
+        """Remove ghost overlay items."""
+        scene = canvas.scene()
+        for item in self._ghost_items:
+            scene.removeItem(item)
+        self._ghost_items.clear()
+
+    def _auto_scroll(self, pos, canvas):
+        """Auto-scroll viewport when dragging near edges."""
+        vp = canvas.viewport()
+        vp_pos = canvas.mapFromScene(pos.x(), pos.y())
+        margin = 40
+        scroll_speed = 15
+        hs = canvas.horizontalScrollBar()
+        vs = canvas.verticalScrollBar()
+        if vp_pos.x() < margin:
+            hs.setValue(hs.value() - scroll_speed)
+        elif vp_pos.x() > vp.width() - margin:
+            hs.setValue(hs.value() + scroll_speed)
+        if vp_pos.y() < margin:
+            vs.setValue(vs.value() - scroll_speed)
+        elif vp_pos.y() > vp.height() - margin:
+            vs.setValue(vs.value() + scroll_speed)
 
     def _create_previews(self, canvas):
         """Create temporary preview pixmaps for drag visualization."""
         self._remove_previews(canvas, re_render=False)
+        self._clear_ghost_items(canvas)
         self._hidden_layers = []
 
         # Hide selection highlights and marching ants during drag
@@ -349,19 +415,17 @@ class MoveTool(BaseTool):
             if real_item:
                 real_item.setVisible(False)
             self._hidden_layers.append((l, True))
-            if sb is None or snap_data is None:
-                continue
-            # Create temp preview pixmap from snapshot (not clipped by current render)
-            z = real_item.zValue() if real_item else 10
-            r, g, b = l.color
-            gof = canvas.layer_stack._global_opacity_factor
-            eff = int(l.opacity * gof)
-            sy1, sy2, sx1, sx2 = sb
-            bh, bw = sy2 - sy1, sx2 - sx1
             # Use session snapshot for full pixel data (preserves OOB-recoverable pixels)
             session_snap = self._session_snapshots.get(lid)
             session_bb = self._session_bboxes.get(lid)
             cum_dx, cum_dy = self._cumulative_offset.get(lid, (0, 0))
+            # Skip layers with no data at all
+            if session_snap is None and (sb is None or snap_data is None):
+                continue
+            z = real_item.zValue() if real_item else 10
+            r, g, b = l.color
+            gof = canvas.layer_stack._global_opacity_factor
+            eff = int(l.opacity * gof)
             if session_snap is not None and session_bb is not None:
                 ss_y1, ss_y2, ss_x1, ss_x2 = session_bb
                 crop = session_snap[ss_y1:ss_y2, ss_x1:ss_x2]
@@ -371,12 +435,16 @@ class MoveTool(BaseTool):
                 # Position at current location (original + cumulative offset)
                 off_x = ss_x1 + cum_dx
                 off_y = ss_y1 + cum_dy
-            else:
+            elif sb is not None and snap_data is not None:
+                sy1, sy2, sx1, sx2 = sb
+                bh, bw = sy2 - sy1, sx2 - sx1
                 rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
                 rgba[snap_data > 0] = [r, g, b, eff]
                 off_x = sx1 + cum_dx
                 off_y = sy1 + cum_dy
                 ch, cw = bh, bw
+            else:
+                continue
             rgba = np.ascontiguousarray(rgba)
             qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
             item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
@@ -640,6 +708,7 @@ class MoveTool(BaseTool):
     def _clear_handles(self, canvas):
         """Called by canvas on tool/layer switch to clean up state."""
         self._clear_multi_selection(canvas)
+        self._clear_ghost_items(canvas)
         self._session_snapshots.clear()
         self._session_bboxes.clear()
         self._cumulative_offset.clear()
