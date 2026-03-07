@@ -768,6 +768,13 @@ class ImageCanvas(QGraphicsView):
             return
 
         if self._tool and event.button() == Qt.LeftButton:
+            # Auto-create ROI layer if painting with no active layer
+            if (self._active_layer is None
+                    and getattr(self._tool, 'name', None) in self._PAINT_TOOLS
+                    and self.layer_stack.image_layer is not None):
+                win = self.window()
+                if hasattr(win, '_on_roi_added'):
+                    win._on_roi_added()
             scene_pos = self.mapToScene(event.position().toPoint())
             self._tool.on_press(scene_pos, self._active_layer, self)
             return
