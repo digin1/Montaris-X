@@ -361,7 +361,7 @@ class MontarisApp(QMainWindow):
 
         edit_menu.addSeparator()
 
-        clear_act = QAction("&Clear Active ROI", self)
+        clear_act = QAction("&Delete Active ROI", self)
         clear_act.setShortcut(QKeySequence.Delete)
         clear_act.triggered.connect(self.clear_active_roi)
         edit_menu.addAction(clear_act)
@@ -1668,24 +1668,20 @@ class MontarisApp(QMainWindow):
         dlg.exec()
 
     def clear_active_roi(self):
+        """Remove the active ROI layer entirely."""
         layer = self.canvas._active_layer
-        if layer and hasattr(layer, 'mask'):
-            from montaris.core.undo import UndoCommand
-            snapshot = layer.mask.copy()
-            layer.mask[:] = 0
-            layer.invalidate_bbox()
-            if snapshot.any():
-                ys, xs = np.where(snapshot > 0)
-                y1, y2 = ys.min(), ys.max() + 1
-                x1, x2 = xs.min(), xs.max() + 1
-                cmd = UndoCommand(
-                    layer, (y1, y2, x1, x2),
-                    snapshot[y1:y2, x1:x2],
-                    layer.mask[y1:y2, x1:x2],
-                )
-                self.undo_stack.push(cmd)
+        if layer and hasattr(layer, 'mask') and layer in self.layer_stack.roi_layers:
+            idx = self.layer_stack.roi_layers.index(layer)
+            self.canvas._active_layer = None
+            self.layer_stack.remove_roi(idx)
+            # Select adjacent ROI if available
+            if self.layer_stack.roi_layers:
+                new_idx = min(idx, len(self.layer_stack.roi_layers) - 1)
+                new_layer = self.layer_stack.roi_layers[new_idx]
+                self.canvas.set_active_layer(new_layer)
             self.canvas.refresh_overlays()
-            self.properties_panel.set_layer(layer)
+            self.layer_panel.refresh()
+            self.properties_panel.set_layer(self.canvas._active_layer)
 
     def undo(self):
         # If polygon tool is mid-drawing, undo last vertex instead
