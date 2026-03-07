@@ -114,10 +114,25 @@ class ImageCanvas(QGraphicsView):
     def _flatten_all_offsets(self):
         """Bake any non-zero layer offsets into masks and clear undo stack."""
         any_offset = False
+        partially_clipped = []
         for roi in self.layer_stack.roi_layers:
             if roi.offset_x != 0 or roi.offset_y != 0:
-                roi.flatten_offset()
-                any_offset = True
+                if roi.has_oob_content():
+                    partially_clipped.append(roi.name)
+                result = roi.flatten_offset()
+                if result:
+                    any_offset = True
+                # result=False means fully OOB — offset preserved
+        if partially_clipped:
+            win = self.window()
+            if hasattr(win, 'toast'):
+                names = ', '.join(partially_clipped[:5])
+                if len(partially_clipped) > 5:
+                    names += f' (+{len(partially_clipped) - 5} more)'
+                win.toast.show(
+                    f"OOB pixels clipped: {names}",
+                    level="warning"
+                )
         if any_offset:
             # Offset undo commands are now stale — clear the stack
             win = self.window()

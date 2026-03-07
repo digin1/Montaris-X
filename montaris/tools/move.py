@@ -163,6 +163,7 @@ class MoveTool(BaseTool):
                         y1, y2, x1, x2 = bbox
                         real_item.setOffset(x1 + l.offset_x, y1 + l.offset_y)
 
+        self._expand_scene_rect_if_needed(canvas)
         self._auto_scroll(pos, canvas)
         if self._target_layers:
             canvas.ensureVisible(QRectF(pos.x() - 10, pos.y() - 10, 20, 20), 50, 50)
@@ -194,6 +195,17 @@ class MoveTool(BaseTool):
                 self.app.undo_stack.push(commands[0])
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
+
+        # Refresh ROI pixmap items so they match the new offset
+        lod = canvas._current_lod_level()
+        for l in self._target_layers:
+            try:
+                idx = canvas.layer_stack.roi_layers.index(l)
+                target_lod = 0 if l == canvas._active_layer else lod
+                canvas._refresh_roi_item(l, idx, lod_level=target_lod)
+                canvas._roi_lod[id(l)] = target_lod
+            except ValueError:
+                pass
 
         # Restore selection highlights
         canvas._update_selection_highlights()
@@ -409,6 +421,30 @@ class MoveTool(BaseTool):
                     pass
             canvas._update_selection_highlights()
         self._comp_hidden_layers = []
+
+    # ------------------------------------------------------------------
+    # Scene rect expansion for OOB moves
+    # ------------------------------------------------------------------
+
+    def _expand_scene_rect_if_needed(self, canvas):
+        """Grow the scene rect when ROIs move outside current bounds."""
+        scene = canvas.scene()
+        sr = scene.sceneRect()
+        margin = 200
+        for l in self._target_layers:
+            dbbox = l.get_display_bbox()
+            if dbbox is None:
+                continue
+            y1, y2, x1, x2 = dbbox
+            if x1 < sr.left() + margin or x2 > sr.right() - margin \
+                    or y1 < sr.top() + margin or y2 > sr.bottom() - margin:
+                new_left = min(sr.left(), x1 - margin)
+                new_top = min(sr.top(), y1 - margin)
+                new_right = max(sr.right(), x2 + margin)
+                new_bottom = max(sr.bottom(), y2 + margin)
+                scene.setSceneRect(QRectF(new_left, new_top,
+                                          new_right - new_left, new_bottom - new_top))
+                break  # one expansion per move event is enough
 
     # ------------------------------------------------------------------
     # Auto-scroll

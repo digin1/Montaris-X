@@ -118,22 +118,28 @@ class ROILayer:
         return self._dirty_rect
 
     def flatten_offset(self):
-        """Bake offset_x/y into the mask, clipping OOB pixels. Resets offset to 0."""
+        """Bake offset_x/y into the mask, clipping OOB pixels. Resets offset to 0.
+
+        Returns True if flatten happened, False if refused (fully OOB).
+        """
         if self.offset_x == 0 and self.offset_y == 0:
-            return
+            return True
         dx, dy = self.offset_x, self.offset_y
         bbox = self.get_bbox()
         if bbox is None:
             self.offset_x = 0
             self.offset_y = 0
-            return
+            return True
         y1, y2, x1, x2 = bbox
-        crop = self.mask[y1:y2, x1:x2].copy()
         h, w = self.mask.shape
-        self.mask[:] = 0
         # Destination region in mask coords
         dy1, dy2 = y1 + dy, y2 + dy
         dx1, dx2 = x1 + dx, x2 + dx
+        # Refuse flatten when 100% of pixels would be clipped
+        if dy1 >= h or dy2 <= 0 or dx1 >= w or dx2 <= 0:
+            return False
+        crop = self.mask[y1:y2, x1:x2].copy()
+        self.mask[:] = 0
         # Clip to mask bounds
         sy1 = max(0, -dy1)
         sy2 = crop.shape[0] - max(0, dy2 - h)
@@ -144,6 +150,20 @@ class ROILayer:
         self.offset_x = 0
         self.offset_y = 0
         self.invalidate_bbox()
+        return True
+
+    def has_oob_content(self):
+        """Return True if offset puts any mask content outside bounds."""
+        if self.offset_x == 0 and self.offset_y == 0:
+            return False
+        bbox = self.get_bbox()
+        if bbox is None:
+            return False
+        y1, y2, x1, x2 = bbox
+        h, w = self.mask.shape
+        dy1, dy2 = y1 + self.offset_y, y2 + self.offset_y
+        dx1, dx2 = x1 + self.offset_x, x2 + self.offset_x
+        return dy1 < 0 or dy2 > h or dx1 < 0 or dx2 > w
 
     def get_display_bbox(self):
         """Return bounding box shifted by offset (canvas coordinates)."""
