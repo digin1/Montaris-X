@@ -1162,21 +1162,15 @@ class MontarisApp(QMainWindow):
             import zipfile
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi_bytes
             n = len(self.layer_stack.roi_layers)
-            progress = QProgressDialog("Exporting ROIs...", "Cancel", 0, n, self)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
+            cancelled = False
             with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for i, roi in enumerate(self.layer_stack.roi_layers):
-                    if progress.wasCanceled():
-                        break
                     roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
                     if roi_dict:
                         safe_name = roi.name.replace("/", "_").replace("\\", "_")
                         data = write_imagej_roi_bytes(roi_dict)
                         zf.writestr(f"{safe_name}.roi", data)
-                    progress.setValue(i + 1)
-            progress.close()
-            if progress.wasCanceled():
+            if cancelled:
                 os.remove(path)
                 self.toast.show("Export cancelled", "warning")
             else:
