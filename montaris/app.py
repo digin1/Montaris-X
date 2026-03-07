@@ -24,7 +24,7 @@ from montaris.core.undo import UndoStack
 from montaris.core.adjustments import ImageAdjustments
 from montaris.core.display_modes import DisplayCompositor
 from montaris.widgets.toast import ToastManager
-from montaris.io.image_io import load_image
+from montaris.io.image_io import load_image, load_image_stack
 from montaris.io.roi_io import save_roi_set, load_roi_set
 
 
@@ -749,7 +749,10 @@ class MontarisApp(QMainWindow):
         skipped = []
         for path in paths:
             try:
-                self._load_single_image(path, ds_factor, skipped)
+                # Split multi-channel TIFFs into individual images
+                channels = load_image_stack(path)
+                for name, data in channels:
+                    self._load_single_channel(name, data, ds_factor, skipped)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
         if skipped:
@@ -762,9 +765,8 @@ class MontarisApp(QMainWindow):
         if n > 1:
             self.toast.show(f"Loaded {n} images in stack", "success")
 
-    def _load_single_image(self, path, ds_factor, skipped):
-        """Load one image into the image stack."""
-        data = load_image(path)
+    def _load_single_channel(self, name, data, ds_factor, skipped):
+        """Load one image/channel into the image stack."""
         if self._flip_on_load_act.isChecked():
             data = np.flip(data, axis=1).copy()
         if self._rotate_on_load_act.isChecked():
@@ -776,11 +778,11 @@ class MontarisApp(QMainWindow):
         # Validate dimensions match existing stack
         cur = self.layer_stack.image_layer
         if cur is not None and data.shape[:2] != cur.data.shape[:2]:
-            skipped.append(f"{os.path.basename(path)} ({data.shape[1]}x{data.shape[0]})")
+            skipped.append(f"{name} ({data.shape[1]}x{data.shape[0]})")
             return
 
         self._save_current_document()
-        new_layer = ImageLayer(os.path.basename(path), data)
+        new_layer = ImageLayer(name, data)
 
         if cur is not None:
             # Same dimensions — add to stack, keep ROIs
@@ -801,7 +803,7 @@ class MontarisApp(QMainWindow):
         self.adjustments_panel.set_image_data(data)
 
         doc = MontageDocument(
-            name=os.path.basename(path),
+            name=name,
             image_layer=new_layer,
             downsample_factor=ds_factor,
             original_shape=original_shape,
@@ -813,9 +815,7 @@ class MontarisApp(QMainWindow):
         self._doc_combo.setCurrentIndex(self._active_doc_index)
         self._doc_combo.blockSignals(False)
 
-        self.toast.show(
-            f"Loaded: {os.path.basename(path)}  {data.shape}", "success"
-        )
+        self.toast.show(f"Loaded: {name}  {data.shape}", "success")
 
     def close_image(self):
         """Close the current image and all ROIs, with save prompt."""
