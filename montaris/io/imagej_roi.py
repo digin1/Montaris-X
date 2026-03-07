@@ -19,6 +19,7 @@ ROI_OVAL = 2
 ROI_LINE = 3
 ROI_FREEHAND = 7
 ROI_TRACED = 8
+ROI_COMPOSITE = 9
 ROI_POINT = 10
 
 MAGIC = b'Iout'
@@ -234,25 +235,44 @@ def mask_to_imagej_roi(mask, name=""):
     if not contours:
         return None
 
-    # Always use composite ROI with float paths for sub-pixel precision
-    paths = []
-    for c in contours:
+    if len(contours) == 1:
+        # Single contour → simple freehand ROI with integer coords
+        c = contours[0]
         if np.allclose(c[0], c[-1]) and len(c) > 1:
             c = c[:-1]
         # find_contours returns (row, col) = (y, x)
-        path = [(float(pt[1]), float(pt[0])) for pt in c]
-        paths.append(path)
-    return {
-        'type': ROI_FREEHAND,
-        'top': top,
-        'left': left,
-        'bottom': bottom,
-        'right': right,
-        'x_coords': None,
-        'y_coords': None,
-        'paths': paths,
-        'name': name,
-    }
+        x_coords = np.round(c[:, 1]).astype(np.int32)
+        y_coords = np.round(c[:, 0]).astype(np.int32)
+        return {
+            'type': ROI_FREEHAND,
+            'top': top,
+            'left': left,
+            'bottom': bottom,
+            'right': right,
+            'x_coords': x_coords,
+            'y_coords': y_coords,
+            'paths': None,
+            'name': name,
+        }
+    else:
+        # Multiple contours → composite ROI (type 9) with float paths
+        paths = []
+        for c in contours:
+            if np.allclose(c[0], c[-1]) and len(c) > 1:
+                c = c[:-1]
+            path = [(float(pt[1]), float(pt[0])) for pt in c]
+            paths.append(path)
+        return {
+            'type': ROI_COMPOSITE,
+            'top': top,
+            'left': left,
+            'bottom': bottom,
+            'right': right,
+            'x_coords': None,
+            'y_coords': None,
+            'paths': paths,
+            'name': name,
+        }
 
 
 def imagej_roi_to_mask(roi_dict, width, height):
