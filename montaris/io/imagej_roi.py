@@ -164,11 +164,13 @@ def _build_roi_bytes(roi_dict):
             shape_floats.append(4.0)  # SEG_CLOSE
 
     shape_roi_size = len(shape_floats)
+    # ImageJ requires type=rect for composite (shape) ROIs
+    wire_type = ROI_RECT if shape_roi_size > 0 else roi_type
 
     # Header (offset 0)
     buf.write(MAGIC)
     buf.write(struct.pack('>H', VERSION))
-    buf.write(struct.pack('B', roi_type))
+    buf.write(struct.pack('B', wire_type))
     buf.write(b'\x00')  # padding
 
     # Bounding box + n_coords (offset 8)
@@ -255,7 +257,7 @@ def mask_to_imagej_roi(mask, name=""):
             'name': name,
         }
     else:
-        # Multiple contours → composite ROI (type 9) with float paths
+        # Multiple contours → composite ROI (written as rect+shape data) with float paths
         paths = []
         for c in contours:
             if np.allclose(c[0], c[-1]) and len(c) > 1:
@@ -263,7 +265,7 @@ def mask_to_imagej_roi(mask, name=""):
             path = [(float(pt[1]), float(pt[0])) for pt in c]
             paths.append(path)
         return {
-            'type': ROI_COMPOSITE,
+            'type': ROI_RECT,
             'top': top,
             'left': left,
             'bottom': bottom,
