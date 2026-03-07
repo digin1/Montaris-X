@@ -17,7 +17,7 @@ class HelpModal(QDialog):
             "Welcome to Montaris-X\n\n"
             "Montaris-X is a native ROI editor for scientific images.\n\n"
             "Quick Start:\n"
-            "1. File > Open Image to load a TIFF/PNG/JPG\n"
+            "1. File > Open Image(s) to load a TIFF/PNG/JPG\n"
             "2. Click '+' in the Layers panel to add ROI layers\n"
             "3. Select a drawing tool (Brush, Polygon, etc.)\n"
             "4. Draw on the canvas to create ROI masks\n"
@@ -43,7 +43,7 @@ class HelpModal(QDialog):
         # Keyboard Shortcuts
         shortcuts_text = (
             "File:\n"
-            "  Ctrl+O         Open Image\n"
+            "  Ctrl+O         Open Image(s)\n"
             "  Ctrl+Shift+O   Load ROI Set\n"
             "  Ctrl+S         Save ROI Set\n"
             "  Ctrl+E         Export ROI as PNG\n"

@@ -897,7 +897,7 @@ class MontarisApp(QMainWindow):
         if self.layer_stack.roi_layers:
             from montaris.widgets.alert_modal import AlertModal
             result = AlertModal.confirm(
-                self, "Close Image",
+                self, "Close Image(s)",
                 "You have ROIs. What would you like to do?",
                 ["Save ROIs && Clear All", "Keep ROIs", "Cancel"],
             )
