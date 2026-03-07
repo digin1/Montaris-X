@@ -189,8 +189,6 @@ class MoveTool(BaseTool):
                         real_item.setOffset(x1 + l.offset_x, y1 + l.offset_y)
 
         self._auto_scroll(pos, canvas)
-        if self._target_layers:
-            canvas.ensureVisible(QRectF(pos.x() - 10, pos.y() - 10, 20, 20), 50, 50)
 
     def on_release(self, pos, layer, canvas):
         if not self._moving:

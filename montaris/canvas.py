@@ -249,9 +249,10 @@ class ImageCanvas(QGraphicsView):
         self._image_item = QGraphicsPixmapItem(pixmap)
         self._image_item.setZValue(0)
         self._scene.addItem(self._image_item)
-        # Scene rect larger than image to allow free panning
+        # Scene rect with modest margin for comfortable panning
         h, w = img_layer.data.shape[:2]
-        self._scene.setSceneRect(QRectF(-w, -h, w * 3, h * 3))
+        m = min(w, h) // 4  # 25% margin
+        self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
 
     # ------------------------------------------------------------------
     # ROI overlay display — per-ROI QGraphicsPixmapItem (tight bbox)
