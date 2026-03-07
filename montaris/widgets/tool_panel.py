@@ -82,25 +82,13 @@ class ToolPanel(QWidget):
 
         layout.addSpacing(10)
 
-        # Brush size (C.5: range 1-500)
-        size_label = QLabel("Brush Size")
-        layout.addWidget(size_label)
-
-        size_layout = QHBoxLayout()
+        # Brush size — hidden slider used as internal state (UI in toolbar)
         self.size_slider = QSlider(Qt.Horizontal)
         self.size_slider.setRange(1, 500)
         self.size_slider.setValue(100)
         self.size_slider.valueChanged.connect(self._on_size_changed)
-        size_layout.addWidget(self.size_slider)
-
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(1, 500)
-        self.size_spin.setValue(100)
-        self.size_spin.valueChanged.connect(self.size_slider.setValue)
-        self.size_slider.valueChanged.connect(self.size_spin.setValue)
-        size_layout.addWidget(self.size_spin)
-
-        layout.addLayout(size_layout)
+        self.size_slider.setVisible(False)
+        layout.addWidget(self.size_slider)
 
         # Tolerance slider (C.10) — shown when BucketFill active
         self.tolerance_label = QLabel("Fill Tolerance")

@@ -15,7 +15,6 @@ class TestBrushSize500:
 
     def test_slider_range_500(self, qapp, app_with_image):
         assert app_with_image.tool_panel.size_slider.maximum() == 500
-        assert app_with_image.tool_panel.size_spin.maximum() == 500
 
 
 class TestBucketFillTolerance:
