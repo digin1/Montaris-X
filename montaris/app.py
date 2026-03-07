@@ -605,9 +605,10 @@ class MontarisApp(QMainWindow):
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()
 
-        # Auto-select the new ROI
+        # Auto-select the new ROI and activate Brush
         last_row = self.layer_panel.list_widget.count() - 1
         self.layer_panel.list_widget.setCurrentRow(last_row)
+        self.tool_panel._select_tool('Brush')
 
     def _on_roi_removed(self, index):
         removed = self.layer_stack.get_roi(index)
