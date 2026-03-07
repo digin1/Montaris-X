@@ -135,11 +135,30 @@ class MoveTool(BaseTool):
                 self._snapshots[id(l)] = (l, None, None)
         self._create_previews(canvas)
 
+    def _clamp_delta(self, dx, dy, canvas):
+        """Clamp dx/dy so no ROI bbox goes out of image bounds."""
+        h, w = canvas.layer_stack.roi_layers[0].mask.shape if canvas.layer_stack.roi_layers else (0, 0)
+        if h == 0 or w == 0:
+            return dx, dy
+        if self._component_mask is not None and self._component_bbox is not None:
+            y1, y2, x1, x2 = self._component_bbox
+            dx = max(-x1, min(w - x2, dx))
+            dy = max(-y1, min(h - y2, dy))
+        else:
+            for lid, bb in self._old_bboxes.items():
+                if bb is None:
+                    continue
+                y1, y2, x1, x2 = bb
+                dx = max(-x1, min(w - x2, dx))
+                dy = max(-y1, min(h - y2, dy))
+        return dx, dy
+
     def on_move(self, pos, layer, canvas):
         if not self._moving:
             return
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
+        dx, dy = self._clamp_delta(dx, dy, canvas)
 
         # Move preview items
         if self._component_mask is not None:
@@ -169,9 +188,10 @@ class MoveTool(BaseTool):
         self._remove_previews(canvas, re_render=False)
         canvas.flash_progress("Applying move…")
 
-        # Rasterize the final position
+        # Rasterize the final position (clamped to image bounds)
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
+        dx, dy = self._clamp_delta(dx, dy, canvas)
 
         if self._component_mask is not None:
             l = self._target_layers[0]
