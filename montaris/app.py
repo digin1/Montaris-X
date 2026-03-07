@@ -262,57 +262,60 @@ class MontarisApp(QMainWindow):
 
         file_menu.addSeparator()
 
-        load_roi_act = QAction("Load &ROI Set...", self)
+        load_roi_act = QAction("Load &ROI Set (.npz)...", self)
         load_roi_act.setShortcut(QKeySequence("Ctrl+Shift+O"))
         load_roi_act.triggered.connect(self.load_rois)
         file_menu.addAction(load_roi_act)
 
-        save_roi_act = QAction("&Save ROI Set...", self)
+        save_roi_act = QAction("&Save ROI Set (.npz)...", self)
         save_roi_act.setShortcut(QKeySequence.Save)
         save_roi_act.triggered.connect(self.save_rois)
         file_menu.addAction(save_roi_act)
 
         file_menu.addSeparator()
 
-        # Import/Export ImageJ ROI (Phase 7)
-        import_ij_act = QAction("Import ImageJ ROI...", self)
+        # Import submenu
+        import_menu = file_menu.addMenu("Import")
+
+        import_ij_act = QAction("ImageJ ROI (.roi)...", self)
         import_ij_act.triggered.connect(self.import_imagej_roi)
-        file_menu.addAction(import_ij_act)
+        import_menu.addAction(import_ij_act)
 
-        export_ij_single_act = QAction("Export Active ROI as .roi...", self)
+        import_png_act = QAction("PNG Mask(s)...", self)
+        import_png_act.triggered.connect(self.import_png_masks)
+        import_menu.addAction(import_png_act)
+
+        import_zip_act = QAction("ROI ZIP Archive...", self)
+        import_zip_act.triggered.connect(self.import_roi_zip)
+        import_menu.addAction(import_zip_act)
+
+        # Export submenu
+        export_menu = file_menu.addMenu("Export")
+
+        export_ij_single_act = QAction("Active ROI as .roi...", self)
         export_ij_single_act.triggered.connect(self.export_active_imagej_roi)
-        file_menu.addAction(export_ij_single_act)
+        export_menu.addAction(export_ij_single_act)
 
-        export_ij_act = QAction("Export All ImageJ ROIs...", self)
+        export_ij_act = QAction("All ROIs as ImageJ .roi...", self)
         export_ij_act.triggered.connect(self.export_imagej_rois)
-        file_menu.addAction(export_ij_act)
+        export_menu.addAction(export_ij_act)
 
-        file_menu.addSeparator()
+        export_menu.addSeparator()
 
-        export_act = QAction("&Export ROI as PNG...", self)
+        export_act = QAction("All ROIs as PNG...", self)
         export_act.setShortcut(QKeySequence("Ctrl+E"))
         export_act.triggered.connect(self.export_roi_png)
-        file_menu.addAction(export_act)
+        export_menu.addAction(export_act)
 
-        # Batch export (Phase 7)
-        batch_export_act = QAction("Batch Export All ROIs...", self)
-        batch_export_act.triggered.connect(self.batch_export_rois)
-        file_menu.addAction(batch_export_act)
+        export_menu.addSeparator()
 
-        # Import PNG masks
-        import_png_act = QAction("Import PNG Mask(s)...", self)
-        import_png_act.triggered.connect(self.import_png_masks)
-        file_menu.addAction(import_png_act)
-
-        # Import ROI ZIP
-        import_zip_act = QAction("Import ROI ZIP...", self)
-        import_zip_act.triggered.connect(self.import_roi_zip)
-        file_menu.addAction(import_zip_act)
-
-        # Export all as ZIP
-        export_zip_act = QAction("Export All ROIs as ZIP...", self)
+        export_zip_act = QAction("All ROIs as ZIP...", self)
         export_zip_act.triggered.connect(self.export_all_rois_zip)
-        file_menu.addAction(export_zip_act)
+        export_menu.addAction(export_zip_act)
+
+        batch_export_act = QAction("Batch Export (choose format)...", self)
+        batch_export_act.triggered.connect(self.batch_export_rois)
+        export_menu.addAction(batch_export_act)
 
         file_menu.addSeparator()
 
