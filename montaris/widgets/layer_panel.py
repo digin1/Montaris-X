@@ -687,15 +687,15 @@ class LayerPanel(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
 
-        bx = h_spin.value()
-        by = v_spin.value()
+        cols = h_spin.value()
+        rows = v_spin.value()
         method = method_combo.currentText()
         mask = roi.mask
         h, w = mask.shape
 
-        # Divide mask into grid cells, create one ROI per non-empty cell
-        rows = (h + by - 1) // by
-        cols = (w + bx - 1) // bx
+        # Compute cell size from grid dimensions
+        bx = (w + cols - 1) // cols  # cell width
+        by = (h + rows - 1) // rows  # cell height
         count = 0
         insert_at = roi_index + 1
 
@@ -716,14 +716,15 @@ class LayerPanel(QWidget):
                 if not has_content:
                     continue
 
-                # Create full-size mask with only this cell's content
-                cell_mask = np.zeros_like(mask)
-                cell_mask[y0:y1, x0:x1] = cell
+                # Create cell-sized mask with offset (avoids full-size allocation)
+                cell_h, cell_w = y1 - y0, x1 - x0
                 name = generate_unique_roi_name(
                     f"{roi.name}_r{gy}c{gx}", self.layer_stack.roi_layers
                 )
-                new_roi = ROILayer(name, w, h)
-                new_roi.mask = cell_mask
+                new_roi = ROILayer(name, cell_w, cell_h)
+                new_roi.mask = cell.copy()
+                new_roi.offset_x = x0
+                new_roi.offset_y = y0
                 new_roi.opacity = roi.opacity
                 new_roi.fill_mode = roi.fill_mode
                 self.layer_stack.insert_roi(insert_at + count, new_roi)
@@ -743,7 +744,7 @@ class LayerPanel(QWidget):
                 self.refresh(),
             ))
         if hasattr(app, 'toast'):
-            app.toast.show(f"Split into {count} ROI(s) ({bx}x{by} grid)", "success")
+            app.toast.show(f"Split into {count} ROI(s) ({cols}x{rows} grid)", "success")
 
     def _change_color(self):
         """Open color palette dialog (B.12)."""
