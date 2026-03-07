@@ -90,6 +90,9 @@ class MontarisApp(QMainWindow):
         self.settings = QSettings("Montaris", "Montaris-X")
         self._restore_state()
 
+        # Activate default tool after all setup (signals, statusbar, toolbar)
+        self.tool_panel.activate_default_tool()
+
     def _setup_canvas(self):
         self.canvas = ImageCanvas(self.layer_stack, self)
         self.setCentralWidget(self.canvas)

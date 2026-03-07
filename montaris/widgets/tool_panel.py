@@ -203,10 +203,14 @@ class ToolPanel(QWidget):
         self._current_tool = None
         self._current_tool_name = None
 
-        # Default to Hand tool on startup
+        # Mark Hand as checked; actual tool activation deferred until
+        # signal is connected (app calls activate_default_tool).
         if 'Hand' in self._tool_buttons:
             self._tool_buttons['Hand'].setChecked(True)
-            self._select_tool('Hand')
+
+    def activate_default_tool(self):
+        """Activate the default tool. Call after signal connections are set up."""
+        self._select_tool('Hand')
 
     def _add_tool_button(self, text, shortcut):
         icon = TOOL_ICONS.get(text, '')
