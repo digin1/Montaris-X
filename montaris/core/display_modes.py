@@ -25,7 +25,7 @@ class DisplayCompositor:
     """Composites multiple image channels into a display image."""
 
     def __init__(self):
-        self.mode = DisplayMode.COMPOSITE_RGB
+        self.mode = DisplayMode.FALSE_COLOR
         self.channel_luts = {}  # channel_index -> np.array([r, g, b]) 0-1
 
     def set_lut(self, channel_idx, rgb):

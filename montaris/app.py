@@ -664,7 +664,10 @@ class MontarisApp(QMainWindow):
 
     def _on_display_mode_changed(self, mode):
         self._compositor.mode = mode
-        self.canvas.refresh_image()
+        if self._composite_mode:
+            self._refresh_composite()
+        else:
+            self.canvas.refresh_image()
 
     def _on_channels_changed(self, active_indices):
         if self._composite_mode:
@@ -705,8 +708,7 @@ class MontarisApp(QMainWindow):
                 ch_arrays.append(data.mean(axis=2).astype(data.dtype))
         if not ch_arrays:
             return
-        from montaris.core.display_modes import DisplayMode
-        composite = self._compositor.compose(ch_arrays, mode=DisplayMode.FALSE_COLOR)
+        composite = self._compositor.compose(ch_arrays)
         self.canvas.set_tint_color(None)
         self.canvas.refresh_image_from_array(composite)
 

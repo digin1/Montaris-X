@@ -30,6 +30,9 @@ class DisplayPanel(QWidget):
         self.mode_combo = QComboBox()
         for mode in DisplayMode:
             self.mode_combo.addItem(mode.value.replace("_", " ").title(), mode)
+        # Default to False Color (uses tint colors)
+        false_color_idx = [m for m in DisplayMode].index(DisplayMode.FALSE_COLOR)
+        self.mode_combo.setCurrentIndex(false_color_idx)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_layout.addWidget(self.mode_combo)
         layout.addLayout(mode_layout)
