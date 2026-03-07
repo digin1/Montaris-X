@@ -892,11 +892,11 @@ class MontarisApp(QMainWindow):
             result = AlertModal.confirm(
                 self, "Close Image",
                 "You have ROIs. What would you like to do?",
-                ["Save ROIs & Clear All", "Keep ROIs", "Cancel"],
+                ["Save ROIs && Clear All", "Keep ROIs", "Cancel"],
             )
             if result == "Cancel" or result is None:
                 return
-            if result == "Save ROIs & Clear All":
+            if result == "Save ROIs && Clear All":
                 self.save_rois()
                 clear_rois = True
 
