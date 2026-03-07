@@ -959,9 +959,7 @@ class MontarisApp(QMainWindow):
         if path:
             try:
                 save_roi_set(path, self.layer_stack.roi_layers)
-                self.statusbar.showMessage(
-                    f"Saved {len(self.layer_stack.roi_layers)} ROIs to {path}"
-                )
+                self.toast.show(f"Saved {len(self.layer_stack.roi_layers)} ROI(s)", "success")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save ROIs:\n{e}")
 
@@ -1048,7 +1046,7 @@ class MontarisApp(QMainWindow):
 
             if progress:
                 progress.close()
-            self.statusbar.showMessage(f"Exported {n} mask(s) to {os.path.dirname(path) or '.'}")
+            self.toast.show(f"Exported {n} PNG mask(s)", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
 
@@ -1142,7 +1140,7 @@ class MontarisApp(QMainWindow):
                         progress.setValue(i + 1)
             if progress:
                 progress.close()
-            self.statusbar.showMessage(f"Exported {count} ImageJ ROI(s) to {dir_path}")
+            self.toast.show(f"Exported {count} ImageJ ROI(s)", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
 
