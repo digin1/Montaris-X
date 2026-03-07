@@ -378,16 +378,12 @@ class TransformTool(BaseTool):
         self._active_handle = None
         self._start_pos = None
         self._current_matrix = None
-        for item in self._preview_items:
-            item.resetTransform()
-            item.setVisible(False)  # hide until deferred rebuild re-renders
+
+        # Keep preview visible until deferred rebuild finishes re-rendering
+        stale_preview_items = self._preview_items[:]
         self._preview_items.clear()
-        # Remove temporary scene items (component mode)
-        scene = canvas.scene()
-        for item in self._temp_scene_items:
-            scene.removeItem(item)
+        stale_temp_items = self._temp_scene_items[:]
         self._temp_scene_items.clear()
-        # Keep real items hidden until deferred rebuild re-renders them
         hidden_layers = self._hidden_layers[:]
         self._hidden_layers = []
 
@@ -417,7 +413,13 @@ class TransformTool(BaseTool):
                     canvas._roi_lod[id(l)] = target_lod
                 except ValueError:
                     pass
-            # Restore real item visibility after re-render (avoids old-pixmap flash)
+            # Now that new pixmaps are ready, clean up stale preview
+            for item in stale_preview_items:
+                item.resetTransform()
+            scene = canvas.scene()
+            for item in stale_temp_items:
+                scene.removeItem(item)
+            # Restore real item visibility after re-render
             for l, _ in hidden_layers:
                 rid = id(l)
                 if rid in canvas._roi_items:
