@@ -36,7 +36,8 @@ class BrushTool(BaseTool):
                     self._other_snapshots[id(other)] = (other, other.mask.copy())
 
         self._paint(pos, layer)
-        canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
+        if self._stroke_bbox is not None:
+            canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
 
     def on_move(self, pos, layer, canvas):
         if not self._painting or layer is None:
