@@ -141,7 +141,9 @@ class MoveTool(BaseTool):
         dy = pos.y() - self._start_pos.y()
 
         if self._component_mask is not None:
-            # Component move: shift preview items
+            # Component move: clamp delta so component stays in-bounds
+            dx, dy = self._clamp_component_delta(dx, dy)
+            # Shift preview items
             for i, item in enumerate(self._comp_preview_items):
                 bx1, by1 = self._comp_preview_offsets[i]
                 item.setOffset(bx1 + dx, by1 + dy)
@@ -224,6 +226,9 @@ class MoveTool(BaseTool):
 
     def _release_component_move(self, pos, layer, canvas, dx, dy):
         """Finalize component move: modify mask data + undo."""
+        # Clamp delta to keep component in-bounds (no pixel loss)
+        dx, dy = self._clamp_component_delta(dx, dy)
+
         affected = [l for l, _ in self._comp_hidden_layers]
         self._remove_component_previews(canvas, re_render=False)
         canvas.flash_progress("Applying move...")
@@ -234,69 +239,59 @@ class MoveTool(BaseTool):
         old_bb = self._old_bboxes.get(lid)
         by1, by2, bx1, bx2 = old_bb or sb
 
-        # Compute new positions and check if any land in-bounds
         comp_crop = self._component_mask[by1:by2, bx1:bx2]
         cys, cxs = np.where(comp_crop)
         ys, xs = cys + by1, cxs + bx1
         new_ys = ys + int(round(dy))
         new_xs = xs + int(round(dx))
-        h, w = l.mask.shape
-        valid = (new_ys >= 0) & (new_ys < h) & (new_xs >= 0) & (new_xs < w)
 
-        move_cancelled = False
-        if not valid.any():
-            # Fully OOB — cancel the move, keep component at original position
-            l.invalidate_bbox()
-            move_cancelled = True
-        else:
-            # Restore original state from crop snapshot
-            l.mask[:] = 0
-            if snap_data is not None and sb is not None:
-                l.mask[sb[0]:sb[1], sb[2]:sb[3]] = snap_data
-            # Erase component, then paste at new position
-            l.mask[by1:by2, bx1:bx2][comp_crop] = 0
-            l.mask[new_ys[valid], new_xs[valid]] = snap_data[ys[valid] - sb[0], xs[valid] - sb[2]] if snap_data is not None else 255
-            l.invalidate_bbox()
+        # Restore original state from crop snapshot
+        l.mask[:] = 0
+        if snap_data is not None and sb is not None:
+            l.mask[sb[0]:sb[1], sb[2]:sb[3]] = snap_data
+        # Erase component, then paste at new position
+        l.mask[by1:by2, bx1:bx2][comp_crop] = 0
+        l.mask[new_ys, new_xs] = snap_data[ys - sb[0], xs - sb[2]] if snap_data is not None else 255
+        l.invalidate_bbox()
 
-        if not move_cancelled:
-            # Build undo command
-            old_bb_snap = self._old_bboxes.get(lid)
-            new_bb = l.get_bbox()
-            bbs = [b for b in (old_bb_snap, new_bb) if b is not None]
-            if bbs:
-                y1 = min(b[0] for b in bbs)
-                y2 = max(b[1] for b in bbs)
-                x1 = min(b[2] for b in bbs)
-                x2 = max(b[3] for b in bbs)
-                if sb is not None and snap_data is not None:
-                    sy1, sy2, sx1, sx2 = sb
-                    region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-                    oy1, oy2 = max(y1, sy1), min(y2, sy2)
-                    ox1, ox2 = max(x1, sx1), min(x2, sx2)
-                    if oy2 > oy1 and ox2 > ox1:
-                        region_old[oy1 - y1:oy2 - y1, ox1 - x1:ox2 - x1] = \
-                            snap_data[oy1 - sy1:oy2 - sy1, ox1 - sx1:ox2 - sx1]
-                else:
-                    region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-                region_new = l.mask[y1:y2, x1:x2]
-                if not np.array_equal(region_old, region_new):
-                    cmd = UndoCommand(l, (y1, y2, x1, x2), region_old.copy(), region_new.copy())
-                    self.app.undo_stack.push(cmd)
+        # Build undo command
+        old_bb_snap = self._old_bboxes.get(lid)
+        new_bb = l.get_bbox()
+        bbs = [b for b in (old_bb_snap, new_bb) if b is not None]
+        if bbs:
+            y1 = min(b[0] for b in bbs)
+            y2 = max(b[1] for b in bbs)
+            x1 = min(b[2] for b in bbs)
+            x2 = max(b[3] for b in bbs)
+            if sb is not None and snap_data is not None:
+                sy1, sy2, sx1, sx2 = sb
+                region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                oy1, oy2 = max(y1, sy1), min(y2, sy2)
+                ox1, ox2 = max(x1, sx1), min(x2, sx2)
+                if oy2 > oy1 and ox2 > ox1:
+                    region_old[oy1 - y1:oy2 - y1, ox1 - x1:ox2 - x1] = \
+                        snap_data[oy1 - sy1:oy2 - sy1, ox1 - sx1:ox2 - sx1]
+            else:
+                region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+            region_new = l.mask[y1:y2, x1:x2]
+            if not np.array_equal(region_old, region_new):
+                cmd = UndoCommand(l, (y1, y2, x1, x2), region_old.copy(), region_new.copy())
+                self.app.undo_stack.push(cmd)
 
-            # Update component selection mask to new positions
-            comp_mask_used = self._component_mask
-            moved_layer = self._target_layers[0] if self._target_layers else None
-            if comp_mask_used is not None and moved_layer is not None:
-                idx_dy, idx_dx = int(round(dy)), int(round(dx))
-                old_mask = comp_mask_used
-                new_mask = np.zeros_like(old_mask)
-                ys, xs = np.where(old_mask)
-                nys, nxs = ys + idx_dy, xs + idx_dx
-                mh, mw = new_mask.shape
-                v = (nys >= 0) & (nys < mh) & (nxs >= 0) & (nxs < mw)
-                new_mask[nys[v], nxs[v]] = True
-                self._multi_comp_mask = new_mask
-                self._multi_comp_layer = moved_layer
+        # Update component selection mask to new positions
+        comp_mask_used = self._component_mask
+        moved_layer = self._target_layers[0] if self._target_layers else None
+        if comp_mask_used is not None and moved_layer is not None:
+            idx_dy, idx_dx = int(round(dy)), int(round(dx))
+            old_mask = comp_mask_used
+            new_mask = np.zeros_like(old_mask)
+            ys, xs = np.where(old_mask)
+            nys, nxs = ys + idx_dy, xs + idx_dx
+            mh, mw = new_mask.shape
+            v = (nys >= 0) & (nys < mh) & (nxs >= 0) & (nxs < mw)
+            new_mask[nys[v], nxs[v]] = True
+            self._multi_comp_mask = new_mask
+            self._multi_comp_layer = moved_layer
 
         self._comp_snapshots.clear()
         self._old_bboxes = {}
@@ -432,6 +427,23 @@ class MoveTool(BaseTool):
                     pass
             canvas._update_selection_highlights()
         self._comp_hidden_layers = []
+
+    # ------------------------------------------------------------------
+    # Component delta clamping
+    # ------------------------------------------------------------------
+
+    def _clamp_component_delta(self, dx, dy):
+        """Clamp dx/dy so the component bbox stays within mask bounds."""
+        if not self._target_layers or self._component_bbox is None:
+            return dx, dy
+        l = self._target_layers[0]
+        h, w = l.mask.shape
+        cy1, cy2, cx1, cx2 = self._component_bbox
+        idx = int(round(dx))
+        idy = int(round(dy))
+        idy = max(-cy1, min(idy, h - cy2))
+        idx = max(-cx1, min(idx, w - cx2))
+        return float(idx), float(idy)
 
     # ------------------------------------------------------------------
     # Scene rect expansion for OOB moves
