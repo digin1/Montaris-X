@@ -72,6 +72,7 @@ class PolygonTool(BaseTool):
             old_crop = layer.mask[by1:by2, bx1:bx2].copy()
 
             self._fill_polygon(layer, bx1, by1, bx2, by2)
+            layer.invalidate_bbox()
 
             new_crop = layer.mask[by1:by2, bx1:bx2]
             if not np.array_equal(old_crop, new_crop):

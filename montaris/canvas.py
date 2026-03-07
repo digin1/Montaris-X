@@ -321,6 +321,7 @@ class ImageCanvas(QGraphicsView):
         """Re-render only the specified ROI layer's pixmap item."""
         if layer is None or not hasattr(layer, 'mask'):
             return
+        layer.invalidate_bbox()
         layer.clear_dirty()
         try:
             index = self.layer_stack.roi_layers.index(layer)
