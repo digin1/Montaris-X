@@ -163,7 +163,7 @@ class MoveTool(BaseTool):
                         y1, y2, x1, x2 = bbox
                         real_item.setOffset(x1 + l.offset_x, y1 + l.offset_y)
 
-        self._expand_scene_rect_if_needed(canvas)
+        self._expand_scene_rect_for_pos(pos, canvas)
         self._auto_scroll(pos, canvas)
         if self._target_layers:
             canvas.ensureVisible(QRectF(pos.x() - 10, pos.y() - 10, 20, 20), 50, 50)
@@ -426,35 +426,20 @@ class MoveTool(BaseTool):
     # Scene rect expansion for OOB moves
     # ------------------------------------------------------------------
 
-    def _expand_scene_rect_if_needed(self, canvas):
-        """Grow the scene rect when ROIs move outside current bounds."""
+    def _expand_scene_rect_for_pos(self, pos, canvas):
+        """Grow the scene rect when the drag position nears the boundary."""
         scene = canvas.scene()
         sr = scene.sceneRect()
-        margin = 200
-
-        # Collect bounding boxes to check
-        bboxes = []
-        if self._component_mask is not None and self._component_bbox is not None:
-            # Component move: use the dragged bbox item position
-            if self._comp_bbox_item:
-                r = self._comp_bbox_item.rect()
-                bboxes.append((r.top(), r.bottom(), r.left(), r.right()))
-        else:
-            for l in self._target_layers:
-                dbbox = l.get_display_bbox()
-                if dbbox is not None:
-                    bboxes.append(dbbox)
-
-        for y1, y2, x1, x2 in bboxes:
-            if x1 < sr.left() + margin or x2 > sr.right() - margin \
-                    or y1 < sr.top() + margin or y2 > sr.bottom() - margin:
-                new_left = min(sr.left(), x1 - margin)
-                new_top = min(sr.top(), y1 - margin)
-                new_right = max(sr.right(), x2 + margin)
-                new_bottom = max(sr.bottom(), y2 + margin)
-                scene.setSceneRect(QRectF(new_left, new_top,
-                                          new_right - new_left, new_bottom - new_top))
-                break
+        margin = 400
+        px, py = pos.x(), pos.y()
+        if px < sr.left() + margin or px > sr.right() - margin \
+                or py < sr.top() + margin or py > sr.bottom() - margin:
+            new_left = min(sr.left(), px - margin)
+            new_top = min(sr.top(), py - margin)
+            new_right = max(sr.right(), px + margin)
+            new_bottom = max(sr.bottom(), py + margin)
+            scene.setSceneRect(QRectF(new_left, new_top,
+                                      new_right - new_left, new_bottom - new_top))
 
     # ------------------------------------------------------------------
     # Auto-scroll
