@@ -46,7 +46,7 @@ class HelpModal(QDialog):
             "  Ctrl+O         Open Image(s)\n"
             "  Ctrl+Shift+O   Load ROI Set\n"
             "  Ctrl+S         Save ROI Set\n"
-            "  Ctrl+E         Export ROI as PNG\n"
+            "  Ctrl+E         Export ROI(s) as PNG\n"
             "  Ctrl+Q         Quit\n\n"
             "Edit:\n"
             "  Ctrl+Z         Undo\n"

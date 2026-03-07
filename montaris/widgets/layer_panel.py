@@ -423,10 +423,10 @@ class LayerPanel(QWidget):
         ins_above_blank = QAction("Empty ROI", self)
         ins_above_blank.triggered.connect(lambda: self._insert_roi_at(data[1]))
         insert_above_menu.addAction(ins_above_blank)
-        ins_above_roi = QAction("From .roi File...", self)
+        ins_above_roi = QAction("From .roi File(s)...", self)
         ins_above_roi.triggered.connect(lambda: self._insert_roi_from_file(data[1], "roi"))
         insert_above_menu.addAction(ins_above_roi)
-        ins_above_png = QAction("From PNG Mask...", self)
+        ins_above_png = QAction("From PNG Mask(s)...", self)
         ins_above_png.triggered.connect(lambda: self._insert_roi_from_file(data[1], "png"))
         insert_above_menu.addAction(ins_above_png)
 
@@ -434,10 +434,10 @@ class LayerPanel(QWidget):
         ins_below_blank = QAction("Empty ROI", self)
         ins_below_blank.triggered.connect(lambda: self._insert_roi_at(data[1] + 1))
         insert_below_menu.addAction(ins_below_blank)
-        ins_below_roi = QAction("From .roi File...", self)
+        ins_below_roi = QAction("From .roi File(s)...", self)
         ins_below_roi.triggered.connect(lambda: self._insert_roi_from_file(data[1] + 1, "roi"))
         insert_below_menu.addAction(ins_below_roi)
-        ins_below_png = QAction("From PNG Mask...", self)
+        ins_below_png = QAction("From PNG Mask(s)...", self)
         ins_below_png.triggered.connect(lambda: self._insert_roi_from_file(data[1] + 1, "png"))
         insert_below_menu.addAction(ins_below_png)
 
@@ -547,7 +547,7 @@ class LayerPanel(QWidget):
         h, w = img.shape[:2]
         if fmt == "roi":
             paths, _ = QFileDialog.getOpenFileNames(
-                self, "Import ImageJ ROI", "",
+                self, "Import ImageJ ROI(s)", "",
                 "ImageJ ROI (*.roi);;All Files (*)",
             )
             if not paths:
@@ -562,7 +562,7 @@ class LayerPanel(QWidget):
                 self.layer_stack.insert_roi(index + i, roi)
         elif fmt == "png":
             paths, _ = QFileDialog.getOpenFileNames(
-                self, "Import PNG Mask", "",
+                self, "Import PNG Mask(s)", "",
                 "PNG (*.png);;All Files (*)",
             )
             if not paths:

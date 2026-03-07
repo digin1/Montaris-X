@@ -277,7 +277,7 @@ class MontarisApp(QMainWindow):
         # Import submenu
         import_menu = file_menu.addMenu("Import")
 
-        import_ij_act = QAction("ImageJ ROI (.roi)...", self)
+        import_ij_act = QAction("ImageJ ROI(s) (.roi)...", self)
         import_ij_act.triggered.connect(self.import_imagej_roi)
         import_menu.addAction(import_ij_act)
 
@@ -981,7 +981,7 @@ class MontarisApp(QMainWindow):
             return
         self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export ROI as PNG", "roi_export.png",
+            self, "Export ROI(s) as PNG", "roi_export.png",
             "PNG (*.png);;All Files (*)",
         )
         if path:
@@ -1064,7 +1064,7 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "Load an image first.")
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Import ImageJ ROI", "",
+            self, "Import ImageJ ROI(s)", "",
             "ImageJ ROI (*.roi);;All Files (*)",
         )
         if not paths:
