@@ -216,6 +216,169 @@ def _voronoi_bin(mask, n_bins):
     return results
 
 
+def _estimate_curvature_center(binary):
+    """Estimate the external center of curvature from boundary normals.
+
+    For brain ROIs that curve around a center (like cortical strips around
+    the brain center), the boundary outward normals from the concave side
+    converge at that center. We find this focus point via least-squares.
+
+    Returns (center_y, center_x) — typically outside the ROI.
+    """
+    from scipy.ndimage import distance_transform_edt, binary_erosion
+
+    h, w = binary.shape
+    ys, xs = np.where(binary)
+    roi_cy, roi_cx = ys.mean(), xs.mean()
+
+    # Find boundary pixels
+    interior = binary_erosion(binary)
+    boundary = binary & ~interior
+    by, bx = np.where(boundary)
+
+    if len(by) < 20:
+        return roi_cy, roi_cx
+
+    # Compute outward normals at boundary using distance transform gradient
+    dist = distance_transform_edt(binary)
+    gy, gx = np.gradient(dist)
+
+    # Gradient at boundary points inward; outward = negated
+    ny = -gy[by, bx]
+    nx = -gx[by, bx]
+    norms = np.sqrt(ny ** 2 + nx ** 2)
+    valid = norms > 0.1
+    if valid.sum() < 10:
+        return roi_cy, roi_cx
+
+    ny = ny[valid] / norms[valid]
+    nx = nx[valid] / norms[valid]
+    by_v = by[valid].astype(np.float64)
+    bx_v = bx[valid].astype(np.float64)
+
+    # Least-squares: find point (cy, cx) minimizing sum of squared distances
+    # to all boundary normal rays.
+    # Ray i: (by_i, bx_i) + t*(ny_i, nx_i).  Perpendicular distance from
+    # (cy, cx) to ray i = |(cy - by_i)*nx_i - (cx - bx_i)*ny_i|
+    ai = nx
+    bi = -ny
+    ci = bx_v * ny - by_v * nx
+
+    A = np.array([[np.sum(ai * ai), np.sum(ai * bi)],
+                  [np.sum(ai * bi), np.sum(bi * bi)]])
+    rhs = np.array([-np.sum(ai * ci), -np.sum(bi * ci)])
+
+    try:
+        center = np.linalg.solve(A, rhs)
+        cy, cx = float(center[0]), float(center[1])
+    except np.linalg.LinAlgError:
+        return roi_cy, roi_cx
+
+    # If center ended up inside the mask, push it outside along the
+    # direction from ROI centroid → estimated center.
+    iy, ix = int(round(cy)), int(round(cx))
+    if 0 <= iy < h and 0 <= ix < w and binary[iy, ix]:
+        dy = cy - roi_cy
+        dx = cx - roi_cx
+        length = np.sqrt(dy ** 2 + dx ** 2)
+        if length < 1e-6:
+            # Center ≈ centroid, push in direction of largest concavity
+            from scipy.spatial import ConvexHull
+            pts = np.column_stack([xs, ys])
+            try:
+                hull = ConvexHull(pts)
+                hull_set = set(hull.vertices)
+                non_hull = [i for i in range(len(pts)) if i not in hull_set]
+                if non_hull:
+                    # Arbitrary concavity direction
+                    dy, dx = 1.0, 0.0
+                    length = 1.0
+            except Exception:
+                dy, dx, length = 1.0, 0.0, 1.0
+        dy, dx = dy / length, dx / length
+        # Walk along direction until outside mask
+        max_extent = max(h, w) * 2.0
+        for t in np.arange(0, max_extent, 1.0):
+            test_y = roi_cy + t * dy
+            test_x = roi_cx + t * dx
+            ty, tx = int(round(test_y)), int(round(test_x))
+            if not (0 <= ty < h and 0 <= tx < w) or not binary[ty, tx]:
+                cy, cx = test_y, test_x
+                break
+
+    return cy, cx
+
+
+def _polar_bin(mask, n_angular, n_radial):
+    """Split an ROI mask using polar coordinate binning with external center.
+
+    Estimates the center of curvature from boundary normals (typically
+    outside the ROI for brain regions), then divides into angular sectors
+    and radial rings. Each bin is roughly quadrilateral.
+
+    Returns list of (sub_mask, y_offset, x_offset) tuples.
+    """
+    binary = mask > 0
+    if not binary.any():
+        return []
+
+    ys, xs = np.where(binary)
+
+    # Estimate external center of curvature
+    cy, cx = _estimate_curvature_center(binary)
+
+    # Polar coordinates relative to external center
+    dy = ys.astype(np.float64) - cy
+    dx = xs.astype(np.float64) - cx
+    r = np.sqrt(dy ** 2 + dx ** 2)
+    theta = np.arctan2(dy, dx)  # -pi to pi
+
+    # Radial bins: equal-width rings from min to max radius
+    r_min, r_max = r.min(), r.max()
+    if r_max - r_min < 1.0:
+        r_norm = np.zeros_like(r)
+    else:
+        r_norm = (r - r_min) / (r_max - r_min)
+
+    r_bin = np.clip((r_norm * n_radial).astype(np.int32), 0, n_radial - 1)
+
+    # Angular bins: equal-angle sectors within the ROI's angular extent
+    # (not full 360°, just the range the ROI spans)
+    theta_min, theta_max = theta.min(), theta.max()
+    # Handle wrap-around: if range > pi, the ROI probably wraps around ±pi
+    if theta_max - theta_min > np.pi:
+        # Shift to avoid the ±pi discontinuity
+        theta = np.where(theta < 0, theta + 2 * np.pi, theta)
+        theta_min, theta_max = theta.min(), theta.max()
+
+    theta_range = theta_max - theta_min
+    if theta_range < 1e-6:
+        theta_norm = np.zeros_like(theta)
+    else:
+        theta_norm = (theta - theta_min) / theta_range
+
+    a_bin = np.clip(
+        (theta_norm * n_angular).astype(np.int32), 0, n_angular - 1,
+    )
+
+    combined = r_bin * n_angular + a_bin
+
+    results = []
+    for label in range(n_radial * n_angular):
+        members = combined == label
+        if not members.any():
+            continue
+        sub_ys = ys[members]
+        sub_xs = xs[members]
+        sy1, sy2 = int(sub_ys.min()), int(sub_ys.max()) + 1
+        sx1, sx2 = int(sub_xs.min()), int(sub_xs.max()) + 1
+        sub = np.zeros((sy2 - sy1, sx2 - sx1), dtype=np.uint8)
+        sub[sub_ys - sy1, sub_xs - sx1] = 255
+        results.append((sub, sy1, sx1))
+
+    return results
+
+
 def _grid_bin(mask, cols, rows):
     """Split an ROI mask into a cols x rows grid.
 
@@ -826,17 +989,30 @@ class LayerPanel(QWidget):
         form = QFormLayout(dlg)
 
         method_combo = QComboBox()
-        method_combo.addItems(["Region-aware (Voronoi)", "Grid"])
+        method_combo.addItems(["Polar (radial)", "Voronoi", "Grid"])
         form.addRow("Method:", method_combo)
 
-        # Region-aware controls
-        region_widget = QWidget()
-        region_form = QFormLayout(region_widget)
-        region_form.setContentsMargins(0, 0, 0, 0)
+        # Polar controls (default)
+        polar_widget = QWidget()
+        polar_form = QFormLayout(polar_widget)
+        polar_form.setContentsMargins(0, 0, 0, 0)
+        angular_spin = QSpinBox()
+        angular_spin.setRange(1, 360)
+        angular_spin.setValue(6)
+        polar_form.addRow("Sectors (angular):", angular_spin)
+        radial_spin = QSpinBox()
+        radial_spin.setRange(1, 100)
+        radial_spin.setValue(3)
+        polar_form.addRow("Rings (radial):", radial_spin)
+
+        # Voronoi controls
+        voronoi_widget = QWidget()
+        voronoi_form = QFormLayout(voronoi_widget)
+        voronoi_form.setContentsMargins(0, 0, 0, 0)
         n_bins_spin = QSpinBox()
         n_bins_spin.setRange(2, 500)
         n_bins_spin.setValue(10)
-        region_form.addRow("Number of regions:", n_bins_spin)
+        voronoi_form.addRow("Number of regions:", n_bins_spin)
 
         # Grid controls
         grid_widget = QWidget()
@@ -852,7 +1028,8 @@ class LayerPanel(QWidget):
         grid_form.addRow("Rows:", v_spin)
 
         stack = QStackedWidget()
-        stack.addWidget(region_widget)
+        stack.addWidget(polar_widget)
+        stack.addWidget(voronoi_widget)
         stack.addWidget(grid_widget)
         method_combo.currentIndexChanged.connect(stack.setCurrentIndex)
         form.addRow(stack)
@@ -869,11 +1046,12 @@ class LayerPanel(QWidget):
         h, w = mask.shape
         insert_at = roi_index + 1
 
-        if method_combo.currentIndex() == 0:
-            # Region-aware Voronoi binning
+        method_idx = method_combo.currentIndex()
+        if method_idx == 0:
+            sub_regions = _polar_bin(mask, angular_spin.value(), radial_spin.value())
+        elif method_idx == 1:
             sub_regions = _voronoi_bin(mask, n_bins_spin.value())
         else:
-            # Grid binning
             sub_regions = _grid_bin(mask, h_spin.value(), v_spin.value())
 
         if not sub_regions:
@@ -907,7 +1085,7 @@ class LayerPanel(QWidget):
                 app.canvas.refresh_overlays(),
                 self.refresh(),
             ))
-        method_name = "Voronoi" if method_combo.currentIndex() == 0 else "Grid"
+        method_name = ["Polar", "Voronoi", "Grid"][method_combo.currentIndex()]
         if hasattr(app, 'toast'):
             app.toast.show(f"Split into {count} region(s) ({method_name})", "success")
 
