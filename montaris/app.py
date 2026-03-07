@@ -279,7 +279,11 @@ class MontarisApp(QMainWindow):
         import_ij_act.triggered.connect(self.import_imagej_roi)
         file_menu.addAction(import_ij_act)
 
-        export_ij_act = QAction("Export ImageJ ROIs...", self)
+        export_ij_single_act = QAction("Export Active ROI as .roi...", self)
+        export_ij_single_act.triggered.connect(self.export_active_imagej_roi)
+        file_menu.addAction(export_ij_single_act)
+
+        export_ij_act = QAction("Export All ImageJ ROIs...", self)
         export_ij_act.triggered.connect(self.export_imagej_rois)
         file_menu.addAction(export_ij_act)
 
@@ -897,7 +901,7 @@ class MontarisApp(QMainWindow):
             if result == "Cancel" or result is None:
                 return
             if result == "Save ROIs && Clear All":
-                self.save_rois()
+                self.export_all_rois_zip()
                 clear_rois = True
 
         # Clear image
@@ -1066,6 +1070,12 @@ class MontarisApp(QMainWindow):
             from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
             h, w = self.layer_stack.image_layer.shape[:2]
             n = len(paths)
+            # Insert after currently selected ROI, or append at end
+            active = self.canvas._active_layer
+            if active and active in self.layer_stack.roi_layers:
+                insert_at = self.layer_stack.roi_layers.index(active) + 1
+            else:
+                insert_at = len(self.layer_stack.roi_layers)
             if n > 1:
                 progress = QProgressDialog("Importing ImageJ ROIs...", "Cancel", 0, n, self)
                 progress.setWindowModality(Qt.WindowModal)
@@ -1079,16 +1089,40 @@ class MontarisApp(QMainWindow):
                 name = os.path.splitext(os.path.basename(path))[0]
                 roi = ROILayer(name, w, h)
                 roi.mask = mask
-                self.layer_stack.add_roi(roi)
+                self.layer_stack.insert_roi(insert_at + i, roi)
                 if progress:
                     progress.setValue(i + 1)
             if progress:
                 progress.close()
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
-            self.statusbar.showMessage(f"Imported {len(paths)} ImageJ ROI(s)")
+            self.toast.show(f"Imported {len(paths)} ImageJ ROI(s)", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import:\n{e}")
+
+    def export_active_imagej_roi(self):
+        roi = self.canvas._active_layer
+        if not roi or not hasattr(roi, 'mask'):
+            QMessageBox.information(self, "Info", "No active ROI selected.")
+            return
+        self._flatten_roi_offsets()
+        safe_name = roi.name.replace("/", "_").replace("\\", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Active ROI as .roi", f"{safe_name}.roi",
+            "ImageJ ROI (*.roi);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
+            roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
+            if roi_dict:
+                write_imagej_roi(roi_dict, path)
+                self.toast.show(f"Exported {roi.name} as .roi", "success")
+            else:
+                QMessageBox.warning(self, "Warning", "ROI mask is empty, nothing to export.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
 
     def export_imagej_rois(self):
         if not self.layer_stack.roi_layers:
@@ -1239,6 +1273,12 @@ class MontarisApp(QMainWindow):
             from PIL import Image
             h, w = self.layer_stack.image_layer.shape[:2]
             n = len(paths)
+            # Insert after currently selected ROI, or append at end
+            active = self.canvas._active_layer
+            if active and active in self.layer_stack.roi_layers:
+                insert_at = self.layer_stack.roi_layers.index(active) + 1
+            else:
+                insert_at = len(self.layer_stack.roi_layers)
             if n > 1:
                 progress = QProgressDialog("Importing PNG masks...", "Cancel", 0, n, self)
                 progress.setWindowModality(Qt.WindowModal)
@@ -1262,7 +1302,7 @@ class MontarisApp(QMainWindow):
                     name = os.path.splitext(os.path.basename(p))[0]
                     roi = ROILayer(name, w, h)
                     roi.mask = mask
-                    self.layer_stack.add_roi(roi)
+                    self.layer_stack.insert_roi(insert_at + i, roi)
                     if progress:
                         progress.setValue(i + 1)
             else:
@@ -1273,7 +1313,7 @@ class MontarisApp(QMainWindow):
                     name = os.path.splitext(os.path.basename(path))[0]
                     roi = ROILayer(name, w, h)
                     roi.mask = mask
-                    self.layer_stack.add_roi(roi)
+                    self.layer_stack.insert_roi(insert_at + i, roi)
                     if progress:
                         progress.setValue(i + 1)
 
@@ -1343,6 +1383,13 @@ class MontarisApp(QMainWindow):
                 scale_x = img_w / max_w
                 scale_y = img_h / max_h
 
+            # Insert after currently selected ROI, or append at end
+            active = self.canvas._active_layer
+            if active and active in self.layer_stack.roi_layers:
+                insert_at = self.layer_stack.roi_layers.index(active) + 1
+            else:
+                insert_at = len(self.layer_stack.roi_layers)
+
             count = 0
             total = len(roi_entries)
             progress = QProgressDialog(f"Importing {total} ROI(s)...", "Cancel", 0, total, self)
@@ -1391,7 +1438,7 @@ class MontarisApp(QMainWindow):
                     mask = fut.result()
                     roi = ROILayer(base, w, h)
                     roi.mask = mask
-                    self.layer_stack.add_roi(roi)
+                    self.layer_stack.insert_roi(insert_at + count, roi)
                     count += 1
                     progress.setValue(i + 1)
                     QApplication.processEvents()
@@ -1402,7 +1449,7 @@ class MontarisApp(QMainWindow):
                     mask = _decode_roi_entry(entry_type, payload, w, h, sx, sy, need_scale)
                     roi = ROILayer(base, w, h)
                     roi.mask = mask
-                    self.layer_stack.add_roi(roi)
+                    self.layer_stack.insert_roi(insert_at + count, roi)
                     count += 1
                     progress.setValue(i + 1)
                     QApplication.processEvents()

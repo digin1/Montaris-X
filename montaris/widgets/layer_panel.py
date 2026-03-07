@@ -434,13 +434,22 @@ class LayerPanel(QWidget):
 
         menu.addSeparator()
 
-        export_ij_action = QAction("Export as ImageJ .roi", self)
-        export_ij_action.triggered.connect(lambda: self._export_single_roi(data[1], "imagej"))
-        menu.addAction(export_ij_action)
+        if len(selected_indices) >= 2:
+            export_ij_action = QAction(f"Export {len(selected_indices)} ROIs as .roi", self)
+            export_ij_action.triggered.connect(lambda: self._export_selected_rois("imagej"))
+            menu.addAction(export_ij_action)
 
-        export_png_action = QAction("Export as PNG", self)
-        export_png_action.triggered.connect(lambda: self._export_single_roi(data[1], "png"))
-        menu.addAction(export_png_action)
+            export_png_action = QAction(f"Export {len(selected_indices)} ROIs as PNG", self)
+            export_png_action.triggered.connect(lambda: self._export_selected_rois("png"))
+            menu.addAction(export_png_action)
+        else:
+            export_ij_action = QAction("Export as ImageJ .roi", self)
+            export_ij_action.triggered.connect(lambda: self._export_single_roi(data[1], "imagej"))
+            menu.addAction(export_ij_action)
+
+            export_png_action = QAction("Export as PNG", self)
+            export_png_action.triggered.connect(lambda: self._export_single_roi(data[1], "png"))
+            menu.addAction(export_png_action)
 
         menu.addSeparator()
 
@@ -551,31 +560,38 @@ class LayerPanel(QWidget):
                 self.visibility_changed.emit()
 
     def _export_single_roi(self, roi_index, fmt):
-        roi = self.layer_stack.get_roi(roi_index)
-        if roi is None:
+        self._export_selected_rois(fmt, override_indices=[roi_index])
+
+    def _export_selected_rois(self, fmt, override_indices=None):
+        indices = override_indices or self._get_selected_roi_indices()
+        if not indices:
             return
         import os
         from PySide6.QtWidgets import QFileDialog
-        safe_name = roi.name.replace("/", "_").replace("\\", "_")
-        if fmt == "imagej":
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export ImageJ ROI", f"{safe_name}.roi",
-                "ImageJ ROI (*.roi);;All Files (*)",
-            )
-            if path:
+        dir_path = QFileDialog.getExistingDirectory(self, "Export Selected ROIs to Directory")
+        if not dir_path:
+            return
+        count = 0
+        for idx in indices:
+            roi = self.layer_stack.get_roi(idx)
+            if roi is None:
+                continue
+            safe_name = roi.name.replace("/", "_").replace("\\", "_")
+            if fmt == "imagej":
                 from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
                 roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
                 if roi_dict:
-                    write_imagej_roi(roi_dict, path)
-        elif fmt == "png":
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export ROI as PNG", f"{safe_name}.png",
-                "PNG (*.png);;All Files (*)",
-            )
-            if path:
+                    write_imagej_roi(roi_dict, os.path.join(dir_path, f"{safe_name}.roi"))
+                    count += 1
+            elif fmt == "png":
                 from PIL import Image
                 img = Image.fromarray(roi.mask)
-                img.save(path)
+                img.save(os.path.join(dir_path, f"{safe_name}.png"))
+                count += 1
+        # Show toast if app has one
+        app = self.window()
+        if hasattr(app, 'toast'):
+            app.toast.show(f"Exported {count} ROI(s)", "success")
 
     def _change_color(self):
         """Open color palette dialog (B.12)."""
