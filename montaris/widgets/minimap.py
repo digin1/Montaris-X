@@ -40,7 +40,7 @@ class MiniMap(QWidget):
         # Create simple downsampled thumbnail
         step_y = max(1, h // th)
         step_x = max(1, w // tw)
-        small = image_data[::step_y, ::step_x]
+        small = np.ascontiguousarray(image_data[::step_y, ::step_x])
 
         if small.ndim == 2:
             if small.dtype != np.uint8:
@@ -49,6 +49,7 @@ class MiniMap(QWidget):
                     small = ((small.astype(np.float32) - mn) / (mx - mn) * 255).astype(np.uint8)
                 else:
                     small = np.zeros_like(small, dtype=np.uint8)
+            small = np.ascontiguousarray(small)
             sh, sw = small.shape
             qimg = QImage(small.data, sw, sh, sw, QImage.Format_Grayscale8)
         elif small.ndim == 3:
