@@ -22,6 +22,9 @@ class EraserTool(BaseTool):
         self._last_pos = pos
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
+        # Hide selection highlight while erasing
+        for item in canvas._selection_highlight_items:
+            item.setVisible(False)
         self._erase(pos, layer)
         canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
 
@@ -57,6 +60,7 @@ class EraserTool(BaseTool):
         canvas.refresh_active_overlay(layer)
         self._snapshot = None
         self._stroke_bbox = None
+        canvas._update_selection_highlights()
 
     def _erase(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())

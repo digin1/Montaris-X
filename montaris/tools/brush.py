@@ -24,6 +24,9 @@ class BrushTool(BaseTool):
         self._last_pos = pos
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
+        # Hide selection highlight while painting
+        for item in canvas._selection_highlight_items:
+            item.setVisible(False)
 
         # Snapshot other layers if auto-overlap is on (C.7)
         self._other_snapshots.clear()
@@ -103,6 +106,7 @@ class BrushTool(BaseTool):
         self._snapshot = None
         self._stroke_bbox = None
         self._other_snapshots.clear()
+        canvas._update_selection_highlights()
 
     def _paint(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
