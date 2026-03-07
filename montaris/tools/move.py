@@ -186,7 +186,7 @@ class MoveTool(BaseTool):
                     bbox = l.get_bbox()
                     if bbox is not None:
                         y1, y2, x1, x2 = bbox
-                        real_item.setOffset(x1 + l.offset_x, y1 + l.offset_y)
+                        real_item.setPos(x1 + l.offset_x, y1 + l.offset_y)
 
         self._auto_scroll(pos, canvas)
 

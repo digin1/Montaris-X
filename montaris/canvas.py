@@ -1,13 +1,54 @@
 import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QLabel,
+    QGraphicsEllipseItem, QGraphicsItem, QLabel,
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import (
     QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush, QPainterPath,
 )
 from montaris.core.selection import SelectionModel
+
+
+# ------------------------------------------------------------------
+# Mutable QImage overlay — avoids QPixmap COW and full-scene updates
+# ------------------------------------------------------------------
+
+class _ROIOverlayItem(QGraphicsItem):
+    """Lightweight ROI overlay that paints from a mutable QImage.
+
+    Unlike QGraphicsPixmapItem, QPainter on image() modifies in-place
+    (no copy-on-write), and updateDirty() invalidates only the changed
+    sub-region instead of the entire bounding rect.
+    """
+    def __init__(self):
+        super().__init__()
+        self._image = None
+        self._rect = QRectF()
+        self.setAcceptedMouseButtons(Qt.NoButton)
+
+    def setImage(self, image):
+        old = self._rect
+        self._rect = QRectF(0, 0, image.width(), image.height())
+        if old != self._rect:
+            self.prepareGeometryChange()
+        self._image = image
+        self.update()
+
+    def image(self):
+        return self._image  # same object, no copy
+
+    def boundingRect(self):
+        return self._rect
+
+    def paint(self, painter, option, widget=None):
+        if self._image:
+            exposed = option.exposedRect.toAlignedRect()
+            painter.drawImage(exposed, self._image, exposed)
+
+    def updateDirty(self, rect):
+        """Invalidate only the dirty sub-region."""
+        self.update(rect)
 
 
 # ------------------------------------------------------------------
@@ -25,7 +66,7 @@ class ImageCanvas(QGraphicsView):
         self.setScene(self._scene)
 
         self._image_item = None       # QGraphicsPixmapItem for the image
-        self._roi_items = {}          # id(roi) -> QGraphicsPixmapItem (tight bbox)
+        self._roi_items = {}          # id(roi) -> _ROIOverlayItem (tight bbox)
         self._polygon_item = None
         self._brush_preview = None
         self._stamp_preview = None
@@ -262,7 +303,7 @@ class ImageCanvas(QGraphicsView):
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
 
     # ------------------------------------------------------------------
-    # ROI overlay display — per-ROI QGraphicsPixmapItem (tight bbox)
+    # ROI overlay display — per-ROI _ROIOverlayItem (tight bbox)
     # ------------------------------------------------------------------
 
     def refresh_overlays(self):
@@ -408,10 +449,11 @@ class ImageCanvas(QGraphicsView):
         """Render all accumulated dirty regions."""
         pending = self._pending_dirty
         self._pending_dirty = {}
+        lod = self._current_lod_level()
         for lid, (layer, bbox) in pending.items():
-            self._render_dirty_region(layer, bbox)
+            self._render_dirty_region(layer, bbox, lod_level=lod)
 
-    def _render_dirty_region(self, layer, dirty_bbox):
+    def _render_dirty_region(self, layer, dirty_bbox, lod_level=0):
         """Render a single dirty region onto the layer's pixmap item."""
         dy1, dy2, dx1, dx2 = dirty_bbox
         dh, dw = dy2 - dy1, dx2 - dx1
@@ -427,12 +469,36 @@ class ImageCanvas(QGraphicsView):
 
         # Build RGBA tile for dirty region from actual mask data
         mask_crop = layer.mask[dy1:dy2, dx1:dx2]
+
+        # LOD downsampling during stroke for performance
+        scale_factor = 1
+        if lod_level > 0:
+            factor = 1 << lod_level
+            th = (dh // factor) * factor
+            tw = (dw // factor) * factor
+            if th > 0 and tw > 0:
+                mask_crop = mask_crop[:th, :tw].reshape(
+                    th // factor, factor, tw // factor, factor
+                ).max(axis=(1, 3))
+                dh, dw = th // factor, tw // factor
+                scale_factor = factor
+
         rgba = np.zeros((dh, dw, 4), dtype=np.uint8)
         painted = mask_crop > 0
         rgba[painted] = [r, g, b, alpha]
         rgba = np.ascontiguousarray(rgba)
         qimg = QImage(rgba.data, dw, dh, dw * 4, QImage.Format_RGBA8888)
-        dirty_pm = QPixmap.fromImage(qimg)
+        dirty_img = qimg.copy()  # detach from numpy buffer
+
+        # Scale back up if downsampled
+        if scale_factor > 1:
+            full_img = QImage(dx2 - dx1, dy2 - dy1, QImage.Format_RGBA8888)
+            full_img.fill(QColor(0, 0, 0, 0))
+            p = QPainter(full_img)
+            target = QRectF(0, 0, full_img.width(), full_img.height())
+            p.drawImage(target, dirty_img)
+            p.end()
+            dirty_img = full_img
 
         if existing is None:
             # First paint on empty ROI — create item from dirty region
@@ -440,43 +506,45 @@ class ImageCanvas(QGraphicsView):
                 index = self.layer_stack.roi_layers.index(layer)
             except ValueError:
                 return
-            item = QGraphicsPixmapItem(dirty_pm)
-            item.setOffset(dx1, dy1)
+            item = _ROIOverlayItem()
+            item.setImage(dirty_img)
+            item.setPos(dx1, dy1)
             item.setZValue(1 + index * 0.001)
-            item.setAcceptedMouseButtons(Qt.NoButton)
             self._scene.addItem(item)
             self._roi_items[rid] = item
             return
 
-        pixmap = existing.pixmap()
-        ox, oy = int(existing.offset().x()), int(existing.offset().y())
-        pw, ph = pixmap.width(), pixmap.height()
+        image = existing.image()
+        ox, oy = int(existing.pos().x()), int(existing.pos().y())
+        pw, ph = image.width(), image.height()
 
-        # Expand pixmap if dirty region extends beyond current bounds
+        # Expand image if dirty region extends beyond current bounds
         px1, py1 = ox, oy
         px2, py2 = ox + pw, oy + ph
         nx1, ny1 = min(px1, dx1), min(py1, dy1)
         nx2, ny2 = max(px2, dx2), max(py2, dy2)
 
         if nx1 < px1 or ny1 < py1 or nx2 > px2 or ny2 > py2:
-            new_pm = QPixmap(nx2 - nx1, ny2 - ny1)
-            new_pm.fill(QColor(0, 0, 0, 0))
-            p = QPainter(new_pm)
-            p.drawPixmap(px1 - nx1, py1 - ny1, pixmap)
+            new_img = QImage(nx2 - nx1, ny2 - ny1, QImage.Format_RGBA8888)
+            new_img.fill(QColor(0, 0, 0, 0))
+            p = QPainter(new_img)
+            p.drawImage(px1 - nx1, py1 - ny1, image)
             p.end()
-            pixmap = new_pm
-            existing.setOffset(nx1, ny1)
+            image = new_img
+            existing.setImage(image)
+            existing.setPos(nx1, ny1)
             ox, oy = nx1, ny1
 
-        # Composite dirty tile onto pixmap
-        p = QPainter(pixmap)
+        # Composite dirty tile onto image — in-place, no COW
+        p = QPainter(image)
         p.setCompositionMode(QPainter.CompositionMode_Source)
-        p.drawPixmap(dx1 - ox, dy1 - oy, dirty_pm)
+        p.drawImage(dx1 - ox, dy1 - oy, dirty_img)
         p.end()
-        existing.setPixmap(pixmap)
+        existing.updateDirty(QRectF(dx1 - ox, dy1 - oy,
+                                    dirty_img.width(), dirty_img.height()))
 
     def _refresh_roi_item(self, roi, index, gof=None, lod_level=0):
-        """Create or update the QGraphicsPixmapItem for a single ROI."""
+        """Create or update the _ROIOverlayItem for a single ROI."""
         if gof is None:
             gof = self.layer_stack._global_opacity_factor
 
@@ -532,25 +600,23 @@ class ImageCanvas(QGraphicsView):
 
         rgba = np.ascontiguousarray(rgba)
         qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
-        pixmap = QPixmap.fromImage(qimg)
 
         disp_x = x1 + roi.offset_x
         disp_y = y1 + roi.offset_y
         if existing is not None:
-            existing.setPixmap(pixmap)
-            existing.setOffset(disp_x, disp_y)
+            existing.setImage(qimg.copy())
+            existing.setPos(disp_x, disp_y)
             existing.setZValue(1 + index * 0.001)
         else:
-            item = QGraphicsPixmapItem(pixmap)
-            item.setOffset(disp_x, disp_y)
+            item = _ROIOverlayItem()
+            item.setImage(qimg.copy())
+            item.setPos(disp_x, disp_y)
             item.setZValue(1 + index * 0.001)
-            item.setAcceptedMouseButtons(Qt.NoButton)
             self._scene.addItem(item)
             self._roi_items[rid] = item
             existing = item
 
         if scale_factor > 1:
-            existing.setTransformOriginPoint(x1, y1)
             existing.setScale(scale_factor)
         else:
             existing.setScale(1)

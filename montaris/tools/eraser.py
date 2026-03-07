@@ -14,6 +14,8 @@ class EraserTool(BaseTool):
         self._last_pos = None
         self._snapshot = None
         self._stroke_bbox = None
+        self._cached_circle = None
+        self._cached_circle_size = -1
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not hasattr(layer, 'mask'):
@@ -62,13 +64,20 @@ class EraserTool(BaseTool):
         self._stroke_bbox = None
         canvas._update_selection_highlights()
 
+    def _get_circle(self):
+        """Return cached circle mask, recomputing only when size changes."""
+        if self._cached_circle_size != self.size:
+            r = self.size // 2
+            y, x = np.ogrid[-r:r + 1, -r:r + 1]
+            self._cached_circle = (x * x + y * y <= r * r)
+            self._cached_circle_size = self.size
+        return self._cached_circle
+
     def _erase(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
         r = self.size // 2
         h, w = layer.mask.shape
-
-        y, x = np.ogrid[-r:r + 1, -r:r + 1]
-        circle = x * x + y * y <= r * r
+        circle = self._get_circle()
 
         y1 = max(0, cy - r)
         y2 = min(h, cy + r + 1)
@@ -97,7 +106,7 @@ class EraserTool(BaseTool):
         x1, y1 = p1.x(), p1.y()
         x2, y2 = p2.x(), p2.y()
         dist = max(abs(x2 - x1), abs(y2 - y1))
-        steps = max(1, int(dist / max(1, self.size // 3)))
+        steps = max(1, int(dist / max(1, self.size // 2)))
         for i in range(steps + 1):
             t = i / max(1, steps)
             x = x1 + (x2 - x1) * t
