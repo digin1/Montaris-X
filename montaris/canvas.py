@@ -511,6 +511,7 @@ class ImageCanvas(QGraphicsView):
         self._pending_dirty.pop(id(layer), None)
         self._refresh_roi_item(layer, index)
         self._roi_lod[rid] = 0
+        self.flash_progress()
         if layer in self._selection.layers:
             self._update_selection_highlights()
 
@@ -547,10 +548,6 @@ class ImageCanvas(QGraphicsView):
         for lid, (layer, bbox) in pending.items():
             self._render_dirty_region(layer, bbox, lod_level=lod)
         self._report_render((time.perf_counter() - t0) * 1000)
-        # Brief progress flash during active painting
-        self._progress_bar.setRange(0, 0)
-        self._progress_bar.show()
-        self._progress_hide_timer.start(400)
 
     def _render_dirty_region(self, layer, dirty_bbox, lod_level=0):
         """Render a single dirty region onto the layer's pixmap item."""
