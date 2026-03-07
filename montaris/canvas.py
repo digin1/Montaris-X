@@ -439,27 +439,31 @@ class ImageCanvas(QGraphicsView):
                     continue
                 fill_mode = getattr(roi, 'fill_mode', 'solid')
                 eff_opacity = roi.opacity * gof
+                # Snapshot mask crop on main thread — workers must not
+                # read the shared roi.mask while the main thread may
+                # modify it (e.g. during processEvents).
+                y1, y2, x1, x2 = bbox
+                mask_crop = roi.mask[y1:y2, x1:x2].copy()
                 fut = get_pool().submit(
-                    _compute_roi_rgba, roi.mask, roi.color, eff_opacity,
-                    fill_mode, bbox, target_lod, roi.offset_x, roi.offset_y,
+                    _compute_roi_rgba_from_crop, mask_crop, roi.color,
+                    eff_opacity, fill_mode, target_lod,
+                    x1 + roi.offset_x, y1 + roi.offset_y,
                 )
                 futures.append((idx, roi, target_lod, fut))
 
             for job_i, (idx, roi, target_lod, fut) in enumerate(futures):
                 rid = id(roi)
                 if fut is None:
-                    # Not visible or no bbox — handle scene cleanup
+                    # Not visible or no bbox — hide item
                     existing = self._roi_items.get(rid)
                     if existing is not None:
-                        self._scene.removeItem(self._roi_items.pop(rid))
+                        existing.setVisible(False)
                 else:
                     result = fut.result()
                     self._apply_roi_rgba_result(roi, idx, result)
                 self._roi_lod[rid] = target_lod
                 if show_progress:
                     self._progress_bar.setValue(job_i + 1)
-                    if (job_i + 1) % 10 == 0:
-                        QApplication.processEvents()
         else:
             # Sequential path for small counts
             for job_i, (idx, roi, target_lod) in enumerate(visible_jobs):
@@ -536,11 +540,17 @@ class ImageCanvas(QGraphicsView):
         """Render all accumulated dirty regions."""
         pending = self._pending_dirty
         self._pending_dirty = {}
+        if not pending:
+            return
         lod = self._current_lod_level()
         t0 = time.perf_counter()
         for lid, (layer, bbox) in pending.items():
             self._render_dirty_region(layer, bbox, lod_level=lod)
         self._report_render((time.perf_counter() - t0) * 1000)
+        # Brief progress flash during active painting
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.show()
+        self._progress_hide_timer.start(400)
 
     def _render_dirty_region(self, layer, dirty_bbox, lod_level=0):
         """Render a single dirty region onto the layer's pixmap item."""
@@ -642,13 +652,13 @@ class ImageCanvas(QGraphicsView):
 
         if not roi.visible:
             if existing is not None:
-                self._scene.removeItem(self._roi_items.pop(rid))
+                existing.setVisible(False)
             return
 
         bbox = roi.get_bbox()  # cached
         if bbox is None:
             if existing is not None:
-                self._scene.removeItem(self._roi_items.pop(rid))
+                existing.setVisible(False)
             return
 
         y1, y2, x1, x2 = bbox
@@ -696,6 +706,7 @@ class ImageCanvas(QGraphicsView):
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
             existing.setZValue(1 + index * 0.001)
+            existing.setVisible(True)
         else:
             item = _ROIOverlayItem()
             item.setImage(qimg.copy())
@@ -722,6 +733,7 @@ class ImageCanvas(QGraphicsView):
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
             existing.setZValue(1 + index * 0.001)
+            existing.setVisible(True)
         else:
             item = _ROIOverlayItem()
             item.setImage(qimg.copy())
@@ -1175,17 +1187,15 @@ def _compute_edge(mask):
     return filled ^ binary_erosion(filled)
 
 
-def _compute_roi_rgba(mask, color, opacity, fill_mode, bbox, lod_level, offset_x, offset_y):
-    """Pure numpy/scipy computation of ROI RGBA — no Qt, thread-safe.
+def _compute_roi_rgba_from_crop(mask_crop, color, opacity, fill_mode, lod_level, disp_x, disp_y):
+    """Pure numpy/scipy computation of ROI RGBA from a pre-cropped mask.
 
-    Returns (rgba_array, disp_x, disp_y, scale_factor) or None.
+    Thread-safe: operates only on the owned mask_crop copy.
+    Returns (rgba_array, width, height, disp_x, disp_y, scale_factor).
     """
-    y1, y2, x1, x2 = bbox
-    bh, bw = y2 - y1, x2 - x1
+    bh, bw = mask_crop.shape
     r, g, b = color
     effective_opacity = int(opacity)
-
-    mask_crop = mask[y1:y2, x1:x2]
 
     scale_factor = 1
     if lod_level > 0:
@@ -1215,8 +1225,6 @@ def _compute_roi_rgba(mask, color, opacity, fill_mode, bbox, lod_level, offset_x
         rgba[painted] = [r, g, b, effective_opacity]
 
     rgba = np.ascontiguousarray(rgba)
-    disp_x = x1 + offset_x
-    disp_y = y1 + offset_y
     return (rgba, bw, bh, disp_x, disp_y, scale_factor)
 
 
