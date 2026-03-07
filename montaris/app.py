@@ -876,33 +876,29 @@ class MontarisApp(QMainWindow):
         self.display_panel.set_channels(names)
 
     def close_image(self):
-        """Close the current image and all ROIs, with save prompt."""
+        """Close the current image, prompting user about ROIs."""
         if self.layer_stack.image_layer is None:
             return
 
+        clear_rois = False
         if self.layer_stack.roi_layers:
-            reply = QMessageBox.question(
+            from montaris.widgets.alert_modal import show_alert
+            result = show_alert(
                 self, "Close Image",
-                "Save ROIs before closing?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                QMessageBox.Save,
+                "You have ROIs. What would you like to do?",
+                ["Save ROIs & Clear All", "Keep ROIs", "Cancel"],
             )
-            if reply == QMessageBox.Cancel:
+            if result == "Cancel":
                 return
-            if reply == QMessageBox.Save:
+            if result == "Save ROIs & Clear All":
                 self.save_rois()
+                clear_rois = True
 
-        self.canvas._selection.clear()
-        self.layer_stack.set_image(None)
+        # Clear image
+        self.layer_stack.image_layer = None
         self.canvas.refresh_image()
-        self.canvas.refresh_overlays()
-        self.layer_panel.refresh()
-        self.undo_stack.clear()
         self.minimap.set_image(None)
         self.adjustments_panel.set_image_data(None)
-        self.properties_panel.set_layer(None)
-        self.canvas._active_layer = None
-        # Clear image stack
         self._documents.clear()
         self._active_doc_index = -1
         self._doc_combo.blockSignals(True)
@@ -911,8 +907,19 @@ class MontarisApp(QMainWindow):
         self._composite_mode = False
         self.display_panel.composite_cb.setChecked(False)
         self._update_display_channels()
+        self.undo_stack.clear()
+
+        if clear_rois:
+            self.canvas._selection.clear()
+            self.layer_stack.roi_layers.clear()
+            self.layer_stack._color_index = 0
+            self.canvas._active_layer = None
+            self.properties_panel.set_layer(None)
+
+        self.canvas.refresh_overlays()
+        self.layer_panel.refresh()
         self.setWindowTitle("Montaris-X")
-        self.statusbar.showMessage("Image closed")
+        self.statusbar.showMessage("Image closed" + (" (ROIs kept)" if not clear_rois else ""))
 
     def load_rois(self):
         if self.layer_stack.image_layer is None:
