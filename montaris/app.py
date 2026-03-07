@@ -882,13 +882,13 @@ class MontarisApp(QMainWindow):
 
         clear_rois = False
         if self.layer_stack.roi_layers:
-            from montaris.widgets.alert_modal import show_alert
-            result = show_alert(
+            from montaris.widgets.alert_modal import AlertModal
+            result = AlertModal.confirm(
                 self, "Close Image",
                 "You have ROIs. What would you like to do?",
                 ["Save ROIs & Clear All", "Keep ROIs", "Cancel"],
             )
-            if result == "Cancel":
+            if result == "Cancel" or result is None:
                 return
             if result == "Save ROIs & Clear All":
                 self.save_rois()
