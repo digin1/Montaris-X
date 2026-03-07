@@ -841,11 +841,16 @@ class MontarisApp(QMainWindow):
             self.layer_stack.image_layer = new_layer
             self.canvas.refresh_image()
         else:
-            # First image — full reset
+            # First image — set image, preserve any existing ROIs
             self._downsample_factor = ds_factor
-            self.canvas._selection.clear()
-            self.canvas._active_layer = None
-            self.layer_stack.set_image(new_layer)
+            has_rois = bool(self.layer_stack.roi_layers)
+            if has_rois:
+                self.layer_stack.image_layer = new_layer
+                self.layer_stack.changed.emit()
+            else:
+                self.canvas._selection.clear()
+                self.canvas._active_layer = None
+                self.layer_stack.set_image(new_layer)
             self.canvas.refresh_image()
             self.canvas.fit_to_window()
             self.layer_panel.refresh()
