@@ -361,27 +361,31 @@ class MoveTool(BaseTool):
             # Use session snapshot for full pixel data (preserves OOB-recoverable pixels)
             session_snap = self._session_snapshots.get(lid)
             session_bb = self._session_bboxes.get(lid)
+            cum_dx, cum_dy = self._cumulative_offset.get(lid, (0, 0))
             if session_snap is not None and session_bb is not None:
                 ss_y1, ss_y2, ss_x1, ss_x2 = session_bb
                 crop = session_snap[ss_y1:ss_y2, ss_x1:ss_x2]
                 ch, cw = ss_y2 - ss_y1, ss_x2 - ss_x1
                 rgba = np.zeros((ch, cw, 4), dtype=np.uint8)
                 rgba[crop > 0] = [r, g, b, eff]
+                # Position at current location (original + cumulative offset)
+                off_x = ss_x1 + cum_dx
+                off_y = ss_y1 + cum_dy
             else:
                 rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
                 rgba[snap_data > 0] = [r, g, b, eff]
-                ss_x1, ss_y1 = sx1, sy1
+                off_x = sx1 + cum_dx
+                off_y = sy1 + cum_dy
                 ch, cw = bh, bw
             rgba = np.ascontiguousarray(rgba)
-            from PySide6.QtGui import QImage, QPixmap
             qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
             item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
-            item.setOffset(ss_x1, ss_y1)
+            item.setOffset(off_x, off_y)
             item.setZValue(z)
             item.setAcceptedMouseButtons(Qt.NoButton)
             scene.addItem(item)
             self._preview_items.append(item)
-            self._preview_offsets.append((ss_x1, ss_y1))
+            self._preview_offsets.append((off_x, off_y))
             self._temp_scene_items.append(item)
 
     def _create_component_previews(self, canvas):
