@@ -277,15 +277,15 @@ class MontarisApp(QMainWindow):
         # Import submenu
         import_menu = file_menu.addMenu("Import")
 
-        import_ij_act = QAction("ImageJ ROI(s) (.roi)...", self)
+        import_ij_act = QAction("ROI from .roi File(s)...", self)
         import_ij_act.triggered.connect(self.import_imagej_roi)
         import_menu.addAction(import_ij_act)
 
-        import_png_act = QAction("PNG Mask(s)...", self)
+        import_png_act = QAction("ROI from PNG Mask(s)...", self)
         import_png_act.triggered.connect(self.import_png_masks)
         import_menu.addAction(import_png_act)
 
-        import_zip_act = QAction("ROI ZIP Archive...", self)
+        import_zip_act = QAction("ROI from ZIP (.roi + .png)...", self)
         import_zip_act.triggered.connect(self.import_roi_zip)
         import_menu.addAction(import_zip_act)
 
@@ -296,20 +296,18 @@ class MontarisApp(QMainWindow):
         export_ij_single_act.triggered.connect(self.export_active_imagej_roi)
         export_menu.addAction(export_ij_single_act)
 
-        export_ij_act = QAction("All ROIs as ImageJ .roi...", self)
+        export_ij_act = QAction("All ROIs as .roi Files...", self)
         export_ij_act.triggered.connect(self.export_imagej_rois)
         export_menu.addAction(export_ij_act)
 
-        export_menu.addSeparator()
-
-        export_act = QAction("All ROIs as PNG...", self)
+        export_act = QAction("All ROIs as PNG Mask(s)...", self)
         export_act.setShortcut(QKeySequence("Ctrl+E"))
         export_act.triggered.connect(self.export_roi_png)
         export_menu.addAction(export_act)
 
         export_menu.addSeparator()
 
-        export_zip_act = QAction("All ROIs as ZIP...", self)
+        export_zip_act = QAction("All ROIs as ZIP (.roi)...", self)
         export_zip_act.triggered.connect(self.export_all_rois_zip)
         export_menu.addAction(export_zip_act)
 
