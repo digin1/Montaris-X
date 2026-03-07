@@ -166,8 +166,8 @@ class ToolPanel(QWidget):
         )
         layout.addWidget(file_label)
 
-        montage_btn = QPushButton("🖼️  Load Montage")
-        montage_btn.setToolTip("Open a montage image")
+        montage_btn = QPushButton("🖼️  Load Image(s)")
+        montage_btn.setToolTip("Open montage or image file(s)")
         montage_btn.clicked.connect(lambda: QTimer.singleShot(0, self.open_montage_requested.emit))
         layout.addWidget(montage_btn)
 
