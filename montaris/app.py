@@ -484,7 +484,7 @@ class MontarisApp(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
         # Brush size in toolbar — synced with tool_panel
-        toolbar.addWidget(QLabel(" Size: "))
+        toolbar.addWidget(QLabel(" Brush Size: "))
         tb_size_slider = QSlider(Qt.Horizontal)
         tb_size_slider.setRange(1, 500)
         tb_size_slider.setValue(100)
