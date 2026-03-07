@@ -662,22 +662,22 @@ class LayerPanel(QWidget):
             return
         from PySide6.QtWidgets import QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QComboBox
         dlg = QDialog(self)
-        dlg.setWindowTitle("Bin ROI")
+        dlg.setWindowTitle("Bin ROI — Split into Grid")
         form = QFormLayout(dlg)
 
         h_spin = QSpinBox()
-        h_spin.setRange(2, 64)
-        h_spin.setValue(2)
-        form.addRow("Horizontal bin:", h_spin)
+        h_spin.setRange(2, 512)
+        h_spin.setValue(10)
+        form.addRow("Columns (horizontal):", h_spin)
 
         v_spin = QSpinBox()
-        v_spin.setRange(2, 64)
-        v_spin.setValue(2)
-        form.addRow("Vertical bin:", v_spin)
+        v_spin.setRange(2, 512)
+        v_spin.setValue(10)
+        form.addRow("Rows (vertical):", v_spin)
 
         method_combo = QComboBox()
-        method_combo.addItems(["Average (threshold)", "Max"])
-        form.addRow("Method:", method_combo)
+        method_combo.addItems(["Any pixel (Max)", "Majority (Average)"])
+        form.addRow("Include cell if:", method_combo)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept)
@@ -693,43 +693,57 @@ class LayerPanel(QWidget):
         mask = roi.mask
         h, w = mask.shape
 
-        # Trim to exact multiple
-        h_trim = (h // by) * by
-        w_trim = (w // bx) * bx
-        trimmed = mask[:h_trim, :w_trim]
+        # Divide mask into grid cells, create one ROI per non-empty cell
+        rows = (h + by - 1) // by
+        cols = (w + bx - 1) // bx
+        count = 0
+        insert_at = roi_index + 1
 
-        # Bin down
-        reshaped = trimmed.reshape(h_trim // by, by, w_trim // bx, bx)
-        if method.startswith("Max"):
-            binned = reshaped.max(axis=(1, 3))
-        else:
-            binned = reshaped.mean(axis=(1, 3))
-            binned = (binned > 127).astype(np.uint8) * 255
+        for gy in range(rows):
+            for gx in range(cols):
+                y0 = gy * by
+                y1 = min(y0 + by, h)
+                x0 = gx * bx
+                x1 = min(x0 + bx, w)
+                cell = mask[y0:y1, x0:x1]
 
-        # Scale back up to original size (nearest neighbor — keeps blocky bins)
-        result = np.zeros_like(mask)
-        scaled = np.repeat(np.repeat(binned, by, axis=0), bx, axis=1)
-        rh, rw = min(h, scaled.shape[0]), min(w, scaled.shape[1])
-        result[:rh, :rw] = scaled[:rh, :rw]
+                # Check if cell has mask content
+                if method.startswith("Any"):
+                    has_content = cell.max() > 0
+                else:
+                    has_content = cell.mean() > 127
 
-        # Create new ROI with binned result, keep original unchanged
-        new_name = generate_unique_roi_name(f"{roi.name} (bin {bx}x{by})", self.layer_stack.roi_layers)
-        new_roi = ROILayer(new_name, w, h)
-        new_roi.mask = result
-        new_roi.opacity = roi.opacity
-        new_roi.fill_mode = roi.fill_mode
-        self.layer_stack.insert_roi(roi_index + 1, new_roi)
+                if not has_content:
+                    continue
+
+                # Create full-size mask with only this cell's content
+                cell_mask = np.zeros_like(mask)
+                cell_mask[y0:y1, x0:x1] = cell
+                name = generate_unique_roi_name(
+                    f"{roi.name}_r{gy}c{gx}", self.layer_stack.roi_layers
+                )
+                new_roi = ROILayer(name, w, h)
+                new_roi.mask = cell_mask
+                new_roi.opacity = roi.opacity
+                new_roi.fill_mode = roi.fill_mode
+                self.layer_stack.insert_roi(insert_at + count, new_roi)
+                count += 1
+
+        if count == 0:
+            return
 
         app = self.window()
         if hasattr(app, 'canvas'):
-            app.canvas.set_active_layer(new_roi)
+            last_roi = self.layer_stack.get_roi(insert_at)
+            if last_roi:
+                app.canvas.set_active_layer(last_roi)
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: (
                 app.canvas.refresh_overlays(),
                 self.refresh(),
             ))
         if hasattr(app, 'toast'):
-            app.toast.show(f"Created {new_name}", "success")
+            app.toast.show(f"Split into {count} ROI(s) ({bx}x{by} grid)", "success")
 
     def _change_color(self):
         """Open color palette dialog (B.12)."""
