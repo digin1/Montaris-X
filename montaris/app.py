@@ -1342,6 +1342,16 @@ class MontarisApp(QMainWindow):
             self.properties_panel.set_layer(layer)
 
     def undo(self):
+        # If polygon tool is mid-drawing, undo last vertex instead
+        tool = self.canvas._tool
+        if (tool is not None and getattr(tool, 'name', None) == 'Polygon'
+                and getattr(tool, '_vertices', None)):
+            tool._vertices.pop()
+            if tool._vertices:
+                self.canvas.draw_polygon_preview(tool._vertices)
+            else:
+                self.canvas.clear_polygon_preview()
+            return
         cmd = self.undo_stack.undo()
         if cmd:
             self._refresh_affected_layers(cmd)

@@ -46,10 +46,12 @@ class PolygonTool(BaseTool):
     def on_key_press(self, key, canvas):
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self.finish()
+            return True
         elif key == Qt.Key_Escape:
             self._vertices.clear()
             if canvas:
                 canvas.clear_polygon_preview()
+            return True
 
     def finish(self):
         if len(self._vertices) < 3 or self._active_layer is None:
