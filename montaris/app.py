@@ -1289,14 +1289,35 @@ class MontarisApp(QMainWindow):
     def undo(self):
         cmd = self.undo_stack.undo()
         if cmd:
-            self.canvas.refresh_overlays()
+            self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
 
     def redo(self):
         cmd = self.undo_stack.redo()
         if cmd:
-            self.canvas.refresh_overlays()
+            self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
+
+    def _refresh_affected_layers(self, cmd):
+        """Refresh only the layers affected by an undo/redo command."""
+        layers = set()
+        if hasattr(cmd, 'commands'):
+            # CompoundUndoCommand
+            for sub in cmd.commands:
+                if hasattr(sub, 'roi_layer') and sub.roi_layer is not None:
+                    layers.add(sub.roi_layer)
+        elif hasattr(cmd, '_entries'):
+            # SnapshotUndoCommand
+            for layer, _, _ in cmd._entries:
+                layers.add(layer)
+        elif hasattr(cmd, 'roi_layer') and cmd.roi_layer is not None:
+            layers.add(cmd.roi_layer)
+
+        if layers:
+            for layer in layers:
+                self.canvas.refresh_active_overlay(layer)
+        else:
+            self.canvas.refresh_overlays()
 
     def _auto_select_roi_from_command(self, cmd):
         """Switch active layer to the ROI affected by an undo/redo command."""

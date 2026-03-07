@@ -74,6 +74,7 @@ class BrushTool(BaseTool):
                 commands.append(cmd)
 
         # Auto-overlap: zero other layers where we painted (C.7)
+        affected_layers = []
         sb = self._stroke_bbox
         if self.app._auto_overlap and sb is not None:
             sy1, sy2, sx1, sx2 = sb
@@ -90,18 +91,18 @@ class BrushTool(BaseTool):
                             snap_crop, other_crop,
                         )
                         commands.append(cmd)
-            if len(commands) > 1:
-                canvas.refresh_overlays()
+                        affected_layers.append(other)
 
         if commands:
             if len(commands) == 1:
                 self.app.undo_stack.push(commands[0])
-                canvas.refresh_active_overlay(layer)
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
-                # refresh_overlays already called above for auto-overlap
+            # Refresh only affected layers instead of all overlays
+            canvas.refresh_active_overlay(layer)
+            for other in affected_layers:
+                canvas.refresh_active_overlay(other)
         else:
-            # No change, but still do a proper refresh for edge rendering
             canvas.refresh_active_overlay(layer)
 
         self._snapshot = None
