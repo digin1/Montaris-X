@@ -714,11 +714,14 @@ class LayerPanel(QWidget):
 
         roi.mask = result
         roi.invalidate_bbox()
-        self.refresh()
-        self.visibility_changed.emit()
         app = self.window()
         if hasattr(app, 'canvas'):
-            app.canvas.refresh_overlays()
+            app.canvas.set_active_layer(roi)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: (
+                app.canvas.refresh_overlays(),
+                self.refresh(),
+            ))
         if hasattr(app, 'toast'):
             app.toast.show(f"Binned {roi.name} ({bx}x{by})", "success")
 
