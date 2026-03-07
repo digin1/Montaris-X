@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
@@ -290,6 +291,7 @@ class ImageCanvas(QGraphicsView):
         self._tint_color = tint_color
 
     def refresh_image(self):
+        t0 = time.perf_counter()
         if self._image_item:
             self._scene.removeItem(self._image_item)
             self._image_item = None
@@ -312,6 +314,7 @@ class ImageCanvas(QGraphicsView):
         h, w = img_layer.data.shape[:2]
         m = min(w, h) // 4  # 25% margin
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
+        self._report_render((time.perf_counter() - t0) * 1000)
 
     def refresh_image_from_array(self, data):
         """Display an arbitrary numpy array as the background image."""
@@ -345,8 +348,23 @@ class ImageCanvas(QGraphicsView):
         finally:
             self._refreshing = False
 
+    def _report_render(self, ms):
+        """Report a frame to the perf monitor if available."""
+        win = self.parent()
+        if win and hasattr(win, 'perf_monitor'):
+            win.perf_monitor.record_frame()
+            win.perf_monitor.record_render_time(ms)
+            # Update tile cache info
+            img = self.layer_stack.image_layer
+            if img and img._tile_pyramid:
+                cache = img._tile_pyramid._cache
+                win.perf_monitor.set_tile_cache_info(f"{cache.size}/{cache._max_size}")
+            else:
+                win.perf_monitor.set_tile_cache_info("0")
+
     def _do_refresh_overlays(self):
         """Internal: actual rebuild of all ROI pixmap items."""
+        t0 = time.perf_counter()
         # Cancel any pending partial dirty — full rebuild supersedes
         self._pending_dirty.clear()
         if self.layer_stack.image_layer is None:
@@ -414,6 +432,7 @@ class ImageCanvas(QGraphicsView):
         if show_progress:
             self._progress_bar.hide()
 
+        self._report_render((time.perf_counter() - t0) * 1000)
         self._update_selection_highlights()
 
     def flash_progress(self, message=None):
@@ -479,8 +498,10 @@ class ImageCanvas(QGraphicsView):
         pending = self._pending_dirty
         self._pending_dirty = {}
         lod = self._current_lod_level()
+        t0 = time.perf_counter()
         for lid, (layer, bbox) in pending.items():
             self._render_dirty_region(layer, bbox, lod_level=lod)
+        self._report_render((time.perf_counter() - t0) * 1000)
 
     def _render_dirty_region(self, layer, dirty_bbox, lod_level=0):
         """Render a single dirty region onto the layer's pixmap item."""

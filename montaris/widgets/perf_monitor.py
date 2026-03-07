@@ -13,10 +13,6 @@ class PerfMonitor(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        header = QLabel("Performance")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
-
         self.fps_label = QLabel("FPS: -")
         layout.addWidget(self.fps_label)
 
@@ -29,10 +25,14 @@ class PerfMonitor(QWidget):
         self.tile_cache_label = QLabel("Tile Cache: -")
         layout.addWidget(self.tile_cache_label)
 
+        cpu_count = os.cpu_count() or 1
+        self.cpu_label = QLabel(f"CPU Cores: {cpu_count} (using 1)")
+        layout.addWidget(self.cpu_label)
+
         layout.addStretch()
 
         self._frame_times = []
-        self._last_render_ms = 0.0
+        self._render_times = []
         self._tile_cache_info = ""
 
         self._timer = QTimer(self)
@@ -43,7 +43,7 @@ class PerfMonitor(QWidget):
         self._frame_times.append(time.time())
 
     def record_render_time(self, ms):
-        self._last_render_ms = ms
+        self._render_times.append(ms)
 
     def set_tile_cache_info(self, info):
         self._tile_cache_info = info
@@ -55,7 +55,13 @@ class PerfMonitor(QWidget):
         fps = len(self._frame_times)
         self.fps_label.setText(f"FPS: {fps}")
 
-        self.render_label.setText(f"Render: {self._last_render_ms:.1f} ms")
+        # Render: average of recent render times
+        if self._render_times:
+            avg = sum(self._render_times) / len(self._render_times)
+            self.render_label.setText(f"Render: {avg:.1f} ms")
+            self._render_times.clear()
+        else:
+            self.render_label.setText("Render: idle")
 
         # Memory
         try:
