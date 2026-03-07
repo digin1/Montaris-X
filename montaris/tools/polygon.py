@@ -1,8 +1,11 @@
+import math
 import numpy as np
 from PIL import Image, ImageDraw
 from PySide6.QtCore import Qt
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
+
+CLOSE_DISTANCE = 10  # pixels (screen space) to snap-close polygon
 
 
 class PolygonTool(BaseTool):
@@ -19,7 +22,18 @@ class PolygonTool(BaseTool):
             return
         self._active_layer = layer
         self._canvas = canvas
-        self._vertices.append((int(pos.x()), int(pos.y())))
+        px, py = int(pos.x()), int(pos.y())
+
+        # If 3+ vertices and clicking near the start point, close the polygon
+        if len(self._vertices) >= 3:
+            sx, sy = self._vertices[0]
+            scale = canvas.transform().m11() or 1.0
+            dist = math.hypot(px - sx, py - sy) * scale
+            if dist <= CLOSE_DISTANCE:
+                self.finish()
+                return
+
+        self._vertices.append((px, py))
         canvas.draw_polygon_preview(self._vertices)
 
     def on_move(self, pos, layer, canvas):
