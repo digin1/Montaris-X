@@ -488,19 +488,25 @@ class MoveTool(BaseTool):
 
     def _auto_scroll(self, pos, canvas):
         from PySide6.QtCore import QPointF as _QPointF
+        img = canvas.layer_stack.image_layer
+        if img is None:
+            return
+        ih, iw = img.data.shape[:2]
+        # Visible scene rect
+        vr = canvas.mapToScene(canvas.viewport().rect()).boundingRect()
         vp = canvas.viewport()
         vp_pos = canvas.mapFromScene(_QPointF(pos.x(), pos.y()))
         margin = 50
         scroll_speed = 20
         hs = canvas.horizontalScrollBar()
         vs = canvas.verticalScrollBar()
-        if vp_pos.x() < margin:
+        if vp_pos.x() < margin and vr.left() > 0:
             hs.setValue(hs.value() - scroll_speed)
-        elif vp_pos.x() > vp.width() - margin:
+        elif vp_pos.x() > vp.width() - margin and vr.right() < iw:
             hs.setValue(hs.value() + scroll_speed)
-        if vp_pos.y() < margin:
+        if vp_pos.y() < margin and vr.top() > 0:
             vs.setValue(vs.value() - scroll_speed)
-        elif vp_pos.y() > vp.height() - margin:
+        elif vp_pos.y() > vp.height() - margin and vr.bottom() < ih:
             vs.setValue(vs.value() + scroll_speed)
 
     # ------------------------------------------------------------------
