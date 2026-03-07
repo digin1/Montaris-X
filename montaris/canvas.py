@@ -895,7 +895,7 @@ class ImageCanvas(QGraphicsView):
         main_win = self.parent()
         if main_win and hasattr(main_win, 'tool_panel'):
             slider = main_win.tool_panel.size_slider
-            slider.setValue(max(1, min(500, slider.value() + delta)))
+            slider.setValue(max(1, min(2000, slider.value() + delta)))
 
 
 # ------------------------------------------------------------------

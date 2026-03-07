@@ -84,7 +84,7 @@ class ToolPanel(QWidget):
 
         # Brush size — hidden slider used as internal state (UI in toolbar)
         self.size_slider = QSlider(Qt.Horizontal)
-        self.size_slider.setRange(1, 500)
+        self.size_slider.setRange(1, 2000)
         self.size_slider.setValue(100)
         self.size_slider.valueChanged.connect(self._on_size_changed)
         self.size_slider.setVisible(False)

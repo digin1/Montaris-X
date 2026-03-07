@@ -6,15 +6,15 @@ from PySide6.QtCore import QPointF
 from montaris.layers import ROILayer
 
 
-class TestBrushSize500:
+class TestBrushSize:
     def test_large_brush_size(self, qapp, app_with_image):
         app = app_with_image
         app.tool_panel._select_tool('Brush')
-        app.tool_panel.size_slider.setValue(500)
-        assert app.tool_panel._current_tool.size == 500
+        app.tool_panel.size_slider.setValue(2000)
+        assert app.tool_panel._current_tool.size == 2000
 
-    def test_slider_range_500(self, qapp, app_with_image):
-        assert app_with_image.tool_panel.size_slider.maximum() == 500
+    def test_slider_range(self, qapp, app_with_image):
+        assert app_with_image.tool_panel.size_slider.maximum() == 2000
 
 
 class TestBucketFillTolerance:
