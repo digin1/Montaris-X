@@ -25,8 +25,10 @@ class PerfMonitor(QWidget):
         self.tile_cache_label = QLabel("Tile Cache: -")
         layout.addWidget(self.tile_cache_label)
 
+        from montaris.core.workers import worker_count
         cpu_count = os.cpu_count() or 1
-        self.cpu_label = QLabel(f"CPU Cores: {cpu_count} (using 1)")
+        pool_size = worker_count()
+        self.cpu_label = QLabel(f"CPU Cores: {cpu_count} (pool: {pool_size})")
         layout.addWidget(self.cpu_label)
 
         layout.addStretch()

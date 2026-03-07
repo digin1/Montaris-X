@@ -64,23 +64,41 @@ class DisplayCompositor:
             return self._to_rgb_from_float(projected)
 
         if mode == DisplayMode.COMPOSITE_RGB:
+            if len(channels) > 2:
+                from montaris.core.workers import get_pool
+                futures = [get_pool().submit(self._normalize, ch) for ch in channels]
+                norms = [f.result() for f in futures]
+            else:
+                norms = [self._normalize(ch) for ch in channels]
             result = np.zeros((h, w, 3), dtype=np.float32)
-            for i, ch in enumerate(channels):
-                norm = self._normalize(ch)
+            for i, norm in enumerate(norms):
                 if i < 3:
                     result[:, :, i] = norm
                 else:
-                    # Extra channels added to all
                     result += norm[:, :, np.newaxis] / 3.0
             result = np.clip(result * 255, 0, 255).astype(np.uint8)
             return result
 
         if mode == DisplayMode.FALSE_COLOR:
-            result = np.zeros((h, w, 3), dtype=np.float32)
-            for i, ch in enumerate(channels):
-                norm = self._normalize(ch)
-                lut = self.channel_luts.get(i, FALSE_COLOR_LUTS[i % len(FALSE_COLOR_LUTS)])
-                result += norm[:, :, np.newaxis] * lut[np.newaxis, np.newaxis, :]
+            luts = [self.channel_luts.get(i, FALSE_COLOR_LUTS[i % len(FALSE_COLOR_LUTS)])
+                    for i in range(len(channels))]
+            if len(channels) > 2:
+                from montaris.core.workers import get_pool
+
+                def _norm_and_tint(ch, lut):
+                    norm = self._normalize(ch)
+                    return norm[:, :, np.newaxis] * lut[np.newaxis, np.newaxis, :]
+
+                futures = [get_pool().submit(_norm_and_tint, ch, luts[i])
+                           for i, ch in enumerate(channels)]
+                result = np.zeros((h, w, 3), dtype=np.float32)
+                for f in futures:
+                    result += f.result()
+            else:
+                result = np.zeros((h, w, 3), dtype=np.float32)
+                for i, ch in enumerate(channels):
+                    norm = self._normalize(ch)
+                    result += norm[:, :, np.newaxis] * luts[i][np.newaxis, np.newaxis, :]
             result = np.clip(result * 255, 0, 255).astype(np.uint8)
             return result
 

@@ -402,32 +402,71 @@ class ImageCanvas(QGraphicsView):
         show_progress = n > 5
         if show_progress:
             from PySide6.QtWidgets import QApplication
-            self._progress_bar.setRange(0, n)
-            self._progress_bar.setValue(0)
-            self._progress_bar.show()
 
+        # Collect visible ROIs and cull off-screen ones
+        visible_jobs = []  # (index, roi, target_lod)
         for i, roi in enumerate(rois):
             rid = id(roi)
             roi.invalidate_bbox()
-            # Viewport cull non-active ROIs
             if use_culling and roi != self._active_layer:
                 dbbox = roi.get_display_bbox()
                 if dbbox is not None:
                     y1, y2, x1, x2 = dbbox
                     if not vp_rect.intersects(QRectF(x1, y1, x2 - x1, y2 - y1)):
                         self._roi_stale.add(rid)
-                        if show_progress:
-                            self._progress_bar.setValue(i + 1)
                         continue
-
             self._roi_stale.discard(rid)
             target_lod = 0 if roi == self._active_layer else lod
-            self._refresh_roi_item(roi, i, gof, lod_level=target_lod)
-            self._roi_lod[rid] = target_lod
-            if show_progress:
-                self._progress_bar.setValue(i + 1)
-                if (i + 1) % 10 == 0:
-                    QApplication.processEvents()
+            visible_jobs.append((i, roi, target_lod))
+
+        nv = len(visible_jobs)
+        if show_progress and nv > 0:
+            self._progress_bar.setRange(0, nv)
+            self._progress_bar.setValue(0)
+            self._progress_bar.show()
+
+        # Parallel path: compute RGBA arrays in threads, apply on main thread
+        if nv > 3:
+            from montaris.core.workers import get_pool
+            futures = []
+            for idx, roi, target_lod in visible_jobs:
+                if not roi.visible:
+                    futures.append((idx, roi, target_lod, None))
+                    continue
+                bbox = roi.get_bbox()
+                if bbox is None:
+                    futures.append((idx, roi, target_lod, None))
+                    continue
+                fill_mode = getattr(roi, 'fill_mode', 'solid')
+                eff_opacity = roi.opacity * gof
+                fut = get_pool().submit(
+                    _compute_roi_rgba, roi.mask, roi.color, eff_opacity,
+                    fill_mode, bbox, target_lod, roi.offset_x, roi.offset_y,
+                )
+                futures.append((idx, roi, target_lod, fut))
+
+            for job_i, (idx, roi, target_lod, fut) in enumerate(futures):
+                rid = id(roi)
+                if fut is None:
+                    # Not visible or no bbox — handle scene cleanup
+                    existing = self._roi_items.get(rid)
+                    if existing is not None:
+                        self._scene.removeItem(self._roi_items.pop(rid))
+                else:
+                    result = fut.result()
+                    self._apply_roi_rgba_result(roi, idx, result)
+                self._roi_lod[rid] = target_lod
+                if show_progress:
+                    self._progress_bar.setValue(job_i + 1)
+                    if (job_i + 1) % 10 == 0:
+                        QApplication.processEvents()
+        else:
+            # Sequential path for small counts
+            for job_i, (idx, roi, target_lod) in enumerate(visible_jobs):
+                self._refresh_roi_item(roi, idx, gof, lod_level=target_lod)
+                self._roi_lod[id(roi)] = target_lod
+                if show_progress:
+                    self._progress_bar.setValue(job_i + 1)
 
         if show_progress:
             self._progress_bar.hide()
@@ -653,6 +692,32 @@ class ImageCanvas(QGraphicsView):
 
         disp_x = x1 + roi.offset_x
         disp_y = y1 + roi.offset_y
+        if existing is not None:
+            existing.setImage(qimg.copy())
+            existing.setPos(disp_x, disp_y)
+            existing.setZValue(1 + index * 0.001)
+        else:
+            item = _ROIOverlayItem()
+            item.setImage(qimg.copy())
+            item.setPos(disp_x, disp_y)
+            item.setZValue(1 + index * 0.001)
+            self._scene.addItem(item)
+            self._roi_items[rid] = item
+            existing = item
+
+        if scale_factor > 1:
+            existing.setScale(scale_factor)
+        else:
+            existing.setScale(1)
+
+    def _apply_roi_rgba_result(self, roi, index, result):
+        """Apply precomputed RGBA result to the scene (main thread only)."""
+        rid = id(roi)
+        existing = self._roi_items.get(rid)
+        rgba, bw, bh, disp_x, disp_y, scale_factor = result
+
+        qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
+
         if existing is not None:
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
@@ -1108,6 +1173,51 @@ def _compute_edge(mask):
     from scipy.ndimage import binary_erosion
     filled = mask > 0
     return filled ^ binary_erosion(filled)
+
+
+def _compute_roi_rgba(mask, color, opacity, fill_mode, bbox, lod_level, offset_x, offset_y):
+    """Pure numpy/scipy computation of ROI RGBA — no Qt, thread-safe.
+
+    Returns (rgba_array, disp_x, disp_y, scale_factor) or None.
+    """
+    y1, y2, x1, x2 = bbox
+    bh, bw = y2 - y1, x2 - x1
+    r, g, b = color
+    effective_opacity = int(opacity)
+
+    mask_crop = mask[y1:y2, x1:x2]
+
+    scale_factor = 1
+    if lod_level > 0:
+        factor = 1 << lod_level
+        th = (bh // factor) * factor
+        tw = (bw // factor) * factor
+        if th > 0 and tw > 0:
+            mask_crop = mask_crop[:th, :tw].reshape(
+                th // factor, factor, tw // factor, factor
+            ).max(axis=(1, 3))
+            bh, bw = th // factor, tw // factor
+            scale_factor = factor
+
+    rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+
+    if fill_mode == 'outline':
+        edge = _compute_edge(mask_crop)
+        rgba[edge] = [r, g, b, effective_opacity]
+    elif fill_mode == 'both':
+        fill_alpha = max(1, effective_opacity // 2)
+        painted = mask_crop > 0
+        rgba[painted] = [r, g, b, fill_alpha]
+        edge = _compute_edge(mask_crop)
+        rgba[edge] = [r, g, b, min(255, effective_opacity)]
+    else:
+        painted = mask_crop > 0
+        rgba[painted] = [r, g, b, effective_opacity]
+
+    rgba = np.ascontiguousarray(rgba)
+    disp_x = x1 + offset_x
+    disp_y = y1 + offset_y
+    return (rgba, bw, bh, disp_x, disp_y, scale_factor)
 
 
 def _composite_roi(combined, mask, color, opacity, fill_mode="solid"):

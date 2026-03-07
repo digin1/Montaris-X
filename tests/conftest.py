@@ -10,6 +10,13 @@ from montaris.app import MontarisApp, apply_dark_theme
 from montaris.layers import LayerStack, ImageLayer, ROILayer
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _shutdown_worker_pool():
+    yield
+    from montaris.core.workers import shutdown_pool
+    shutdown_pool()
+
+
 @pytest.fixture(scope="session")
 def qapp():
     app = QApplication.instance()
