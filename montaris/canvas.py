@@ -277,6 +277,7 @@ class ImageCanvas(QGraphicsView):
 
         for i, roi in enumerate(rois):
             rid = id(roi)
+            roi.invalidate_bbox()
             # Viewport cull non-active ROIs
             if use_culling and roi != self._active_layer:
                 bbox = roi.get_bbox()
@@ -299,6 +300,8 @@ class ImageCanvas(QGraphicsView):
 
         if show_progress:
             self._progress_bar.hide()
+
+        self._update_selection_highlights()
 
     def flash_progress(self, message=None):
         """Show a brief progress flash to indicate rasterization.
