@@ -58,12 +58,13 @@ class MiniMap(QWidget):
                     small = ((small.astype(np.float32) - mn) / (mx - mn) * 255).astype(np.uint8)
                 else:
                     small = np.zeros_like(small, dtype=np.uint8)
-            small = np.ascontiguousarray(small)
             sh, sw, sc = small.shape
             if sc >= 3:
-                qimg = QImage(small[:, :, :3].data, sw, sh, sw * 3, QImage.Format_RGB888)
+                small = np.ascontiguousarray(small[:, :, :3])
+                qimg = QImage(small.data, sw, sh, sw * 3, QImage.Format_RGB888)
             else:
-                qimg = QImage(small[:, :, 0].data, sw, sh, sw, QImage.Format_Grayscale8)
+                small = np.ascontiguousarray(small[:, :, 0])
+                qimg = QImage(small.data, sw, sh, sw, QImage.Format_Grayscale8)
         else:
             return
 

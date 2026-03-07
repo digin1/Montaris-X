@@ -1144,15 +1144,17 @@ def numpy_to_qimage(array):
         else:
             arr = np.ascontiguousarray(array)
 
+        if c == 1:
+            arr = np.ascontiguousarray(arr[:, :, 0])
+            img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+            return img.copy()
+
+        arr = np.ascontiguousarray(arr)
         if c == 3:
             img = QImage(arr.data, w, h, w * 3, QImage.Format_RGB888)
             return img.copy()
         elif c == 4:
             img = QImage(arr.data, w, h, w * 4, QImage.Format_RGBA8888)
-            return img.copy()
-        elif c == 1:
-            arr = arr[:, :, 0]
-            img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
             return img.copy()
 
     raise ValueError(f"Unsupported array shape: {array.shape}")

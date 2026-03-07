@@ -29,7 +29,8 @@ def _array_tile_to_qimage(tile_arr):
             else:
                 arr = np.zeros_like(tile_arr, dtype=np.uint8)
         else:
-            arr = np.ascontiguousarray(tile_arr)
+            arr = tile_arr
+        arr = np.ascontiguousarray(arr)
         img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
         return img.copy()
 
@@ -42,17 +43,20 @@ def _array_tile_to_qimage(tile_arr):
             else:
                 arr = np.zeros((h, w, c), dtype=np.uint8)
         else:
-            arr = np.ascontiguousarray(tile_arr)
+            arr = tile_arr
 
+        if c == 1:
+            arr = arr[:, :, 0]
+            arr = np.ascontiguousarray(arr)
+            img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+            return img.copy()
+
+        arr = np.ascontiguousarray(arr)
         if c == 3:
             img = QImage(arr.data, w, h, w * 3, QImage.Format_RGB888)
             return img.copy()
         elif c == 4:
             img = QImage(arr.data, w, h, w * 4, QImage.Format_RGBA8888)
-            return img.copy()
-        elif c == 1:
-            arr = arr[:, :, 0]
-            img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
             return img.copy()
 
     raise ValueError(f"Unsupported tile array shape: {tile_arr.shape}")
