@@ -25,7 +25,8 @@ class StampTool(BaseTool):
         self._snapshot = layer.mask.copy()
         self._stroke_bbox = None
         self._stamp(pos, layer)
-        canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
+        if self._stroke_bbox is not None:
+            canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
 
     def on_move(self, pos, layer, canvas):
         if not self._stamping or layer is None:
@@ -37,9 +38,9 @@ class StampTool(BaseTool):
         self._stamp_line(self._last_pos, pos, layer)
         self._last_pos = pos
         dy1 = max(0, min(ly, py) - hh)
-        dy2 = min(h, max(ly, py) - hh + self.height)
+        dy2 = min(h, max(ly, py) + hh + 1)
         dx1 = max(0, min(lx, px) - hw)
-        dx2 = min(w, max(lx, px) - hw + self.width)
+        dx2 = min(w, max(lx, px) + hw + 1)
         canvas.refresh_active_overlay_partial(layer, (dy1, dy2, dx1, dx2))
 
     def on_release(self, pos, layer, canvas):
@@ -89,7 +90,7 @@ class StampTool(BaseTool):
         x1, y1 = p1.x(), p1.y()
         x2, y2 = p2.x(), p2.y()
         dist = max(abs(x2 - x1), abs(y2 - y1))
-        step_size = max(1, min(self.width, self.height) // 3)
+        step_size = max(1, min(self.width, self.height) // 2)
         steps = max(1, int(dist / step_size))
         for i in range(steps + 1):
             t = i / max(1, steps)
