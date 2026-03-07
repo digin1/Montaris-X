@@ -380,6 +380,7 @@ class TransformTool(BaseTool):
         self._current_matrix = None
         for item in self._preview_items:
             item.resetTransform()
+            item.setVisible(False)  # hide until deferred rebuild re-renders
         self._preview_items.clear()
         # Remove temporary scene items (component mode)
         scene = canvas.scene()
@@ -596,11 +597,6 @@ class TransformTool(BaseTool):
         for item in self._temp_scene_items:
             scene.removeItem(item)
         self._temp_scene_items.clear()
-        # Restore visibility of hidden real items
-        for l, _ in getattr(self, '_hidden_layers', []):
-            rid = id(l)
-            if rid in canvas._roi_items:
-                canvas._roi_items[rid].setVisible(True)
         if re_render:
             lod = canvas._current_lod_level()
             for l, _ in getattr(self, '_hidden_layers', []):
@@ -612,6 +608,11 @@ class TransformTool(BaseTool):
                 except ValueError:
                     pass
             canvas._update_selection_highlights()
+        # Restore visibility after re-render (avoids old-pixmap flash)
+        for l, _ in getattr(self, '_hidden_layers', []):
+            rid = id(l)
+            if rid in canvas._roi_items:
+                canvas._roi_items[rid].setVisible(True)
         self._hidden_layers = []
 
     def _view_scale(self, canvas):
