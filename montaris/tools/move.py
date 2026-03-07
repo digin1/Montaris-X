@@ -85,27 +85,49 @@ class MoveTool(BaseTool):
                         return
 
                     if has_multiple:
-                        if (self._multi_comp_mask is not None
-                                and self._multi_comp_layer is layer
-                                and self._multi_comp_mask[my, mx]):
-                            self._component_mask = self._multi_comp_mask
+                        had_multi_sel = (self._multi_comp_mask is not None
+                                         and self._multi_comp_layer is layer
+                                         and self._multi_comp_mask[my, mx])
+                        if not had_multi_sel:
+                            self._clear_multi_selection(canvas)
+
+                        # Flatten offset before component move (mask-based)
+                        old_dx, old_dy = layer.offset_x, layer.offset_y
+                        if not layer.flatten_offset():
+                            return
+                        canvas._refresh_roi_item(layer, canvas.layer_stack.roi_layers.index(layer))
+
+                        # Redetect component in flattened mask (pixels shifted)
+                        layer_bbox = layer.get_bbox()
+                        if layer_bbox is None:
+                            return
+                        by1, by2, bx1, bx2 = layer_bbox
+
+                        if had_multi_sel and (old_dx != 0 or old_dy != 0):
+                            # Shift multi-comp mask to match flattened coords
+                            old_mask = self._multi_comp_mask
+                            new_mask = np.zeros_like(old_mask)
+                            oys, oxs = np.where(old_mask)
+                            nys, nxs = oys + old_dy, oxs + old_dx
+                            mh, mw = new_mask.shape
+                            v = (nys >= 0) & (nys < mh) & (nxs >= 0) & (nxs < mw)
+                            new_mask[nys[v], nxs[v]] = True
+                            self._multi_comp_mask = new_mask
+                            self._component_mask = new_mask
                             self._component_bbox = self._multi_comp_bbox()
                         else:
-                            self._clear_multi_selection(canvas)
+                            # Detect fresh component at post-flatten position
+                            comp = get_component_at(layer.mask, ix, iy, bbox=layer_bbox)
+                            if comp is None:
+                                return
+                            comp_crop = comp[by1:by2, bx1:bx2]
                             cys, cxs = np.where(comp_crop)
+                            if len(cys) == 0:
+                                return
                             comp_bb = (int(cys.min()) + by1, int(cys.max()) + 1 + by1,
                                        int(cxs.min()) + bx1, int(cxs.max()) + 1 + bx1)
                             self._component_mask = comp
                             self._component_bbox = comp_bb
-
-                        # Flatten offset before component move (mask-based)
-                        if not layer.flatten_offset():
-                            # Layer is fully OOB — can't do component move
-                            return
-                        canvas._refresh_roi_item(layer, canvas.layer_stack.roi_layers.index(layer))
-
-                        layer_bbox = layer.get_bbox()
-                        by1, by2, bx1, bx2 = layer_bbox
                         self._target_layers = [layer]
                         self._moving = True
                         self._start_pos = pos
