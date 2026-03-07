@@ -30,6 +30,13 @@ class ImageCanvas(QGraphicsView):
         self._brush_preview = None
         self._stamp_preview = None
 
+        # Throttled partial refresh for large brush strokes
+        self._pending_dirty = {}  # id(layer) -> (layer, (y1, y2, x1, x2))
+        self._dirty_timer = QTimer(self)
+        self._dirty_timer.setSingleShot(True)
+        self._dirty_timer.setInterval(16)  # ~60fps max
+        self._dirty_timer.timeout.connect(self._flush_dirty)
+
         self._tool = None
         self._active_layer = None
         self._is_panning = False
@@ -376,15 +383,36 @@ class ImageCanvas(QGraphicsView):
             self._update_selection_highlights()
 
     def refresh_active_overlay_partial(self, layer, dirty_bbox):
-        """Fast partial refresh: update only dirty region from mask data.
-
-        Renders solid fill only (no edge detection) for the dirty_bbox,
-        composited onto the existing pixmap. Pixel-accurate to the mask.
-        """
+        """Throttled partial refresh: accumulate dirty region, render on timer."""
         if layer is None or not hasattr(layer, 'mask'):
             return
         self._roi_stale.discard(id(layer))
 
+        dy1, dy2, dx1, dx2 = dirty_bbox
+        if dy2 <= dy1 or dx2 <= dx1:
+            return
+
+        lid = id(layer)
+        if lid in self._pending_dirty:
+            _, old = self._pending_dirty[lid]
+            oy1, oy2, ox1, ox2 = old
+            self._pending_dirty[lid] = (layer, (min(oy1, dy1), max(oy2, dy2),
+                                                 min(ox1, dx1), max(ox2, dx2)))
+        else:
+            self._pending_dirty[lid] = (layer, dirty_bbox)
+
+        if not self._dirty_timer.isActive():
+            self._dirty_timer.start()
+
+    def _flush_dirty(self):
+        """Render all accumulated dirty regions."""
+        pending = self._pending_dirty
+        self._pending_dirty = {}
+        for lid, (layer, bbox) in pending.items():
+            self._render_dirty_region(layer, bbox)
+
+    def _render_dirty_region(self, layer, dirty_bbox):
+        """Render a single dirty region onto the layer's pixmap item."""
         dy1, dy2, dx1, dx2 = dirty_bbox
         dh, dw = dy2 - dy1, dx2 - dx1
         if dh <= 0 or dw <= 0:
