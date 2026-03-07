@@ -1668,20 +1668,33 @@ class MontarisApp(QMainWindow):
         dlg.exec()
 
     def clear_active_roi(self):
-        """Remove the active ROI layer entirely."""
-        layer = self.canvas._active_layer
-        if layer and hasattr(layer, 'mask') and layer in self.layer_stack.roi_layers:
-            idx = self.layer_stack.roi_layers.index(layer)
-            self.canvas._active_layer = None
+        """Remove selected ROI(s), or the active ROI if none selected."""
+        selected = self.canvas._selection.layers
+        if not selected:
+            layer = self.canvas._active_layer
+            if layer and hasattr(layer, 'mask') and layer in self.layer_stack.roi_layers:
+                selected = [layer]
+        if not selected:
+            return
+        # Get indices to remove (reverse order to avoid shifting)
+        indices = []
+        for layer in selected:
+            if layer in self.layer_stack.roi_layers:
+                indices.append(self.layer_stack.roi_layers.index(layer))
+        if not indices:
+            return
+        first_idx = min(indices)
+        self.canvas._active_layer = None
+        self.canvas._selection.clear()
+        for idx in sorted(indices, reverse=True):
             self.layer_stack.remove_roi(idx)
-            # Select adjacent ROI if available
-            if self.layer_stack.roi_layers:
-                new_idx = min(idx, len(self.layer_stack.roi_layers) - 1)
-                new_layer = self.layer_stack.roi_layers[new_idx]
-                self.canvas.set_active_layer(new_layer)
-            self.canvas.refresh_overlays()
-            self.layer_panel.refresh()
-            self.properties_panel.set_layer(self.canvas._active_layer)
+        # Select adjacent ROI if available
+        if self.layer_stack.roi_layers:
+            new_idx = min(first_idx, len(self.layer_stack.roi_layers) - 1)
+            self.canvas.set_active_layer(self.layer_stack.roi_layers[new_idx])
+        self.canvas.refresh_overlays()
+        self.layer_panel.refresh()
+        self.properties_panel.set_layer(self.canvas._active_layer)
 
     def undo(self):
         # If polygon tool is mid-drawing, undo last vertex instead
