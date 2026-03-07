@@ -19,6 +19,23 @@ class UndoCommand:
         self.roi_layer.invalidate_bbox()
 
 
+class OffsetUndoCommand:
+    """Lightweight undo for layer offset changes (no mask data stored)."""
+
+    def __init__(self, roi_layer, old_offset, new_offset):
+        self.roi_layer = roi_layer
+        self.old_offset = old_offset  # (offset_x, offset_y)
+        self.new_offset = new_offset  # (offset_x, offset_y)
+
+    def undo(self):
+        self.roi_layer.offset_x, self.roi_layer.offset_y = self.old_offset
+        self.roi_layer.invalidate_bbox()
+
+    def redo(self):
+        self.roi_layer.offset_x, self.roi_layer.offset_y = self.new_offset
+        self.roi_layer.invalidate_bbox()
+
+
 class UndoStack:
     def __init__(self, max_size=100):
         self._stack = []

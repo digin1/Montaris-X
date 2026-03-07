@@ -15,6 +15,11 @@ def fix_overlaps(roi_layers, priority="later_wins"):
     if len(roi_layers) < 2:
         return roi_layers
 
+    # Flatten offsets before overlap operations
+    for roi in roi_layers:
+        if hasattr(roi, 'flatten_offset'):
+            roi.flatten_offset()
+
     h, w = roi_layers[0].mask.shape
 
     if priority == "later_wins":

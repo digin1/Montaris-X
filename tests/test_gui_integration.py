@@ -191,17 +191,17 @@ class TestMoveToolGUI:
         roi1 = app.layer_stack.roi_layers[0]
         roi2 = app.layer_stack.roi_layers[1]
         app.canvas._selection.set([roi1, roi2])
-        bbox1_before = get_mask_bbox(roi1.mask)
-        bbox2_before = get_mask_bbox(roi2.mask)
+        bbox1_before = roi1.get_display_bbox()
+        bbox2_before = roi2.get_display_bbox()
 
         tool = MoveTool(app)
         tool.on_press(QPointF(20, 20), roi1, app.canvas)
         tool.on_move(QPointF(25, 25), roi1, app.canvas)
         tool.on_release(QPointF(25, 25), roi1, app.canvas)
 
-        bbox1_after = get_mask_bbox(roi1.mask)
-        bbox2_after = get_mask_bbox(roi2.mask)
-        # Both should have shifted
+        bbox1_after = roi1.get_display_bbox()
+        bbox2_after = roi2.get_display_bbox()
+        # Both should have shifted (via offsets)
         assert bbox1_after is not None
         assert bbox2_after is not None
         assert bbox1_after[0] > bbox1_before[0]  # y shifted down
@@ -211,8 +211,6 @@ class TestMoveToolGUI:
         app = app_two_rois
         roi1 = app.layer_stack.roi_layers[0]
         roi2 = app.layer_stack.roi_layers[1]
-        snap1 = roi1.mask.copy()
-        snap2 = roi2.mask.copy()
         app.canvas._selection.set([roi1, roi2])
 
         tool = MoveTool(app)
@@ -220,10 +218,13 @@ class TestMoveToolGUI:
         tool.on_move(QPointF(30, 30), roi1, app.canvas)
         tool.on_release(QPointF(30, 30), roi1, app.canvas)
 
-        # Undo
+        # Offsets should have changed
+        assert roi1.offset_x == 10 and roi1.offset_y == 10
+
+        # Undo restores offsets
         app.undo_stack.undo()
-        assert np.array_equal(roi1.mask, snap1)
-        assert np.array_equal(roi2.mask, snap2)
+        assert roi1.offset_x == 0 and roi1.offset_y == 0
+        assert roi2.offset_x == 0 and roi2.offset_y == 0
 
     def test_move_redo(self, app_two_rois):
         app = app_two_rois
@@ -233,10 +234,11 @@ class TestMoveToolGUI:
         tool.on_press(QPointF(20, 20), roi1, app.canvas)
         tool.on_move(QPointF(30, 30), roi1, app.canvas)
         tool.on_release(QPointF(30, 30), roi1, app.canvas)
-        moved = roi1.mask.copy()
+        assert roi1.offset_x == 10 and roi1.offset_y == 10
         app.undo_stack.undo()
+        assert roi1.offset_x == 0 and roi1.offset_y == 0
         app.undo_stack.redo()
-        assert np.array_equal(roi1.mask, moved)
+        assert roi1.offset_x == 10 and roi1.offset_y == 10
 
     def test_move_no_layer(self, app_with_image):
         """Move tool does nothing with no layer."""
@@ -455,12 +457,10 @@ class TestEdgeCases:
         assert len(app.canvas._selection_highlight_items) == 1
 
     def test_multi_undo_then_redo(self, app_two_rois):
-        """Full undo/redo cycle with compound command."""
+        """Full undo/redo cycle with compound offset command."""
         app = app_two_rois
         roi1 = app.layer_stack.roi_layers[0]
         roi2 = app.layer_stack.roi_layers[1]
-        snap1 = roi1.mask.copy()
-        snap2 = roi2.mask.copy()
         app.canvas._selection.set([roi1, roi2])
 
         tool = MoveTool(app)
@@ -468,18 +468,18 @@ class TestEdgeCases:
         tool.on_move(QPointF(25, 25), roi1, app.canvas)
         tool.on_release(QPointF(25, 25), roi1, app.canvas)
 
-        moved1 = roi1.mask.copy()
-        moved2 = roi2.mask.copy()
+        assert roi1.offset_x == 5 and roi1.offset_y == 5
+        assert roi2.offset_x == 5 and roi2.offset_y == 5
 
         # Undo
         app.undo_stack.undo()
-        assert np.array_equal(roi1.mask, snap1)
-        assert np.array_equal(roi2.mask, snap2)
+        assert roi1.offset_x == 0 and roi1.offset_y == 0
+        assert roi2.offset_x == 0 and roi2.offset_y == 0
 
         # Redo
         app.undo_stack.redo()
-        assert np.array_equal(roi1.mask, moved1)
-        assert np.array_equal(roi2.mask, moved2)
+        assert roi1.offset_x == 5 and roi1.offset_y == 5
+        assert roi2.offset_x == 5 and roi2.offset_y == 5
 
     def test_statusbar_updates(self, app_two_rois):
         app = app_two_rois

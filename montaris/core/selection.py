@@ -69,7 +69,10 @@ class SelectionModel(QObject):
             if not hasattr(layer, 'mask'):
                 continue
             mask = layer.mask
-            if 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1]:
-                if mask[iy, ix] > 0:
+            # Convert canvas coords to mask coords by subtracting offset
+            mx = ix - getattr(layer, 'offset_x', 0)
+            my = iy - getattr(layer, 'offset_y', 0)
+            if 0 <= my < mask.shape[0] and 0 <= mx < mask.shape[1]:
+                if mask[my, mx] > 0:
                     return layer
         return None

@@ -85,7 +85,10 @@ class TestMoveTool:
         tool.on_move(QPointF(40, 40), layer, app.canvas)
         tool.on_release(QPointF(40, 40), layer, app.canvas)
 
-        # Mask should have moved (some pixels may be lost at edges)
+        # Offset-based move: mask unchanged, offset shifted
+        assert layer.offset_x == 10 and layer.offset_y == 10
+        assert layer.mask.sum() == before_sum  # No pixel loss
+        # After flattening, mask at new position
+        layer.flatten_offset()
         assert layer.mask[30:50, 30:50].sum() > 0
-        # Original position should be mostly clear
         assert layer.mask[20:30, 20:30].sum() < before_sum

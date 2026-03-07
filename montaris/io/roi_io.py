@@ -4,6 +4,10 @@ from montaris.layers import ROILayer, ROI_COLORS
 
 
 def save_roi_set(path, roi_layers):
+    # Flatten any layer offsets before saving
+    for roi in roi_layers:
+        if hasattr(roi, 'flatten_offset'):
+            roi.flatten_offset()
     data = {}
     metadata = []
     for i, roi in enumerate(roi_layers):

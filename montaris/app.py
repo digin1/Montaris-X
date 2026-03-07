@@ -789,6 +789,7 @@ class MontarisApp(QMainWindow):
         if not self.layer_stack.roi_layers:
             QMessageBox.information(self, "Info", "No ROIs to save.")
             return
+        self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
             self, "Save ROI Set", "rois.npz",
             "NumPy Archive (*.npz);;All Files (*)",
@@ -802,10 +803,16 @@ class MontarisApp(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save ROIs:\n{e}")
 
+    def _flatten_roi_offsets(self):
+        """Flatten all layer offsets before export/save operations."""
+        for roi in self.layer_stack.roi_layers:
+            roi.flatten_offset()
+
     def export_roi_png(self):
         if not self.layer_stack.roi_layers:
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
+        self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
             self, "Export ROI as PNG", "roi_export.png",
             "PNG (*.png);;All Files (*)",
@@ -906,6 +913,7 @@ class MontarisApp(QMainWindow):
         if not self.layer_stack.roi_layers:
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
+        self._flatten_roi_offsets()
         dir_path = QFileDialog.getExistingDirectory(self, "Export ImageJ ROIs to Directory")
         if not dir_path:
             return
@@ -926,6 +934,7 @@ class MontarisApp(QMainWindow):
         if not self.layer_stack.roi_layers:
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
+        self._flatten_roi_offsets()
         path, filt = QFileDialog.getSaveFileName(
             self, "Batch Export ROIs", "rois",
             "NumPy Archive (*.npz);;ImageJ ROI Directory;;PNG (*.png)",
@@ -1152,6 +1161,7 @@ class MontarisApp(QMainWindow):
         if not self.layer_stack.roi_layers:
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
+        self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
             self, "Export All ROIs as ZIP", "rois.zip",
             "ZIP Archive (*.zip);;All Files (*)",

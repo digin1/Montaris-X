@@ -68,6 +68,8 @@ class ROILayer:
         self._dirty_rect = None  # (x, y, w, h) or None
         self._cached_bbox = None
         self._bbox_valid = False
+        self.offset_x = 0
+        self.offset_y = 0
 
     @property
     def shape(self):
@@ -115,6 +117,43 @@ class ROILayer:
         """Current dirty rectangle or *None*."""
         return self._dirty_rect
 
+    def flatten_offset(self):
+        """Bake offset_x/y into the mask, clipping OOB pixels. Resets offset to 0."""
+        if self.offset_x == 0 and self.offset_y == 0:
+            return
+        dx, dy = self.offset_x, self.offset_y
+        bbox = self.get_bbox()
+        if bbox is None:
+            self.offset_x = 0
+            self.offset_y = 0
+            return
+        y1, y2, x1, x2 = bbox
+        crop = self.mask[y1:y2, x1:x2].copy()
+        h, w = self.mask.shape
+        self.mask[:] = 0
+        # Destination region in mask coords
+        dy1, dy2 = y1 + dy, y2 + dy
+        dx1, dx2 = x1 + dx, x2 + dx
+        # Clip to mask bounds
+        sy1 = max(0, -dy1)
+        sy2 = crop.shape[0] - max(0, dy2 - h)
+        sx1 = max(0, -dx1)
+        sx2 = crop.shape[1] - max(0, dx2 - w)
+        if sy2 > sy1 and sx2 > sx1:
+            self.mask[dy1 + sy1:dy1 + sy2, dx1 + sx1:dx1 + sx2] = crop[sy1:sy2, sx1:sx2]
+        self.offset_x = 0
+        self.offset_y = 0
+        self.invalidate_bbox()
+
+    def get_display_bbox(self):
+        """Return bounding box shifted by offset (canvas coordinates)."""
+        bbox = self.get_bbox()
+        if bbox is None:
+            return None
+        y1, y2, x1, x2 = bbox
+        return (y1 + self.offset_y, y2 + self.offset_y,
+                x1 + self.offset_x, x2 + self.offset_x)
+
 
 class LayerStack(QObject):
     changed = Signal()
@@ -154,8 +193,10 @@ class LayerStack(QObject):
         if len(indices) < 2:
             return
         target = self.roi_layers[indices[0]]
+        target.flatten_offset()
         for idx in indices[1:]:
             roi = self.roi_layers[idx]
+            roi.flatten_offset()
             target.mask = np.maximum(target.mask, roi.mask)
         target.invalidate_bbox()
         # Remove merged layers in reverse order
@@ -172,6 +213,8 @@ class LayerStack(QObject):
             new_roi.mask = src.mask.copy()
             new_roi.opacity = src.opacity
             new_roi.fill_mode = src.fill_mode
+            new_roi.offset_x = src.offset_x
+            new_roi.offset_y = src.offset_y
             self.roi_layers.insert(index + 1, new_roi)
             self.changed.emit()
 

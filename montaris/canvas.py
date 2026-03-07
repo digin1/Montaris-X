@@ -93,17 +93,37 @@ class ImageCanvas(QGraphicsView):
     # Tool / layer management
     # ------------------------------------------------------------------
 
+    _PAINT_TOOLS = {'Brush', 'Eraser', 'Polygon', 'Bucket Fill',
+                     'Rectangle', 'Circle', 'Stamp', 'Transform'}
+
     def set_tool(self, tool):
         # Clean up old tool's scene items (e.g. transform handles)
         old = self._tool
         if old is not None and hasattr(old, '_clear_handles'):
             old._clear_handles(self)
+        # Flatten offsets when switching to paint/transform tools
+        if tool is not None and getattr(tool, 'name', None) in self._PAINT_TOOLS:
+            self._flatten_all_offsets()
         self._tool = tool
         self.hide_brush_preview()
         self._hide_stamp_preview()
         self._update_cursor()
         if tool is not None and hasattr(tool, 'on_activate'):
             tool.on_activate(self._active_layer, self)
+
+    def _flatten_all_offsets(self):
+        """Bake any non-zero layer offsets into masks and clear undo stack."""
+        any_offset = False
+        for roi in self.layer_stack.roi_layers:
+            if roi.offset_x != 0 or roi.offset_y != 0:
+                roi.flatten_offset()
+                any_offset = True
+        if any_offset:
+            # Offset undo commands are now stale — clear the stack
+            win = self.window()
+            if hasattr(win, 'undo_stack'):
+                win.undo_stack.clear()
+            self.refresh_overlays()
 
     def set_active_layer(self, layer):
         if layer is not self._active_layer:
@@ -169,7 +189,9 @@ class ImageCanvas(QGraphicsView):
             qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
             pixmap = QPixmap.fromImage(qimg)
             item = QGraphicsPixmapItem(pixmap)
-            item.setOffset(x1, y1)
+            disp_x = x1 + layer.offset_x
+            disp_y = y1 + layer.offset_y
+            item.setOffset(disp_x, disp_y)
             item.setZValue(998)
             item.setAcceptedMouseButtons(Qt.NoButton)
             scene.addItem(item)
@@ -280,9 +302,9 @@ class ImageCanvas(QGraphicsView):
             roi.invalidate_bbox()
             # Viewport cull non-active ROIs
             if use_culling and roi != self._active_layer:
-                bbox = roi.get_bbox()
-                if bbox is not None:
-                    y1, y2, x1, x2 = bbox
+                dbbox = roi.get_display_bbox()
+                if dbbox is not None:
+                    y1, y2, x1, x2 = dbbox
                     if not vp_rect.intersects(QRectF(x1, y1, x2 - x1, y2 - y1)):
                         self._roi_stale.add(rid)
                         if show_progress:
@@ -468,13 +490,15 @@ class ImageCanvas(QGraphicsView):
         qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
         pixmap = QPixmap.fromImage(qimg)
 
+        disp_x = x1 + roi.offset_x
+        disp_y = y1 + roi.offset_y
         if existing is not None:
             existing.setPixmap(pixmap)
-            existing.setOffset(x1, y1)
+            existing.setOffset(disp_x, disp_y)
             existing.setZValue(1 + index * 0.001)
         else:
             item = QGraphicsPixmapItem(pixmap)
-            item.setOffset(x1, y1)
+            item.setOffset(disp_x, disp_y)
             item.setZValue(1 + index * 0.001)
             item.setAcceptedMouseButtons(Qt.NoButton)
             self._scene.addItem(item)
@@ -639,11 +663,11 @@ class ImageCanvas(QGraphicsView):
 
             # Stale items need a viewport check first
             if is_stale:
-                bbox = roi.get_bbox()
-                if bbox is None:
+                dbbox = roi.get_display_bbox()
+                if dbbox is None:
                     self._roi_stale.discard(rid)
                     continue
-                y1, y2, x1, x2 = bbox
+                y1, y2, x1, x2 = dbbox
                 if not vp_rect.intersects(QRectF(x1, y1, x2 - x1, y2 - y1)):
                     continue  # off-screen, stays in _roi_stale
 

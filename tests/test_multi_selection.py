@@ -208,7 +208,10 @@ class TestMultiSelectionMove:
         tool.on_press(QPointF(30, 30), layer, app.canvas)
         tool.on_move(QPointF(40, 40), layer, app.canvas)
         tool.on_release(QPointF(40, 40), layer, app.canvas)
-        # Should have moved
+        # Should have offset (mask unchanged)
+        assert layer.offset_x == 10 and layer.offset_y == 10
+        # After flattening, mask is at new position
+        layer.flatten_offset()
         assert layer.mask[30:50, 30:50].sum() > 0
 
     def test_multi_layer_move(self, app_with_image):
@@ -224,7 +227,12 @@ class TestMultiSelectionMove:
         tool.on_press(QPointF(15, 15), roi1, app.canvas)
         tool.on_move(QPointF(25, 25), roi1, app.canvas)
         tool.on_release(QPointF(25, 25), roi1, app.canvas)
-        # Both should have moved by (10, 10)
+        # Both should have offset of (10, 10)
+        assert roi1.offset_x == 10 and roi1.offset_y == 10
+        assert roi2.offset_x == 10 and roi2.offset_y == 10
+        # After flattening, mask data is at new position
+        roi1.flatten_offset()
+        roi2.flatten_offset()
         assert roi1.mask[20:30, 20:30].sum() > 0
         assert roi2.mask[40:50, 40:50].sum() > 0
 
@@ -235,17 +243,16 @@ class TestMultiSelectionMove:
         app.layer_stack.add_roi(roi2)
         roi1.mask[10:20, 10:20] = 255
         roi2.mask[30:40, 30:40] = 255
-        snap1 = roi1.mask.copy()
-        snap2 = roi2.mask.copy()
         app.canvas._selection.set([roi1, roi2])
         tool = MoveTool(app)
         tool.on_press(QPointF(15, 15), roi1, app.canvas)
         tool.on_move(QPointF(25, 25), roi1, app.canvas)
         tool.on_release(QPointF(25, 25), roi1, app.canvas)
-        # Single undo should restore both
+        assert roi1.offset_x == 10
+        # Single undo should restore both offsets
         app.undo_stack.undo()
-        assert np.array_equal(roi1.mask, snap1)
-        assert np.array_equal(roi2.mask, snap2)
+        assert roi1.offset_x == 0 and roi1.offset_y == 0
+        assert roi2.offset_x == 0 and roi2.offset_y == 0
 
 
 # ------------------------------------------------------------------
