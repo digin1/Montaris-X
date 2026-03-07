@@ -313,6 +313,20 @@ class ImageCanvas(QGraphicsView):
         m = min(w, h) // 4  # 25% margin
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
 
+    def refresh_image_from_array(self, data):
+        """Display an arbitrary numpy array as the background image."""
+        if self._image_item:
+            self._scene.removeItem(self._image_item)
+            self._image_item = None
+        qimg = numpy_to_qimage(data)
+        pixmap = QPixmap.fromImage(qimg)
+        self._image_item = QGraphicsPixmapItem(pixmap)
+        self._image_item.setZValue(0)
+        self._scene.addItem(self._image_item)
+        h, w = data.shape[:2]
+        m = min(w, h) // 4
+        self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
+
     # ------------------------------------------------------------------
     # ROI overlay display — per-ROI _ROIOverlayItem (tight bbox)
     # ------------------------------------------------------------------

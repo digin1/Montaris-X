@@ -72,6 +72,7 @@ class MontarisApp(QMainWindow):
         self._downsample_factor = 1
         self._documents = []
         self._active_doc_index = -1
+        self._composite_mode = False
 
         self._setup_canvas()
         self._setup_panels()
@@ -130,6 +131,7 @@ class MontarisApp(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, display_dock)
         self.display_panel.mode_changed.connect(self._on_display_mode_changed)
         self.display_panel.channels_changed.connect(self._on_channels_changed)
+        self.display_panel.composite_toggled.connect(self._on_composite_toggled)
         self._display_dock = display_dock
 
         # Adjustments panel (Phase 2)
@@ -665,7 +667,48 @@ class MontarisApp(QMainWindow):
         self.canvas.refresh_image()
 
     def _on_channels_changed(self, active_indices):
-        pass  # Channel toggling handled via display panel
+        if self._composite_mode:
+            self._refresh_composite()
+
+    def _on_composite_toggled(self, checked):
+        self._composite_mode = checked
+        if checked:
+            self._refresh_composite()
+        else:
+            # Restore single-channel view
+            self.canvas.set_tint_color(self._get_active_tint())
+            self.canvas.refresh_image()
+
+    def _refresh_composite(self):
+        """Compose all active channel documents into a single RGB image."""
+        if not self._documents:
+            return
+        active = self.display_panel.get_active_channels()
+        if not active:
+            return
+        ch_arrays = []
+        for idx, i in enumerate(active):
+            if i >= len(self._documents):
+                continue
+            doc = self._documents[i]
+            data = doc.image_layer.data
+            # Set LUT from tint color
+            tint = doc.tint_color
+            if tint is not None:
+                self._compositor.set_lut(idx, (tint[0] / 255.0, tint[1] / 255.0, tint[2] / 255.0))
+            else:
+                self._compositor.set_lut(idx, (1.0, 1.0, 1.0))
+            # Convert to 2D for compositor
+            if data.ndim == 2:
+                ch_arrays.append(data)
+            else:
+                ch_arrays.append(data.mean(axis=2).astype(data.dtype))
+        if not ch_arrays:
+            return
+        from montaris.core.display_modes import DisplayMode
+        composite = self._compositor.compose(ch_arrays, mode=DisplayMode.FALSE_COLOR)
+        self.canvas.set_tint_color(None)
+        self.canvas.refresh_image_from_array(composite)
 
     def _on_adjustments_changed(self, adjustments):
         self._adjustments = adjustments
@@ -822,7 +865,13 @@ class MontarisApp(QMainWindow):
         self._doc_combo.setCurrentIndex(self._active_doc_index)
         self._doc_combo.blockSignals(False)
 
+        self._update_display_channels()
         self.toast.show(f"Loaded: {name}  {data.shape}", "success")
+
+    def _update_display_channels(self):
+        """Update display panel channel list from loaded documents."""
+        names = [doc.name for doc in self._documents]
+        self.display_panel.set_channels(names)
 
     def close_image(self):
         """Close the current image and all ROIs, with save prompt."""
@@ -857,6 +906,9 @@ class MontarisApp(QMainWindow):
         self._doc_combo.blockSignals(True)
         self._doc_combo.clear()
         self._doc_combo.blockSignals(False)
+        self._composite_mode = False
+        self.display_panel.composite_cb.setChecked(False)
+        self._update_display_channels()
         self.setWindowTitle("Montaris-X")
         self.statusbar.showMessage("Image closed")
 
@@ -1383,8 +1435,11 @@ class MontarisApp(QMainWindow):
         if color.isValid():
             doc.tint_color = (color.red(), color.green(), color.blue())
             self._update_tint_btn()
-            self.canvas.set_tint_color(doc.tint_color)
-            self.canvas.refresh_image()
+            if self._composite_mode:
+                self._refresh_composite()
+            else:
+                self.canvas.set_tint_color(doc.tint_color)
+                self.canvas.refresh_image()
 
     def _clear_tint_color(self):
         if self._active_doc_index < 0 or self._active_doc_index >= len(self._documents):
@@ -1392,8 +1447,11 @@ class MontarisApp(QMainWindow):
         doc = self._documents[self._active_doc_index]
         doc.tint_color = None
         self._update_tint_btn()
-        self.canvas.set_tint_color(None)
-        self.canvas.refresh_image()
+        if self._composite_mode:
+            self._refresh_composite()
+        else:
+            self.canvas.set_tint_color(None)
+            self.canvas.refresh_image()
 
     def _update_tint_btn(self):
         tint = self._get_active_tint()

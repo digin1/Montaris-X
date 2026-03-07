@@ -9,6 +9,7 @@ from montaris.core.display_modes import DisplayMode
 class DisplayPanel(QWidget):
     mode_changed = Signal(object)
     channels_changed = Signal(list)
+    composite_toggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -16,6 +17,12 @@ class DisplayPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+
+        # Composite toggle
+        self.composite_cb = QCheckBox("Composite View")
+        self.composite_cb.setToolTip("Merge all channels using their tint colors")
+        self.composite_cb.toggled.connect(self._on_composite_toggled)
+        layout.addWidget(self.composite_cb)
 
         # Mode selector
         mode_layout = QHBoxLayout()
@@ -55,6 +62,9 @@ class DisplayPanel(QWidget):
     def _on_channel_toggled(self, state):
         active = [i for i, cb in enumerate(self._channel_checkboxes) if cb.isChecked()]
         self.channels_changed.emit(active)
+
+    def _on_composite_toggled(self, checked):
+        self.composite_toggled.emit(checked)
 
     def get_active_channels(self):
         return [i for i, cb in enumerate(self._channel_checkboxes) if cb.isChecked()]
