@@ -151,18 +151,10 @@ class MoveTool(BaseTool):
         dx = pos.x() - self._start_pos.x()
         dy = pos.y() - self._start_pos.y()
 
-        # Move preview items
-        if self._component_mask is not None:
-            # Component previews: temporary items, use setOffset
-            for i, item in enumerate(self._preview_items):
-                bx1, by1 = self._preview_offsets[i]
-                item.setOffset(bx1 + dx, by1 + dy)
-        else:
-            # Whole-layer previews: reuse existing ROI items which may have
-            # LOD scaling (setScale + transformOriginPoint). Use setPos so
-            # the transform origin moves with the item.
-            for item in self._preview_items:
-                item.setPos(dx, dy)
+        # Move preview items (all are temp items with offsets now)
+        for i, item in enumerate(self._preview_items):
+            bx1, by1 = self._preview_offsets[i]
+            item.setOffset(bx1 + dx, by1 + dy)
 
         # Move bbox indicator
         if self._bbox_item and self._component_bbox:
@@ -336,11 +328,8 @@ class MoveTool(BaseTool):
                 self._show_marching_ants_multi(visible, canvas)
 
     def _create_previews(self, canvas):
-        """Use existing ROI pixmap items as live preview (zero scene changes)."""
-        for item in self._preview_items:
-            item.setPos(0, 0)
-        self._preview_items.clear()
-        self._preview_offsets = []
+        """Create temporary preview pixmaps for drag visualization."""
+        self._remove_previews(canvas, re_render=False)
         self._hidden_layers = []
 
         # Hide selection highlights and marching ants during drag
@@ -352,11 +341,48 @@ class MoveTool(BaseTool):
             self._create_component_previews(canvas)
             return
 
+        scene = canvas.scene()
         for lid, (l, snap_data, sb) in self._snapshots.items():
             rid = id(l)
-            if rid in canvas._roi_items:
-                self._preview_items.append(canvas._roi_items[rid])
+            # Hide real item
+            real_item = canvas._roi_items.get(rid)
+            if real_item:
+                real_item.setVisible(False)
             self._hidden_layers.append((l, True))
+            if sb is None or snap_data is None:
+                continue
+            # Create temp preview pixmap from snapshot (not clipped by current render)
+            z = real_item.zValue() if real_item else 10
+            r, g, b = l.color
+            gof = canvas.layer_stack._global_opacity_factor
+            eff = int(l.opacity * gof)
+            sy1, sy2, sx1, sx2 = sb
+            bh, bw = sy2 - sy1, sx2 - sx1
+            # Use session snapshot for full pixel data (preserves OOB-recoverable pixels)
+            session_snap = self._session_snapshots.get(lid)
+            session_bb = self._session_bboxes.get(lid)
+            if session_snap is not None and session_bb is not None:
+                ss_y1, ss_y2, ss_x1, ss_x2 = session_bb
+                crop = session_snap[ss_y1:ss_y2, ss_x1:ss_x2]
+                ch, cw = ss_y2 - ss_y1, ss_x2 - ss_x1
+                rgba = np.zeros((ch, cw, 4), dtype=np.uint8)
+                rgba[crop > 0] = [r, g, b, eff]
+            else:
+                rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+                rgba[snap_data > 0] = [r, g, b, eff]
+                ss_x1, ss_y1 = sx1, sy1
+                ch, cw = bh, bw
+            rgba = np.ascontiguousarray(rgba)
+            from PySide6.QtGui import QImage, QPixmap
+            qimg = QImage(rgba.data, cw, ch, cw * 4, QImage.Format_RGBA8888)
+            item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+            item.setOffset(ss_x1, ss_y1)
+            item.setZValue(z)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            scene.addItem(item)
+            self._preview_items.append(item)
+            self._preview_offsets.append((ss_x1, ss_y1))
+            self._temp_scene_items.append(item)
 
     def _create_component_previews(self, canvas):
         """Split ROI into component (draggable) and remainder (static) pixmaps."""
@@ -436,18 +462,14 @@ class MoveTool(BaseTool):
             self._temp_scene_items.append(self._bbox_item)
 
     def _remove_previews(self, canvas, re_render=True):
-        """Reset preview offsets. If re_render, also rebuild affected ROI items."""
-        # Remove temporary scene items (component mode)
+        """Remove preview items. If re_render, also rebuild affected ROI items."""
         scene = canvas.scene()
         for item in self._temp_scene_items:
             scene.removeItem(item)
         self._temp_scene_items.clear()
         self._bbox_item = None
-        # Reset non-temp preview items (whole-layer items moved via setPos)
-        for item in self._preview_items:
-            if item.scene():
-                item.setPos(0, 0)
         self._preview_items.clear()
+        self._preview_offsets = []
         # Restore visibility of hidden real items
         for l, _ in self._hidden_layers:
             rid = id(l)
