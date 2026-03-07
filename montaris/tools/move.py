@@ -141,9 +141,7 @@ class MoveTool(BaseTool):
         dy = pos.y() - self._start_pos.y()
 
         if self._component_mask is not None:
-            # Component move: clamp delta so component stays in-bounds
-            dx, dy = self._clamp_component_delta(dx, dy)
-            # Shift preview items
+            # Component move: free preview, clamped on release
             for i, item in enumerate(self._comp_preview_items):
                 bx1, by1 = self._comp_preview_offsets[i]
                 item.setOffset(bx1 + dx, by1 + dy)
