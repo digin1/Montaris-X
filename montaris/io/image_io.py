@@ -31,7 +31,21 @@ def load_image(path):
     else:
         from PIL import Image
         img = Image.open(str(path))
-        return np.array(img)
+        return _pil_to_array(img)
+
+
+def _pil_to_array(img):
+    """Convert a PIL Image to a well-typed numpy array.
+
+    Handles palette, 1-bit, and CMYK modes by converting to RGB/L first.
+    """
+    if img.mode in ('1',):
+        img = img.convert('L')
+    elif img.mode in ('P', 'PA'):
+        img = img.convert('RGBA' if 'A' in img.mode or 'transparency' in img.info else 'RGB')
+    elif img.mode in ('CMYK', 'YCbCr', 'LAB', 'I', 'F'):
+        img = img.convert('RGB')
+    return np.array(img)
 
 
 def load_image_stack(path):
@@ -51,7 +65,7 @@ def load_image_stack(path):
     else:
         from PIL import Image
         img = Image.open(str(path))
-        return [(stem, np.array(img))]
+        return [(stem, _pil_to_array(img))]
 
 
 def _split_tiff_channels(data, stem):
