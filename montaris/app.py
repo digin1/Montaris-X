@@ -844,6 +844,7 @@ class MontarisApp(QMainWindow):
             # First image — full reset
             self._downsample_factor = ds_factor
             self.canvas._selection.clear()
+            self.canvas._active_layer = None
             self.layer_stack.set_image(new_layer)
             self.canvas.refresh_image()
             self.canvas.fit_to_window()
