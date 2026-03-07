@@ -840,57 +840,36 @@ class MontarisApp(QMainWindow):
     def export_roi_png_to(self, path):
         try:
             from PIL import Image
-            img_layer = self.layer_stack.image_layer
-            h, w = img_layer.shape[:2]
-            composite = np.zeros((h, w, 4), dtype=np.uint8)
+            h, w = self.layer_stack.image_layer.shape[:2]
 
-            if img_layer.data.ndim == 2:
-                gray = img_layer.data
-                if gray.dtype != np.uint8:
-                    mn, mx = float(gray.min()), float(gray.max())
-                    if mx > mn:
-                        gray = ((gray.astype(np.float32) - mn) / (mx - mn) * 255).astype(np.uint8)
-                    else:
-                        gray = np.zeros_like(gray, dtype=np.uint8)
-                composite[:, :, 0] = gray
-                composite[:, :, 1] = gray
-                composite[:, :, 2] = gray
-                composite[:, :, 3] = 255
-            else:
-                c = min(3, img_layer.data.shape[2])
-                bg = img_layer.data[:, :, :c]
-                if bg.dtype != np.uint8:
-                    mn, mx = float(bg.min()), float(bg.max())
-                    if mx > mn:
-                        bg = ((bg.astype(np.float32) - mn) / (mx - mn) * 255).astype(np.uint8)
-                composite[:, :, :c] = bg
-                composite[:, :, 3] = 255
-
-            visible_rois = [r for r in self.layer_stack.roi_layers if r.visible]
-            n = len(visible_rois)
+            rois = self.layer_stack.roi_layers
+            n = len(rois)
             if n > 1:
-                progress = QProgressDialog("Exporting PNG...", "Cancel", 0, n, self)
+                progress = QProgressDialog("Exporting PNG masks...", "Cancel", 0, n, self)
                 progress.setWindowModality(Qt.WindowModal)
             else:
                 progress = None
-            for i, roi in enumerate(visible_rois):
+
+            base, ext = os.path.splitext(path)
+            if not ext:
+                ext = '.png'
+
+            for i, roi in enumerate(rois):
                 if progress and progress.wasCanceled():
                     return
-                mask = roi.mask > 0
-                alpha = roi.opacity / 255.0
-                r, g, b = roi.color
-                for c_idx, c_val in enumerate([r, g, b]):
-                    composite[:, :, c_idx][mask] = (
-                        composite[:, :, c_idx][mask] * (1 - alpha) + c_val * alpha
-                    ).astype(np.uint8)
+                mask = self._upscale_mask_if_needed(roi.mask)
+                img = Image.fromarray(mask)
+                if n == 1:
+                    out_path = base + ext
+                else:
+                    safe_name = roi.name.replace("/", "_").replace("\\", "_")
+                    out_path = f"{base}_{safe_name}{ext}"
+                img.save(out_path)
                 if progress:
                     progress.setValue(i + 1)
             if progress:
                 progress.close()
-
-            img = Image.fromarray(composite)
-            img.save(path)
-            self.statusbar.showMessage(f"Exported to {path}")
+            self.statusbar.showMessage(f"Exported {n} mask(s) to {os.path.dirname(path) or '.'}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
 
