@@ -593,7 +593,9 @@ class MontarisApp(QMainWindow):
         roi_info = f"  |  {layer.name}" if layer and hasattr(layer, 'name') else ""
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
 
-    def _on_roi_added(self, switch_to_brush=True):
+    _NON_DRAWING_TOOLS = {'Hand', 'Select', 'Transform', 'Move', 'Bucket Fill'}
+
+    def _on_roi_added(self):
         if self.layer_stack.image_layer is None:
             QMessageBox.information(self, "Info", "Load an image first.")
             return
@@ -608,7 +610,9 @@ class MontarisApp(QMainWindow):
         # Auto-select the new ROI
         last_row = self.layer_panel.list_widget.count() - 1
         self.layer_panel.list_widget.setCurrentRow(last_row)
-        if switch_to_brush:
+        # Switch to Brush only if current tool isn't a drawing tool
+        current = getattr(self.canvas._tool, 'name', None)
+        if current is None or current in self._NON_DRAWING_TOOLS:
             self.tool_panel._select_tool('Brush')
 
     def _on_roi_removed(self, index):

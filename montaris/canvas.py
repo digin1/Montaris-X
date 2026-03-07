@@ -774,7 +774,7 @@ class ImageCanvas(QGraphicsView):
                     and self.layer_stack.image_layer is not None):
                 win = self.window()
                 if hasattr(win, '_on_roi_added'):
-                    win._on_roi_added(switch_to_brush=False)
+                    win._on_roi_added()
             scene_pos = self.mapToScene(event.position().toPoint())
             self._tool.on_press(scene_pos, self._active_layer, self)
             return
