@@ -81,6 +81,7 @@ class ImageCanvas(QGraphicsView):
         self._dirty_timer.timeout.connect(self._flush_dirty)
 
         self._tint_color = None
+        self._adjustments = None  # ImageAdjustments applied at display time
         self._tool = None
         self._active_layer = None
         self._is_panning = False
@@ -301,6 +302,9 @@ class ImageCanvas(QGraphicsView):
             return
 
         data = img_layer.data
+        # Apply brightness/contrast/exposure/gamma adjustments (display-time)
+        if self._adjustments is not None and not self._adjustments.is_identity():
+            data = self._adjustments.apply(data)
         tint = getattr(self, '_tint_color', None)
         if tint is not None and data.ndim == 2:
             data = _apply_tint(data, tint)
@@ -321,6 +325,9 @@ class ImageCanvas(QGraphicsView):
         if self._image_item:
             self._scene.removeItem(self._image_item)
             self._image_item = None
+        # Apply brightness/contrast/exposure/gamma adjustments (display-time)
+        if self._adjustments is not None and not self._adjustments.is_identity():
+            data = self._adjustments.apply(data)
         qimg = numpy_to_qimage(data)
         pixmap = QPixmap.fromImage(qimg)
         self._image_item = QGraphicsPixmapItem(pixmap)

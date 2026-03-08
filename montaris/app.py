@@ -96,6 +96,7 @@ class MontarisApp(QMainWindow):
 
     def _setup_canvas(self):
         self.canvas = ImageCanvas(self.layer_stack, self)
+        self.canvas._adjustments = self._adjustments
         self.setCentralWidget(self.canvas)
 
     def _setup_panels(self):
@@ -719,7 +720,11 @@ class MontarisApp(QMainWindow):
 
     def _on_adjustments_changed(self, adjustments):
         self._adjustments = adjustments
-        self.canvas.refresh_image()
+        self.canvas._adjustments = adjustments
+        if self._composite_mode:
+            self._refresh_composite()
+        else:
+            self.canvas.refresh_image()
 
     def _on_minimap_pan(self, scene_x, scene_y):
         self.canvas.centerOn(scene_x, scene_y)
@@ -1570,6 +1575,13 @@ class MontarisApp(QMainWindow):
         self._active_doc_index = index
         self._downsample_factor = doc.downsample_factor
         self.layer_stack.image_layer = doc.image_layer
+        # Restore adjustments before refresh so the image renders correctly
+        from montaris.core.adjustments import ImageAdjustments
+        self._adjustments = ImageAdjustments(**doc.adjustments)
+        self.canvas._adjustments = self._adjustments
+        if hasattr(self.adjustments_panel, '_adjustments'):
+            self.adjustments_panel._adjustments = self._adjustments
+            self.adjustments_panel._sync_sliders()
         self.canvas.set_tint_color(doc.tint_color)
         self.canvas.refresh_image()
         self.canvas.refresh_overlays()
@@ -1577,12 +1589,6 @@ class MontarisApp(QMainWindow):
         if doc.image_layer:
             self.minimap.set_image(doc.image_layer.data)
             self.adjustments_panel.set_image_data(doc.image_layer.data)
-        # Restore adjustments (A.12)
-        from montaris.core.adjustments import ImageAdjustments
-        self._adjustments = ImageAdjustments(**doc.adjustments)
-        if hasattr(self.adjustments_panel, '_adjustments'):
-            self.adjustments_panel._adjustments = self._adjustments
-            self.adjustments_panel._sync_sliders()
         self._update_tint_btn()
         self.toast.show(f"Switched to: {doc.name}", "info")
 
