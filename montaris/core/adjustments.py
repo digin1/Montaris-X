@@ -238,14 +238,11 @@ class ImageAdjustments:
         adj._window_min = display_min
         adj._window_max = display_max
 
-        # Gamma boost: lift dark tissue so structure is more visible
-        # within the section
-        if signal_mask.any():
-            signal_mean = signal_pixels.mean() / 255.0
-            # Normalize relative to window
-            rel_mean = (signal_mean - display_min) / max(display_max - display_min, 0.01)
-            if rel_mean < 0.35:
-                adj.gamma = min(2.0, 0.4 / max(rel_mean, 0.05))
+        # Fixed adjustments on top of window/level
+        adj.brightness = 0.02
+        adj.contrast = -0.02
+        adj.exposure = 0.02
+        adj.gamma = 3.28
 
         return adj
 
