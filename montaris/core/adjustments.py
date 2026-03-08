@@ -145,64 +145,82 @@ class ImageAdjustments:
     def smart_auto(image):
         """Auto window/level for microscopy images.
 
-        Designed for fluorescence/brightfield brain imaging:
-        - Background (dark/empty areas) → pure black
-        - Tissue signal → stretched to fill display range
-        - Uses percentile analysis to find the signal floor/ceiling
+        Designed for fluorescence/brightfield brain imaging (Nikon etc.):
+        - Finds the background peak in the histogram (empty slide/mounting)
+        - Sets display_min just above background → background becomes black
+        - Dark tissue areas WITHIN the section remain visible
+        - Stretches tissue signal range to fill the display
+
+        The key distinction: background (outside section) vs dark tissue
+        (inside section). Only the true background should be crushed to black.
         """
         adj = ImageAdjustments()
         adj.set_pivot(image)
 
-        # Normalize to 0-1
-        img = image.astype(np.float32)
+        # Work in uint8 space for histogram analysis
         if image.dtype == np.uint8:
-            img /= 255.0
+            img8 = image
         elif image.dtype == np.uint16:
             mn, mx = float(image.min()), float(image.max())
             if mx > mn:
-                img = (img - mn) / (mx - mn)
+                img8 = ((image.astype(np.float32) - mn) * (255.0 / (mx - mn))).clip(0, 255).astype(np.uint8)
             else:
-                img /= 65535.0
+                img8 = np.zeros_like(image, dtype=np.uint8)
         else:
+            img = image.astype(np.float32)
             mn, mx = img.min(), img.max()
             if mx > mn:
-                img = (img - mn) / (mx - mn)
+                img8 = ((img - mn) * (255.0 / (mx - mn))).clip(0, 255).astype(np.uint8)
+            else:
+                img8 = np.zeros(image.shape, dtype=np.uint8)
 
-        # Subsample for speed
-        flat = img.ravel()
-        if len(flat) > 500000:
-            flat = flat[::len(flat) // 500000]
+        # Build histogram
+        hist = np.bincount(img8.ravel(), minlength=256).astype(np.float64)
+        total = img8.size
 
-        # Find signal boundaries
-        p01 = np.percentile(flat, 1)
-        p25 = np.percentile(flat, 25)
-        p50 = np.percentile(flat, 50)
-        p75 = np.percentile(flat, 75)
-        p99 = np.percentile(flat, 99)
+        # Find background peak: the mode (largest histogram bin)
+        bg_peak = int(np.argmax(hist))
+        bg_count = hist[bg_peak]
 
-        if p50 < 0.2:
-            # Dark-dominant (fluorescence microscopy):
-            # Background is the dominant mode. Signal floor = p75 neighborhood
-            # Use the "elbow" between background and signal
-            display_min = p50
-            display_max = max(p99, display_min + 0.05)
-        elif p50 > 0.8:
-            # Bright-dominant (brightfield):
-            display_min = p01
-            display_max = p25
+        # Find where background ends: walk right from the peak
+        # until counts drop below 1% of peak height (the valley)
+        threshold = bg_count * 0.01
+        bg_end = bg_peak
+        for i in range(bg_peak + 1, 256):
+            if hist[i] < threshold:
+                bg_end = i
+                break
+            bg_end = i
+
+        # Signal = everything above background
+        # display_min = just above the background boundary
+        # This keeps dark tissue visible while crushing true background
+        display_min = bg_end / 255.0
+
+        # display_max = p99 of non-background pixels
+        signal_mask = img8 > bg_end
+        if signal_mask.any():
+            signal_pixels = img8[signal_mask]
+            display_max = float(np.percentile(signal_pixels, 99)) / 255.0
         else:
-            # Balanced
-            display_min = p01
-            display_max = p99
+            # No signal found, use full range
+            display_max = 1.0
 
-        # Set direct window/level (values are in 0-1, map to 0-255 for LUT)
+        # Ensure minimum window width
+        if display_max - display_min < 0.02:
+            display_max = min(1.0, display_min + 0.1)
+
         adj._window_min = display_min
         adj._window_max = display_max
 
-        # Gentle gamma boost for dark microscopy images
-        mean_signal = float(flat[flat >= display_min].mean()) if (flat >= display_min).any() else 0.5
-        if mean_signal < display_max * 0.4:
-            adj.gamma = 1.3
+        # Gamma boost: lift dark tissue so structure is more visible
+        # within the section
+        if signal_mask.any():
+            signal_mean = signal_pixels.mean() / 255.0
+            # Normalize relative to window
+            rel_mean = (signal_mean - display_min) / max(display_max - display_min, 0.01)
+            if rel_mean < 0.35:
+                adj.gamma = min(2.0, 0.4 / max(rel_mean, 0.05))
 
         return adj
 
