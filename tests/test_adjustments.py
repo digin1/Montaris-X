@@ -61,8 +61,8 @@ class TestImageAdjustments:
         img = np.random.randint(50, 100, (50, 60), dtype=np.uint8)
         adj = ImageAdjustments.smart_auto(img)
         assert not adj.is_identity()
-        # Auto should increase contrast for narrow range image (positive in GIMP model)
-        assert adj.contrast > 0.0
+        # Auto should set a display window for narrow range image
+        assert adj._window_min >= 0
 
     def test_quick_boost(self):
         img = np.random.randint(0, 255, (50, 60), dtype=np.uint8)

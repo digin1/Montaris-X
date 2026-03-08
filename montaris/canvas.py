@@ -82,6 +82,7 @@ class ImageCanvas(QGraphicsView):
 
         self._tint_color = None
         self._adjustments = None  # ImageAdjustments applied at display time
+        self._display_cache = None  # cached uint8 display copy for fast LUT
         self._tool = None
         self._active_layer = None
         self._is_panning = False
@@ -296,12 +297,15 @@ class ImageCanvas(QGraphicsView):
         if self._image_item:
             self._scene.removeItem(self._image_item)
             self._image_item = None
+        self._display_cache = None  # invalidate cached uint8
 
         img_layer = self.layer_stack.image_layer
         if img_layer is None:
             return
 
-        data = img_layer.data
+        data = self._get_display_uint8()
+        if data is None:
+            return
         # Apply brightness/contrast/exposure/gamma adjustments (display-time)
         if self._adjustments is not None and not self._adjustments.is_identity():
             data = self._adjustments.apply(data)
@@ -320,19 +324,116 @@ class ImageCanvas(QGraphicsView):
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
         self._report_render((time.perf_counter() - t0) * 1000)
 
-    def refresh_adjustments(self):
-        """Fast path: re-apply adjustments without rebuilding scene structure."""
+    def _get_display_uint8(self):
+        """Get a cached uint8 display copy of the image data.
+
+        For uint8 images, returns the data directly (no copy).
+        For uint16/float images, normalizes to uint8 once and caches.
+        Cache is invalidated when refresh_image() is called (new image).
+        """
         img_layer = self.layer_stack.image_layer
-        if img_layer is None or self._image_item is None:
-            return
+        if img_layer is None:
+            return None
         data = img_layer.data
-        if self._adjustments is not None and not self._adjustments.is_identity():
-            data = self._adjustments.apply(data)
+        if data.dtype == np.uint8:
+            return data
+        if self._display_cache is not None:
+            return self._display_cache
+        # Normalize to uint8 — expensive but done once per image load
+        img = data.astype(np.float32)
+        if data.dtype == np.uint16:
+            mn, mx = float(data.min()), float(data.max())
+            if mx > mn:
+                img = (img - mn) * (255.0 / (mx - mn))
+            else:
+                img = np.zeros_like(data, dtype=np.float32)
+        else:
+            mn, mx = img.min(), img.max()
+            if mx > mn:
+                img = (img - mn) * (255.0 / (mx - mn))
+        self._display_cache = np.clip(img, 0, 255).astype(np.uint8)
+        return self._display_cache
+
+    def refresh_adjustments(self):
+        """Fast path: re-apply adjustments without rebuilding scene structure.
+
+        For large images (>4MP), applies LUT only to the visible viewport
+        and displays that as a viewport-sized pixmap. The full image is
+        updated on a deferred timer so panning shows correct data.
+        """
+        if self._image_item is None:
+            return
+        data = self._get_display_uint8()
+        if data is None:
+            return
+
+        adj = self._adjustments
+        has_adj = adj is not None and not adj.is_identity()
+        tint = getattr(self, '_tint_color', None)
+        has_tint = tint is not None and data.ndim == 2
+
+        if not has_adj and not has_tint:
+            qimg = numpy_to_qimage(data)
+            self._image_item.setPixmap(QPixmap.fromImage(qimg))
+            return
+
+        lut = adj._build_lut() if has_adj else None
+
+        h, w = data.shape[:2]
+        if h * w > 4_000_000:
+            # Large image: process only visible viewport for responsive sliders
+            vr = self.mapToScene(self.viewport().rect()).boundingRect()
+            x0 = max(0, int(vr.x()))
+            y0 = max(0, int(vr.y()))
+            x1 = min(w, int(vr.x() + vr.width()) + 1)
+            y1 = min(h, int(vr.y() + vr.height()) + 1)
+            if x1 <= x0 or y1 <= y0:
+                return
+
+            region = data[y0:y1, x0:x1]
+            if lut is not None:
+                region = lut[region]
+            if has_tint and region.ndim == 2:
+                region = _apply_tint(region, tint)
+
+            qimg = numpy_to_qimage(region)
+            pixmap = QPixmap.fromImage(qimg)
+            self._image_item.setPixmap(pixmap)
+            self._image_item.setOffset(x0, y0)
+
+            # Schedule deferred full-image update for when user stops adjusting
+            if not hasattr(self, '_full_adj_timer'):
+                self._full_adj_timer = QTimer(self)
+                self._full_adj_timer.setSingleShot(True)
+                self._full_adj_timer.setInterval(300)
+                self._full_adj_timer.timeout.connect(self._deferred_full_adjustment)
+            self._full_adj_timer.start()
+        else:
+            # Small image: process everything directly
+            result = lut[data] if lut is not None else data
+            if has_tint and result.ndim == 2:
+                result = _apply_tint(result, tint)
+            qimg = numpy_to_qimage(result)
+            self._image_item.setPixmap(QPixmap.fromImage(qimg))
+            self._image_item.setOffset(0, 0)
+
+    def _deferred_full_adjustment(self):
+        """Apply adjustments to the full image (called after slider stops)."""
+        if self._image_item is None:
+            return
+        data = self._get_display_uint8()
+        if data is None:
+            return
+        adj = self._adjustments
+        if adj is not None and not adj.is_identity():
+            lut = adj._build_lut()
+            data = lut[data]
         tint = getattr(self, '_tint_color', None)
         if tint is not None and data.ndim == 2:
             data = _apply_tint(data, tint)
         qimg = numpy_to_qimage(data)
         self._image_item.setPixmap(QPixmap.fromImage(qimg))
+        self._image_item.setOffset(0, 0)
 
     def refresh_image_from_array(self, data):
         """Display an arbitrary numpy array as the background image."""

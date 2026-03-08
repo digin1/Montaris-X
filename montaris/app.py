@@ -725,7 +725,7 @@ class MontarisApp(QMainWindow):
         if not hasattr(self, '_adj_timer'):
             self._adj_timer = QTimer(self)
             self._adj_timer.setSingleShot(True)
-            self._adj_timer.setInterval(30)  # ~33fps cap
+            self._adj_timer.setInterval(16)  # ~60fps cap
             self._adj_timer.timeout.connect(self._apply_adjustments)
         self._adj_timer.start()
 
