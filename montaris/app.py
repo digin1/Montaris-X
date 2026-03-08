@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget, QPushButton,
     QComboBox, QInputDialog, QColorDialog,
 )
-from PySide6.QtCore import Qt, QSettings, QRectF
+from PySide6.QtCore import Qt, QSettings, QRectF, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
 
 from montaris.canvas import ImageCanvas
@@ -721,10 +721,19 @@ class MontarisApp(QMainWindow):
     def _on_adjustments_changed(self, adjustments):
         self._adjustments = adjustments
         self.canvas._adjustments = adjustments
+        # Debounce: coalesce rapid slider ticks into a single update
+        if not hasattr(self, '_adj_timer'):
+            self._adj_timer = QTimer(self)
+            self._adj_timer.setSingleShot(True)
+            self._adj_timer.setInterval(30)  # ~33fps cap
+            self._adj_timer.timeout.connect(self._apply_adjustments)
+        self._adj_timer.start()
+
+    def _apply_adjustments(self):
         if self._composite_mode:
             self._refresh_composite()
         else:
-            self.canvas.refresh_image()
+            self.canvas.refresh_adjustments()
 
     def _on_minimap_pan(self, scene_x, scene_y):
         self.canvas.centerOn(scene_x, scene_y)

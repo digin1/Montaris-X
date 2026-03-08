@@ -320,6 +320,20 @@ class ImageCanvas(QGraphicsView):
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
         self._report_render((time.perf_counter() - t0) * 1000)
 
+    def refresh_adjustments(self):
+        """Fast path: re-apply adjustments without rebuilding scene structure."""
+        img_layer = self.layer_stack.image_layer
+        if img_layer is None or self._image_item is None:
+            return
+        data = img_layer.data
+        if self._adjustments is not None and not self._adjustments.is_identity():
+            data = self._adjustments.apply(data)
+        tint = getattr(self, '_tint_color', None)
+        if tint is not None and data.ndim == 2:
+            data = _apply_tint(data, tint)
+        qimg = numpy_to_qimage(data)
+        self._image_item.setPixmap(QPixmap.fromImage(qimg))
+
     def refresh_image_from_array(self, data):
         """Display an arbitrary numpy array as the background image."""
         if self._image_item:

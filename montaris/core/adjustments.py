@@ -20,42 +20,54 @@ class ImageAdjustments:
         self.exposure = 0.0
         self.gamma = 1.0
 
+    def _build_lut(self):
+        """Build a 256-entry uint8 lookup table (ImageJ-style).
+
+        O(256) instead of O(W*H) — maps each input intensity to its
+        adjusted output via the same math as the old per-pixel apply().
+        """
+        x = np.arange(256, dtype=np.float32) / 255.0
+
+        if self.exposure != 0.0:
+            x = x * (2.0 ** self.exposure)
+        if self.contrast != 1.0:
+            x = (x - 0.5) * self.contrast + 0.5
+        if self.brightness != 0.0:
+            x = x + self.brightness
+        if self.gamma != 1.0:
+            np.clip(x, 0, 1, out=x)
+            np.power(x, 1.0 / self.gamma, out=x)
+
+        np.clip(x * 255, 0, 255, out=x)
+        return x.astype(np.uint8)
+
     def apply(self, image):
         """Apply adjustments to a numpy image (uint8 or float).
-        Returns uint8 image."""
+        Returns uint8 image.
+
+        For uint8 input: uses a 256-entry LUT for O(256) computation.
+        For other dtypes: normalizes to 0-255 uint8 first, then applies LUT.
+        """
         if self.is_identity():
             if image.dtype == np.uint8:
                 return image
             return np.clip(image, 0, 255).astype(np.uint8)
 
-        img = image.astype(np.float32)
+        lut = self._build_lut()
+
         if image.dtype == np.uint8:
-            img = img / 255.0
-        elif image.dtype == np.uint16:
-            img = img / 65535.0
+            return lut[image]
+
+        # Normalize non-uint8 to uint8, then apply LUT
+        img = image.astype(np.float32)
+        if image.dtype == np.uint16:
+            img = img * (255.0 / 65535.0)
         else:
             mn, mx = img.min(), img.max()
             if mx > mn:
-                img = (img - mn) / (mx - mn)
-
-        # Exposure (multiply before other ops)
-        if self.exposure != 0.0:
-            img = img * (2.0 ** self.exposure)
-
-        # Contrast (around midpoint 0.5)
-        if self.contrast != 1.0:
-            img = (img - 0.5) * self.contrast + 0.5
-
-        # Brightness (simple offset)
-        if self.brightness != 0.0:
-            img = img + self.brightness
-
-        # Gamma
-        if self.gamma != 1.0:
-            img = np.clip(img, 0, 1)
-            img = np.power(img, 1.0 / self.gamma)
-
-        return np.clip(img * 255, 0, 255).astype(np.uint8)
+                img = (img - mn) * (255.0 / (mx - mn))
+        np.clip(img, 0, 255, out=img)
+        return lut[img.astype(np.uint8)]
 
     @staticmethod
     def smart_auto(image):
