@@ -90,6 +90,7 @@ class AdjustmentsPanel(QWidget):
 
     def set_image_data(self, data):
         self._image_data = data
+        self._adjustments.set_pivot(data)
 
     def _on_brightness(self, value):
         if self._updating:

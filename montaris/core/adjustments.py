@@ -7,14 +7,21 @@ from dataclasses import dataclass, field
 class ImageAdjustments:
     """Image adjustment parameters.
 
-    Brightness/contrast follow GIMP's model (gegl brightness-contrast):
-    - Brightness is proportional (not a flat offset) for natural feel
-    - Contrast uses tan() curve: gentle near center, strong at extremes
+    Uses a data-adaptive window/level model inspired by ImageJ:
+    - The contrast pivot is set to the image's actual mean intensity
+      (not a fixed 128), so contrast changes stretch the actual data range
+    - Brightness shifts the output proportionally (GIMP model)
+    - Exposure multiplies input (photography standard)
+    - Gamma applies power curve
+
+    This works well for scientific images with arbitrary intensity ranges
+    (dark, narrow-range, 16-bit, etc.)
     """
     brightness: float = 0.0     # -1.0 to 1.0
     contrast: float = 0.0       # -1.0 to 1.0 (0 = identity)
     exposure: float = 0.0       # -2.0 to 2.0
     gamma: float = 1.0          # 0.1 to 5.0
+    _pivot: float = 0.5         # data-adaptive contrast pivot (0-1 normalized)
 
     def is_identity(self):
         return (self.brightness == 0.0 and self.contrast == 0.0
@@ -26,33 +33,55 @@ class ImageAdjustments:
         self.exposure = 0.0
         self.gamma = 1.0
 
-    def _build_lut(self):
-        """Build a 256-entry uint8 lookup table using GIMP's formulas.
+    def set_pivot(self, image_data):
+        """Set contrast pivot from image data (call when image changes)."""
+        if image_data is None:
+            self._pivot = 0.5
+            return
+        sample = image_data.ravel()
+        if len(sample) > 100000:
+            sample = sample[::len(sample) // 100000]
+        vals = sample.astype(np.float64)
+        if image_data.dtype == np.uint8:
+            vals /= 255.0
+        elif image_data.dtype == np.uint16:
+            vals /= 65535.0
+        else:
+            mn, mx = vals.min(), vals.max()
+            if mx > mn:
+                vals = (vals - mn) / (mx - mn)
+        self._pivot = float(np.clip(vals.mean(), 0.01, 0.99))
 
-        Brightness: proportional (GIMP gimp_operation_brightness_contrast_map)
-        Contrast: tan((contrast+1) * pi/4) slope (GIMP slant formula)
+    def _build_lut(self):
+        """Build a 256-entry uint8 lookup table.
+
+        Contrast pivots around the actual image center (_pivot),
+        not a fixed 0.5, so it works correctly on dark/bright images.
+
+        Uses GIMP-style proportional brightness and exp() contrast slope.
         """
         x = np.arange(256, dtype=np.float64) / 255.0
 
-        # Exposure: multiply by 2^exposure (photography standard)
+        # Exposure: scale input (photography standard: multiply by 2^exposure)
         if self.exposure != 0.0:
             x = x * (2.0 ** self.exposure)
 
-        # Brightness — GIMP model (proportional, not flat offset)
-        # GIMP halves the UI value internally: brightness = config / 2.0
+        # Brightness — GIMP proportional model
         b = self.brightness / 2.0
         if b < 0.0:
             x = x * (1.0 + b)
         elif b > 0.0:
             x = x + (1.0 - x) * b
 
-        # Contrast — GIMP tan() curve
-        # slant = tan((contrast + 1) * pi/4)
-        # At contrast=0: slant=tan(pi/4)=1.0 (identity)
-        # Clamp to avoid tan(pi/2) singularity
-        c = np.clip(self.contrast, -1.0, 0.9999)
-        slant = math.tan((c + 1.0) * math.pi / 4.0)
-        x = (x - 0.5) * slant + 0.5
+        # Contrast — pivot around actual image center, exp() slope
+        # exp() is smooth, bounded, and gives gentle response near 0
+        # At contrast=0: slope=1 (identity)
+        # At contrast=1: slope=exp(2)≈7.4 (strong but not infinite)
+        # At contrast=-1: slope=exp(-2)≈0.14 (flatten)
+        if self.contrast != 0.0:
+            slope = math.exp(self.contrast * 2.0)
+            pivot = self._pivot
+            x = (x - pivot) * slope + pivot
 
         # Gamma
         if self.gamma != 1.0:
@@ -94,24 +123,22 @@ class ImageAdjustments:
     def smart_auto(image):
         """Compute auto-adjustments for an image. Returns ImageAdjustments."""
         adj = ImageAdjustments()
+        adj.set_pivot(image)
         img = image.astype(np.float32)
         if image.dtype == np.uint8:
             img /= 255.0
         elif image.dtype == np.uint16:
             img /= 65535.0
 
-        # Use percentiles for robust min/max
         p_low = np.percentile(img, 1)
         p_high = np.percentile(img, 99)
 
         if p_high > p_low:
             current_range = p_high - p_low
-            # Map desired contrast stretch to GIMP's tan-based contrast
-            # We want slant = 1/current_range, so contrast = 4/pi * atan(slant) - 1
-            desired_slant = min(4.0, 1.0 / current_range)
-            adj.contrast = np.clip(4.0 / math.pi * math.atan(desired_slant) - 1.0, -1.0, 0.99)
+            # Map desired contrast to exp() model: slope = 1/range = exp(2c)
+            # c = ln(1/range) / 2
+            adj.contrast = np.clip(math.log(1.0 / max(current_range, 0.01)) / 2.0, -1.0, 1.0)
 
-            # Brightness: shift midpoint toward 0.5
             mid = (p_low + p_high) / 2.0
             adj.brightness = np.clip((0.5 - mid) * 2.0, -1.0, 1.0)
 
@@ -127,6 +154,7 @@ class ImageAdjustments:
     def quick_boost(image):
         """Quick brightness/contrast boost. Returns ImageAdjustments."""
         adj = ImageAdjustments()
+        adj.set_pivot(image)
         adj.contrast = 0.15
         adj.brightness = 0.1
         return adj
