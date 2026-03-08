@@ -240,9 +240,9 @@ class ImageAdjustments:
 
         # Fixed adjustments on top of window/level
         adj.brightness = 0.02
-        adj.contrast = -0.02
-        adj.exposure = 0.02
-        adj.gamma = 3.28
+        adj.contrast = 0.0
+        adj.exposure = 0.25
+        adj.gamma = 5.0
 
         return adj
 
