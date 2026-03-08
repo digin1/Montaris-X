@@ -146,13 +146,13 @@ class ImageAdjustments:
         """Auto window/level for microscopy images.
 
         Designed for fluorescence/brightfield brain imaging (Nikon etc.):
-        - Finds the background peak in the histogram (empty slide/mounting)
-        - Sets display_min just above background → background becomes black
-        - Dark tissue areas WITHIN the section remain visible
-        - Stretches tissue signal range to fill the display
+        - Finds ALL noise peaks (background + autofluorescence)
+        - Sets display_min at the valley after the last noise peak
+        - Background AND autofluorescence → black
+        - Only true signal (puncta, staining) → visible
 
-        The key distinction: background (outside section) vs dark tissue
-        (inside section). Only the true background should be crushed to black.
+        Uses smoothed histogram to find the transition from noise to signal:
+        the last local minimum before the signal tail begins.
         """
         adj = ImageAdjustments()
         adj.set_pivot(image)
@@ -178,32 +178,57 @@ class ImageAdjustments:
         hist = np.bincount(img8.ravel(), minlength=256).astype(np.float64)
         total = img8.size
 
-        # Find background peak: the mode (largest histogram bin)
+        # Find the noise/signal boundary using smoothed histogram.
+        # For fluorescence microscopy: background (0) + autofluorescence
+        # (dim peak on tissue) should both be black. Only actual signal visible.
+        #
+        # Approach: smooth histogram, find the last significant peak
+        # in the lower intensity range, then set display_min at its
+        # descending edge (where it drops to 10% of that peak's height).
+        kernel = np.ones(3) / 3.0
+        smoothed = np.convolve(hist, kernel, mode='same')
+
+        # Find the last significant local maximum in the lower half
+        # (background peak, autofluorescence peak, etc.)
         bg_peak = int(np.argmax(hist))
-        bg_count = hist[bg_peak]
+        last_peak_val = bg_peak
+        last_peak_height = smoothed[bg_peak]
 
-        # Find where background ends: walk right from the peak
-        # until counts drop below 1% of peak height (the valley)
-        threshold = bg_count * 0.01
-        bg_end = bg_peak
-        for i in range(bg_peak + 1, 256):
-            if hist[i] < threshold:
-                bg_end = i
+        # Search for peaks up to the 98th percentile
+        p98_bin = 0
+        cumsum = 0.0
+        for i in range(256):
+            cumsum += hist[i]
+            if cumsum / total >= 0.98:
+                p98_bin = i
                 break
-            bg_end = i
 
-        # Signal = everything above background
-        # display_min = just above the background boundary
-        # This keeps dark tissue visible while crushing true background
-        display_min = bg_end / 255.0
+        search_limit = min(p98_bin, 128)
+        for i in range(bg_peak + 2, search_limit):
+            if (smoothed[i] >= smoothed[i - 1] and
+                    smoothed[i] >= smoothed[i + 1] and
+                    smoothed[i] > total * 0.001):  # peak must have >0.1% of pixels
+                last_peak_val = i
+                last_peak_height = smoothed[i]
 
-        # display_max = p99 of non-background pixels
-        signal_mask = img8 > bg_end
+        # Walk right from the last peak until the histogram drops to
+        # 10% of that peak's height — that's the noise/signal boundary
+        threshold = last_peak_height * 0.10
+        noise_end = last_peak_val
+        for i in range(last_peak_val + 1, min(last_peak_val + 50, 255)):
+            if smoothed[i] < threshold:
+                noise_end = i
+                break
+            noise_end = i
+
+        display_min = noise_end / 255.0
+
+        # display_max = p99 of signal pixels (above the noise floor)
+        signal_mask = img8 > noise_end
         if signal_mask.any():
             signal_pixels = img8[signal_mask]
             display_max = float(np.percentile(signal_pixels, 99)) / 255.0
         else:
-            # No signal found, use full range
             display_max = 1.0
 
         # Ensure minimum window width
