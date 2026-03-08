@@ -355,7 +355,7 @@ class MontageDocument:
     image_layer: ImageLayer
     roi_layers: list = field(default_factory=list)
     adjustments: dict = field(default_factory=lambda: {
-        'brightness': 0.0, 'contrast': 1.0, 'exposure': 0.0, 'gamma': 1.0,
+        'brightness': 0.0, 'contrast': 0.0, 'exposure': 0.0, 'gamma': 1.0,
     })
     color_index: int = 0
     downsample_factor: int = 1
