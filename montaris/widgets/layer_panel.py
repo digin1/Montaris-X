@@ -159,7 +159,7 @@ class LayerPanel(QWidget):
         btn_layout.addWidget(self.remove_btn)
 
         # Clear All (B.7)
-        self.clear_all_btn = QPushButton("Clr")
+        self.clear_all_btn = QPushButton("Clear All")
         self.clear_all_btn.setToolTip("Remove all ROIs")
         self.clear_all_btn.clicked.connect(self._clear_all)
         btn_layout.addWidget(self.clear_all_btn)
@@ -169,7 +169,7 @@ class LayerPanel(QWidget):
         self.dup_btn.clicked.connect(self._duplicate_selected)
         btn_layout.addWidget(self.dup_btn)
 
-        self.merge_btn = QPushButton("Mrg")
+        self.merge_btn = QPushButton("Merge")
         self.merge_btn.setToolTip("Merge selected ROIs")
         self.merge_btn.clicked.connect(self._merge_selected)
         btn_layout.addWidget(self.merge_btn)
@@ -180,18 +180,16 @@ class LayerPanel(QWidget):
         # Button row 2
         btn_layout2 = QHBoxLayout()
 
-        self.rename_btn = QPushButton("Ren")
-        self.rename_btn.setToolTip("Rename selected ROI")
+        self.rename_btn = QPushButton("Rename")
         self.rename_btn.clicked.connect(self._rename_selected)
         btn_layout2.addWidget(self.rename_btn)
 
-        self.color_btn = QPushButton("Col")
-        self.color_btn.setToolTip("Change ROI color")
+        self.color_btn = QPushButton("Color")
         self.color_btn.clicked.connect(self._change_color)
         btn_layout2.addWidget(self.color_btn)
 
         # Random color (B.11)
-        self.random_color_btn = QPushButton("Rnd")
+        self.random_color_btn = QPushButton("Random")
         self.random_color_btn.setToolTip("Random color")
         self.random_color_btn.clicked.connect(self._random_color)
         btn_layout2.addWidget(self.random_color_btn)
