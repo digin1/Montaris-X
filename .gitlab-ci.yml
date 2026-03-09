@@ -1,8 +1,22 @@
 stages:
+  - test
   - build
 
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+
+test:
+  stage: test
+  tags:
+    - linux
+  before_script:
+    - pip install -e ".[test]"
+  script:
+    - QT_QPA_PLATFORM=offscreen python -m pytest tests/ -v
+  cache:
+    key: pip-cache
+    paths:
+      - .pip-cache/
 
 .build_template: &build_template
   stage: build
