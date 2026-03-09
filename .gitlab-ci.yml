@@ -10,12 +10,17 @@ test:
   tags:
     - shared
   before_script:
+    - python3 -m venv .ci-venv
+    - source .ci-venv/bin/activate
+    - pip install --upgrade pip
     - pip install -e ".[test]"
   script:
-    - QT_QPA_PLATFORM=offscreen python -m pytest tests/ -v
+    - source .ci-venv/bin/activate
+    - LD_LIBRARY_PATH="" QT_QPA_PLATFORM=offscreen python -m pytest tests/ -v
   cache:
     key: pip-cache
     paths:
+      - .ci-venv/
       - .pip-cache/
 
 .build_template: &build_template
