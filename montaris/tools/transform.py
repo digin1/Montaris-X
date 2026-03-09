@@ -217,7 +217,27 @@ class TransformTool(BaseTool):
                     sx = sy = sx
                 else:
                     sx = sy = sy
-            M = make_scale_matrix(sx, sy, cx, cy)
+
+            # Anchor at the opposite corner/edge (not the center)
+            anchor_x, anchor_y = cx, cy
+            if handle_type == 'tl':
+                anchor_x, anchor_y = x2, y2
+            elif handle_type == 'tr':
+                anchor_x, anchor_y = x1, y2
+            elif handle_type == 'bl':
+                anchor_x, anchor_y = x2, y1
+            elif handle_type == 'br':
+                anchor_x, anchor_y = x1, y1
+            elif handle_type == 'tm':
+                anchor_y = y2
+            elif handle_type == 'bm':
+                anchor_y = y1
+            elif handle_type == 'ml':
+                anchor_x = x2
+            elif handle_type == 'mr':
+                anchor_x = x1
+
+            M = make_scale_matrix(sx, sy, anchor_x, anchor_y)
 
         self._current_matrix = M
 
