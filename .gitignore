@@ -16,3 +16,4 @@ tasks/
 testimages/
 .ci-venv/
 .pip-cache/
+builds/
