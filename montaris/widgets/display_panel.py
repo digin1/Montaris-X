@@ -16,7 +16,7 @@ class DisplayPanel(QWidget):
         self._channel_checkboxes = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(2, 2, 2, 2)
 
         # Composite toggle
         self.composite_cb = QCheckBox("Composite View")

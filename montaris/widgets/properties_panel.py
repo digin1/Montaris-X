@@ -12,7 +12,7 @@ class PropertiesPanel(QWidget):
         self._layer = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(2, 2, 2, 2)
 
         form = QFormLayout()
 

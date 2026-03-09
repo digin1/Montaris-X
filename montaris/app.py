@@ -91,6 +91,9 @@ class MontarisApp(QMainWindow):
         self.settings = QSettings("Montaris", "Montaris-X")
         self._restore_state()
 
+        # Set narrower right sidebar width
+        QTimer.singleShot(0, self._apply_dock_widths)
+
         # Activate default tool after all setup (signals, statusbar, toolbar)
         self.tool_panel.activate_default_tool()
 
@@ -1811,6 +1814,12 @@ class MontarisApp(QMainWindow):
         for d in [self._layer_dock, self._props_dock,
                   self._display_dock, self._adj_dock]:
             d.setVisible(True)
+
+    def _apply_dock_widths(self):
+        """Set compact right sidebar width after layout is ready."""
+        right_docks = [self._layer_dock, self._props_dock,
+                       self._display_dock, self._adj_dock]
+        self.resizeDocks(right_docks, [220] * len(right_docks), Qt.Horizontal)
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())

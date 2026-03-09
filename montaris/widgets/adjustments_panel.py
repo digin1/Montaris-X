@@ -15,7 +15,7 @@ class AdjustmentsPanel(QWidget):
         self._updating = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(2, 2, 2, 2)
 
         form = QFormLayout()
 
@@ -25,11 +25,11 @@ class AdjustmentsPanel(QWidget):
         self.brightness_slider.setValue(0)
         self.brightness_slider.valueChanged.connect(self._on_brightness)
         self._brightness_label = QLabel("0")
-        self._brightness_label.setFixedWidth(30)
+        self._brightness_label.setFixedWidth(28)
         row = QHBoxLayout()
         row.addWidget(self.brightness_slider)
         row.addWidget(self._brightness_label)
-        form.addRow("Brightness:", row)
+        form.addRow("Brt:", row)
 
         # Contrast: -100 to 100 (maps to -1.0 to 1.0, 0 = identity)
         self.contrast_slider = QSlider(Qt.Horizontal)
@@ -37,11 +37,11 @@ class AdjustmentsPanel(QWidget):
         self.contrast_slider.setValue(0)
         self.contrast_slider.valueChanged.connect(self._on_contrast)
         self._contrast_label = QLabel("0")
-        self._contrast_label.setFixedWidth(30)
+        self._contrast_label.setFixedWidth(28)
         row = QHBoxLayout()
         row.addWidget(self.contrast_slider)
         row.addWidget(self._contrast_label)
-        form.addRow("Contrast:", row)
+        form.addRow("Con:", row)
 
         # Exposure: -200 to 200 (maps to -2.0 to 2.0)
         self.exposure_slider = QSlider(Qt.Horizontal)
@@ -49,11 +49,11 @@ class AdjustmentsPanel(QWidget):
         self.exposure_slider.setValue(0)
         self.exposure_slider.valueChanged.connect(self._on_exposure)
         self._exposure_label = QLabel("0.00")
-        self._exposure_label.setFixedWidth(30)
+        self._exposure_label.setFixedWidth(28)
         row = QHBoxLayout()
         row.addWidget(self.exposure_slider)
         row.addWidget(self._exposure_label)
-        form.addRow("Exposure:", row)
+        form.addRow("Exp:", row)
 
         # Gamma: 10 to 500 (maps to 0.1 to 5.0)
         self.gamma_slider = QSlider(Qt.Horizontal)
@@ -61,11 +61,11 @@ class AdjustmentsPanel(QWidget):
         self.gamma_slider.setValue(100)
         self.gamma_slider.valueChanged.connect(self._on_gamma)
         self._gamma_label = QLabel("1.00")
-        self._gamma_label.setFixedWidth(30)
+        self._gamma_label.setFixedWidth(28)
         row = QHBoxLayout()
         row.addWidget(self.gamma_slider)
         row.addWidget(self._gamma_label)
-        form.addRow("Gamma:", row)
+        form.addRow("Gam:", row)
 
         layout.addLayout(form)
 
