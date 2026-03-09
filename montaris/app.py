@@ -1264,20 +1264,25 @@ class MontarisApp(QMainWindow):
             pass
 
     def _auto_detect_roi_zip(self, folder):
-        """Prompt user if exactly one ROI .zip file is found in folder."""
+        """Prompt user if exactly one ROI .zip file is found in folder or subfolders."""
         try:
-            zips = [f for f in os.listdir(folder) if f.lower().endswith('.zip')]
+            zips = []
+            for root, dirs, files in os.walk(folder):
+                for f in files:
+                    if f.lower().endswith('.zip'):
+                        zips.append(os.path.join(root, f))
             if len(zips) != 1:
                 return
-            fname = zips[0]
+            zip_path = zips[0]
+            display = os.path.relpath(zip_path, folder)
             reply = QMessageBox.question(
                 self, "ROI ZIP detected",
-                f"ROI ZIP detected in image folder:\n{fname}\n\nImport?\n\n"
-                f"Note: Auto-import only works when there is exactly one ZIP in the folder.",
+                f"ROI ZIP detected:\n{display}\n\nImport?\n\n"
+                f"Note: Auto-import only works when there is exactly one ZIP in the folder tree.",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self.import_roi_zip(os.path.join(folder, fname))
+                self.import_roi_zip(zip_path)
         except OSError:
             pass
 
