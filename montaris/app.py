@@ -1272,7 +1272,8 @@ class MontarisApp(QMainWindow):
             fname = zips[0]
             reply = QMessageBox.question(
                 self, "ROI ZIP detected",
-                f"ROI ZIP detected in image folder:\n{fname}\n\nImport?",
+                f"ROI ZIP detected in image folder:\n{fname}\n\nImport?\n\n"
+                f"Note: Auto-import only works when there is exactly one ZIP in the folder.",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
