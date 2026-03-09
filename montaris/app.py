@@ -1241,15 +1241,21 @@ class MontarisApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to batch export:\n{e}")
 
     def _auto_load_instructions(self, folder):
-        """Auto-load a .txt file containing 'instructions' in its name from folder."""
+        """Auto-load .txt files containing 'instructions' in their name from folder."""
         try:
-            for fname in os.listdir(folder):
-                if fname.lower().endswith('.txt') and 'instruction' in fname.lower():
-                    path = os.path.join(folder, fname)
-                    with open(path, 'r') as f:
-                        self._last_instructions_text = f.read()
-                    self.toast.show(f"Auto-loaded instructions: {fname}", "success")
-                    return
+            matches = sorted(
+                f for f in os.listdir(folder)
+                if f.lower().endswith('.txt') and 'instruction' in f.lower()
+            )
+            if not matches:
+                return
+            parts = []
+            for fname in matches:
+                with open(os.path.join(folder, fname), 'r') as f:
+                    parts.append(f"=== {fname} ===\n{f.read()}")
+            self._last_instructions_text = "\n\n".join(parts) if len(parts) > 1 else parts[0].split("\n", 1)[1]
+            names = ", ".join(matches)
+            self.toast.show(f"Auto-loaded instructions: {names}", "success")
         except OSError:
             pass
 
