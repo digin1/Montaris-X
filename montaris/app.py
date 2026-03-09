@@ -239,6 +239,7 @@ class MontarisApp(QMainWindow):
         self.tool_panel.tool_changed.connect(self._on_tool_changed)
         self.tool_panel.open_montage_requested.connect(self.open_image)
         self.tool_panel.import_roi_zip_requested.connect(self.import_roi_zip)
+        self.tool_panel.export_roi_zip_requested.connect(self.export_all_rois_zip)
         self.tool_panel.load_instructions_requested.connect(self.load_instructions_file)
         self.tool_panel.view_instructions_requested.connect(self._view_instructions)
         self.canvas.viewport_changed.connect(self._update_minimap_viewport)

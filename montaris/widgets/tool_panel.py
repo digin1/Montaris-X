@@ -27,6 +27,7 @@ class ToolPanel(QWidget):
     collapse_requested = Signal()
     open_montage_requested = Signal()
     import_roi_zip_requested = Signal()
+    export_roi_zip_requested = Signal()
     load_instructions_requested = Signal()
     view_instructions_requested = Signal()
 
@@ -185,6 +186,17 @@ class ToolPanel(QWidget):
         view_instr_btn.setToolTip("View loaded instructions")
         view_instr_btn.clicked.connect(lambda: QTimer.singleShot(0, self.view_instructions_requested.emit))
         layout.addWidget(view_instr_btn)
+
+        # --- Separator + Export ---
+        separator = QLabel()
+        separator.setFixedHeight(2)
+        separator.setStyleSheet("background: #555; margin: 6px 0;")
+        layout.addWidget(separator)
+
+        export_zip_btn = QPushButton("📦  Export ROIs ZIP")
+        export_zip_btn.setToolTip("Export all ROIs as a ZIP file")
+        export_zip_btn.clicked.connect(lambda: QTimer.singleShot(0, self.export_roi_zip_requested.emit))
+        layout.addWidget(export_zip_btn)
 
         layout.addStretch()
 
