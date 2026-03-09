@@ -840,6 +840,9 @@ class MontarisApp(QMainWindow):
         if n > 1:
             self.toast.show(f"Loaded {n} images in stack", "success")
 
+        # Auto-load instructions file from the same folder
+        self._auto_load_instructions(os.path.dirname(paths[0]))
+
     def _load_single_channel(self, name, data, ds_factor, skipped):
         """Load one image/channel into the image stack."""
         if self._flip_on_load_act.isChecked():
@@ -1236,6 +1239,19 @@ class MontarisApp(QMainWindow):
             self.toast.show(f"Batch exported to {os.path.basename(path)}", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to batch export:\n{e}")
+
+    def _auto_load_instructions(self, folder):
+        """Auto-load a .txt file containing 'instructions' in its name from folder."""
+        try:
+            for fname in os.listdir(folder):
+                if fname.lower().endswith('.txt') and 'instruction' in fname.lower():
+                    path = os.path.join(folder, fname)
+                    with open(path, 'r') as f:
+                        self._last_instructions_text = f.read()
+                    self.toast.show(f"Auto-loaded instructions: {fname}", "success")
+                    return
+        except OSError:
+            pass
 
     def load_instructions_file(self):
         path, _ = QFileDialog.getOpenFileName(
