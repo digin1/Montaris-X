@@ -841,7 +841,11 @@ class MontarisApp(QMainWindow):
             self.toast.show(f"Loaded {n} images in stack", "success")
 
         # Auto-load instructions file from the same folder
-        self._auto_load_instructions(os.path.dirname(paths[0]))
+        folder = os.path.dirname(paths[0])
+        self._auto_load_instructions(folder)
+
+        # Auto-detect ROI ZIP in the same folder
+        self._auto_detect_roi_zip(folder)
 
     def _load_single_channel(self, name, data, ds_factor, skipped):
         """Load one image/channel into the image stack."""
@@ -1259,6 +1263,29 @@ class MontarisApp(QMainWindow):
         except OSError:
             pass
 
+    def _auto_detect_roi_zip(self, folder):
+        """Prompt user if a ROI .zip file is found in folder."""
+        try:
+            zips = sorted(
+                f for f in os.listdir(folder)
+                if f.lower().endswith('.zip')
+            )
+            if not zips:
+                return
+            names = "\n".join(zips)
+            label = "ROI ZIP detected" if len(zips) == 1 else f"{len(zips)} ROI ZIPs detected"
+            reply = QMessageBox.question(
+                self, label,
+                f"{label} in image folder:\n{names}\n\nImport?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            for fname in zips:
+                self.import_roi_zip(os.path.join(folder, fname))
+        except OSError:
+            pass
+
     def load_instructions_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Instructions", "",
@@ -1368,16 +1395,17 @@ class MontarisApp(QMainWindow):
 
     # -- Import ROI ZIP --
 
-    def import_roi_zip(self):
+    def import_roi_zip(self, path=None):
         if self.layer_stack.image_layer is None:
             QMessageBox.information(self, "Info", "Load an image first.")
             return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import ROI ZIP", "",
-            "ZIP Archive (*.zip);;All Files (*)",
-        )
-        if not path:
-            return
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import ROI ZIP", "",
+                "ZIP Archive (*.zip);;All Files (*)",
+            )
+            if not path:
+                return
         action = self._ask_replace_or_keep()
         if action is None:
             return
