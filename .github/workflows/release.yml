@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  actions: read
 
 jobs:
   build:
@@ -59,15 +61,67 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/montaris-x*
 
-  release:
+  sign-windows:
     needs: build
+    runs-on: ubuntu-latest
+    if: vars.SIGNPATH_ORGANIZATION_ID != ''
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: montaris-x-windows
+          path: unsigned
+
+      - name: Submit signing request to SignPath
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: montaris-x
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: exe
+          github-artifact-id: montaris-x-windows
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: montaris-x-windows-signed
+          path: signed/montaris-x.exe
+
+  release:
+    needs: [build, sign-windows]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download all artifacts
+      - name: Download signed Windows artifact
+        if: needs.sign-windows.result == 'success'
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: montaris-x-windows-signed
+          path: artifacts/montaris-x-windows
+
+      - name: Download unsigned Windows artifact (fallback)
+        if: needs.sign-windows.result != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: montaris-x-windows
+          path: artifacts/montaris-x-windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: montaris-x-linux
+          path: artifacts/montaris-x-linux
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: montaris-x-macos
+          path: artifacts/montaris-x-macos
 
       - name: Prepare release files
         run: |
@@ -75,13 +129,17 @@ jobs:
           cp artifacts/montaris-x-windows/montaris-x.exe release/montaris-x-windows.exe
           cp artifacts/montaris-x-linux/montaris-x release/montaris-x-linux
           chmod +x release/montaris-x-linux
-          # macOS artifact is a .app bundle or binary
           if [ -f artifacts/montaris-x-macos/montaris-x ]; then
             cp artifacts/montaris-x-macos/montaris-x release/montaris-x-macos
             chmod +x release/montaris-x-macos
           else
             cd artifacts/montaris-x-macos && zip -r ../../release/montaris-x-macos.zip . && cd ../..
           fi
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

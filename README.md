@@ -86,6 +86,14 @@ pyinstaller --name Montaris-X --onedir --windowed --noconfirm main.py
 
 The built application will be in the `dist/Montaris-X/` folder.
 
+## Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- **Committers and reviewers**: [Repository contributors](https://github.com/digin1/Montaris-X/graphs/contributors)
+- **Approvers**: [Repository owner](https://github.com/digin1)
+- **Privacy policy**: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
 ## Requirements
 
 - Python 3.10+
