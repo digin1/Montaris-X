@@ -1,6 +1,14 @@
-# Montaris-X
+<p align="center">
+  <img src="montaris/assets/logo.png" alt="Montaris-X" width="128">
+</p>
 
-Cross-platform ROI editor for scientific images.
+<h1 align="center">Montaris-X</h1>
+
+<p align="center">
+  Desktop ROI editor for scientific microscopy images
+</p>
+
+---
 
 ## Quick Start
 
@@ -11,16 +19,36 @@ python main.py
 
 ## Features
 
-- Load TIFF, PNG, JPG images (16-bit TIFF supported)
-- Multiple ROI layers with unique colors
-- Brush, Eraser, and Polygon tools
-- Undo/Redo (Ctrl+Z / Ctrl+Shift+Z)
-- Save/Load ROI sets (.npz format)
+**Image Support**
+- TIFF (8/16-bit, multi-channel), PNG, JPG
+- Multi-channel composite and false-color display modes
+- Brightness, contrast, and gamma adjustments
+- Tiled rendering with LOD for large images
+
+**ROI Editing**
+- Multiple ROI layers with 20 distinct colors
+- Brush, Eraser, Rectangle, Circle, Polygon, Stamp, Bucket Fill tools
+- Transform and Move tools with connected-component awareness
+- Multi-selection editing (Ctrl+click)
+- Auto-overlap brush mode
+- Undo/Redo with full history
+
+**Import/Export**
+- Save/Load ROI sets (.npz)
+- Import/Export ImageJ .roi files (single and ZIP bundles)
+- Import PNG mask files
 - Export composited ROI overlay as PNG
-- GPU-accelerated rendering (OpenGL)
-- Pan (middle mouse or Space+drag) and zoom (scroll wheel)
-- Dark theme UI
-- Cross-platform: Windows, macOS, Linux
+- Batch instruction files (JSON/TXT)
+- Auto-fit out-of-bounds ROIs on import
+
+**UI**
+- Global opacity control and per-ROI opacity
+- Solid, Outline, and Both fill modes
+- Inline layer rename, color palette dialog
+- Minimap, performance monitor, debug console
+- HUD overlay with zoom/tool info
+- Help modal with tool reference and keyboard shortcuts
+- Dark theme, cross-platform (Windows, macOS, Linux)
 
 ## Keyboard Shortcuts
 
@@ -37,11 +65,16 @@ python main.py
 | B | Brush tool |
 | E | Eraser tool |
 | P | Polygon tool |
+| R | Rectangle tool |
+| C | Circle tool |
+| T | Transform tool |
+| M | Move tool |
+| S | Stamp tool |
+| F | Bucket Fill tool |
 | [ / ] | Decrease/Increase brush size |
 | Enter | Close polygon |
 | Delete | Clear active ROI |
 | Space+drag | Pan |
-| Middle mouse | Pan |
 | Scroll wheel | Zoom |
 
 ## Building Standalone App
@@ -58,5 +91,6 @@ The built application will be in the `dist/Montaris-X/` folder.
 - Python 3.10+
 - PySide6
 - NumPy
+- SciPy
 - tifffile
 - Pillow
