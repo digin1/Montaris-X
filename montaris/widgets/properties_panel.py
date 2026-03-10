@@ -29,7 +29,7 @@ class PropertiesPanel(QWidget):
         self.opacity_slider.setRange(0, 255)
         self.opacity_slider.setValue(128)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
-        form.addRow("Opacity:", self.opacity_slider)
+        form.addRow("Opacity (Selected ROIs):", self.opacity_slider)
 
         self.fill_mode_combo = QComboBox()
         self.fill_mode_combo.addItems(["Solid", "Outline", "Both"])

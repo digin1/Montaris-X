@@ -82,7 +82,8 @@ class TestLayerPanelFeatures:
 
     def test_global_opacity_slider(self, qapp, app_with_image):
         app = app_with_image
-        app.layer_panel.global_opacity_slider.setValue(50)
+        # Global opacity slider is now in the main toolbar
+        app._global_opacity_slider.setValue(50)
         assert app.layer_stack._global_opacity_factor == 0.5
 
     def test_show_all_toggle(self, qapp, app_with_image):

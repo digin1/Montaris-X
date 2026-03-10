@@ -535,24 +535,23 @@ class MontarisApp(QMainWindow):
 
         toolbar.addSeparator()
 
-        # ROI opacity in toolbar — synced with properties_panel
-        toolbar.addWidget(QLabel(" Opacity: "))
-        tb_opacity_slider = QSlider(Qt.Horizontal)
-        tb_opacity_slider.setRange(0, 255)
-        tb_opacity_slider.setValue(128)
-        tb_opacity_slider.setFixedWidth(120)
-        toolbar.addWidget(tb_opacity_slider)
+        # Global opacity in toolbar
+        toolbar.addWidget(QLabel(" Opacity (Global): "))
+        self._global_opacity_slider = QSlider(Qt.Horizontal)
+        self._global_opacity_slider.setRange(0, 100)
+        self._global_opacity_slider.setValue(100)
+        self._global_opacity_slider.setFixedWidth(120)
+        toolbar.addWidget(self._global_opacity_slider)
 
-        tb_opacity_spin = QSpinBox()
-        tb_opacity_spin.setRange(0, 255)
-        tb_opacity_spin.setValue(128)
-        toolbar.addWidget(tb_opacity_spin)
+        self._global_opacity_spin = QSpinBox()
+        self._global_opacity_spin.setRange(0, 100)
+        self._global_opacity_spin.setValue(100)
+        self._global_opacity_spin.setSuffix("%")
+        toolbar.addWidget(self._global_opacity_spin)
 
-        pp_slider = self.properties_panel.opacity_slider
-        tb_opacity_slider.valueChanged.connect(pp_slider.setValue)
-        pp_slider.valueChanged.connect(tb_opacity_slider.setValue)
-        tb_opacity_spin.valueChanged.connect(tb_opacity_slider.setValue)
-        tb_opacity_slider.valueChanged.connect(tb_opacity_spin.setValue)
+        self._global_opacity_slider.valueChanged.connect(self._global_opacity_spin.setValue)
+        self._global_opacity_spin.valueChanged.connect(self._global_opacity_slider.setValue)
+        self._global_opacity_slider.valueChanged.connect(self._on_global_opacity_changed)
 
         toolbar.addSeparator()
 
@@ -607,6 +606,11 @@ class MontarisApp(QMainWindow):
             self._right_toolbar.setVisible(False)
             for d in right_docks:
                 d.setVisible(True)
+
+    def _on_global_opacity_changed(self, value):
+        """Update global opacity factor from toolbar slider."""
+        self.layer_stack._global_opacity_factor = value / 100.0
+        self.canvas.refresh_overlays_lut_only()
 
     def _on_tool_changed(self, tool):
         self.active_tool = tool

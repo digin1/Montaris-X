@@ -197,15 +197,7 @@ class LayerPanel(QWidget):
         btn_layout2.addStretch()
         layout.addLayout(btn_layout2)
 
-        # Global opacity slider (B.30)
-        opacity_layout = QHBoxLayout()
-        opacity_layout.addWidget(QLabel("Opacity:"))
-        self.global_opacity_slider = QSlider(Qt.Horizontal)
-        self.global_opacity_slider.setRange(0, 100)
-        self.global_opacity_slider.setValue(100)
-        self.global_opacity_slider.valueChanged.connect(self._on_global_opacity_changed)
-        opacity_layout.addWidget(self.global_opacity_slider)
-        layout.addLayout(opacity_layout)
+        # Global opacity slider removed — now in main toolbar only
 
     def refresh(self):
         self._updating = True
@@ -701,7 +693,3 @@ class LayerPanel(QWidget):
         self.refresh()
         self.visibility_changed.emit()
 
-    def _on_global_opacity_changed(self, value):
-        """Update global opacity factor (B.30)."""
-        self.layer_stack._global_opacity_factor = value / 100.0
-        self.visibility_changed.emit()
