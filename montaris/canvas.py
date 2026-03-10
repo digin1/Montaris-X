@@ -147,7 +147,8 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     _PAINT_TOOLS = {'Brush', 'Eraser', 'Polygon', 'Bucket Fill',
-                     'Rectangle', 'Circle', 'Stamp', 'Transform'}
+                     'Rectangle', 'Circle', 'Stamp',
+                     'Transform (selected)', 'Transform All'}
 
     def set_tool(self, tool):
         # Clean up old tool's scene items (e.g. transform handles)

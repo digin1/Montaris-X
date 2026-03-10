@@ -10,8 +10,10 @@ TOOL_REGISTRY = {
     'Rectangle': ('montaris.tools.rectangle', 'RectangleTool', 'R', 'Shape'),
     'Circle': ('montaris.tools.circle', 'CircleTool', 'C', 'Shape'),
     'Stamp': ('montaris.tools.stamp', 'StampTool', 'S', 'Shape'),
-    'Transform': ('montaris.tools.transform', 'TransformTool', 'T', 'Transform'),
-    'Move': ('montaris.tools.move', 'MoveTool', 'V', 'Transform'),
+    'Transform (selected)': ('montaris.tools.transform', 'TransformTool', 'T', 'Transform'),
+    'Move (selected)': ('montaris.tools.move', 'MoveTool', 'V', 'Transform'),
+    'Transform All': ('montaris.tools.transform', 'TransformAllTool', 'Shift+T', 'Transform'),
+    'Move All': ('montaris.tools.move', 'MoveAllTool', 'Shift+V', 'Transform'),
 }
 
 

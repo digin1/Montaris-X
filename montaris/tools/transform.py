@@ -32,7 +32,7 @@ _HANDLE_CURSORS = {
 
 
 class TransformTool(BaseTool):
-    name = "Transform"
+    name = "Transform (selected)"
 
     def __init__(self, app):
         super().__init__(app)
@@ -759,3 +759,11 @@ class TransformTool(BaseTool):
 
     def cursor(self):
         return Qt.SizeAllCursor
+
+
+class TransformAllTool(TransformTool):
+    """Transform ALL ROI layers, not just selected ones."""
+    name = "Transform All"
+
+    def _get_target_layers(self, layer, canvas):
+        return list(canvas.layer_stack.roi_layers)

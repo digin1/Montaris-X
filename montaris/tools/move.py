@@ -9,7 +9,7 @@ from montaris.core.components import get_component_at
 
 
 class MoveTool(BaseTool):
-    name = "Move"
+    name = "Move (selected)"
 
     def __init__(self, app):
         super().__init__(app)
@@ -645,3 +645,11 @@ class MoveTool(BaseTool):
 
     def cursor(self):
         return Qt.SizeAllCursor
+
+
+class MoveAllTool(MoveTool):
+    """Move ALL ROI layers, not just selected ones."""
+    name = "Move All"
+
+    def _get_target_layers(self, layer, canvas):
+        return list(canvas.layer_stack.roi_layers)

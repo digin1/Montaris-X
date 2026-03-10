@@ -621,7 +621,7 @@ class MontarisApp(QMainWindow):
         if self.canvas._active_layer and hasattr(self.canvas._active_layer, 'name'):
             roi_info = f"  |  {self.canvas._active_layer.name}"
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
-        self._move_hint.setVisible(tool_name == 'Move')
+        self._move_hint.setVisible(tool_name in ('Move (selected)', 'Move All'))
         # Sync collapsed toolbar actions
         for name, act in self._left_tool_actions.items():
             act.setChecked(name == tool_name)
@@ -634,7 +634,8 @@ class MontarisApp(QMainWindow):
         roi_info = f"  |  {layer.name}" if layer and hasattr(layer, 'name') else ""
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
 
-    _NON_DRAWING_TOOLS = {'Hand', 'Select', 'Transform', 'Move'}
+    _NON_DRAWING_TOOLS = {'Hand', 'Select', 'Transform (selected)', 'Transform All',
+                          'Move (selected)', 'Move All'}
 
     def _on_roi_added(self):
         if self.layer_stack.image_layer is None:

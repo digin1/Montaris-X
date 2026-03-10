@@ -17,8 +17,10 @@ TOOL_ICONS = {
     'Rectangle': '🔲',
     'Circle': '⬤',
     'Stamp': '■',
-    'Transform': '🔧',
-    'Move': '✥',
+    'Transform (selected)': '🔧',
+    'Move (selected)': '✥',
+    'Transform All': '🔧✱',
+    'Move All': '✥✱',
 }
 
 
