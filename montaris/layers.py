@@ -177,6 +177,7 @@ class ROILayer:
         self._rle_data = None
         if value is not None:
             self._mask_shape = value.shape
+        self.invalidate_bbox()
 
     @property
     def shape(self):
@@ -389,13 +390,20 @@ class LayerStack(QObject):
         import time
         from montaris.core.event_logger import EventLogger
         t0 = time.perf_counter()
-        count = 0
-        for roi in self.roi_layers:
-            if roi is not active_layer:
+        targets = [r for r in self.roi_layers if r is not active_layer and r._mask is not None]
+        if len(targets) > 3:
+            # Parallel RLE encode — numpy releases GIL
+            from montaris.core.workers import get_pool
+            from montaris.core.rle import rle_encode
+            futures = [(r, get_pool().submit(rle_encode, r._mask)) for r in targets]
+            for roi, fut in futures:
+                roi._rle_data, roi._mask_shape = fut.result()
+                roi._mask = None
+        else:
+            for roi in targets:
                 roi.compress()
-                count += 1
         EventLogger.instance().log("compress", "compress_inactive",
-            duration_ms=(time.perf_counter() - t0) * 1000, count=count)
+            duration_ms=(time.perf_counter() - t0) * 1000, count=len(targets))
 
 
 @dataclass

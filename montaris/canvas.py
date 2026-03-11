@@ -546,10 +546,11 @@ class ImageCanvas(QGraphicsView):
             from PySide6.QtWidgets import QApplication
 
         # Collect visible ROIs and cull off-screen ones
+        # Note: bbox is invalidated by mask setter / mark_dirty, not here.
+        # Keeping cached bboxes avoids decompressing compressed ROI masks.
         visible_jobs = []  # (index, roi, target_lod)
         for i, roi in enumerate(rois):
             rid = id(roi)
-            roi.invalidate_bbox()
             if use_culling and roi != self._active_layer:
                 dbbox = roi.get_display_bbox()
                 if dbbox is not None:
