@@ -1,6 +1,6 @@
 import logging
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QTextEdit, QLineEdit, QLabel,
+    QWidget, QVBoxLayout, QTextEdit, QLineEdit, QLabel, QPushButton,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -38,6 +38,10 @@ class DebugConsole(QWidget):
         self.log_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
         layout.addWidget(self.log_output)
 
+        export_btn = QPushButton("Export Diagnostics")
+        export_btn.clicked.connect(self._export_diagnostics)
+        layout.addWidget(export_btn)
+
         self.eval_input = QLineEdit()
         self.eval_input.setPlaceholderText(">>> Enter Python expression...")
         self.eval_input.setFont(QFont("Monospace", 9))
@@ -69,6 +73,10 @@ class DebugConsole(QWidget):
                 self.log_output.append(str(result))
         except Exception as e:
             self.log_output.append(f"Error: {e}")
+
+    def _export_diagnostics(self):
+        if self._app and hasattr(self._app, '_export_diagnostics'):
+            self._app._export_diagnostics()
 
     def log(self, message):
         self.log_output.append(message)

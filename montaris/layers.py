@@ -386,9 +386,16 @@ class LayerStack(QObject):
 
     def compress_inactive(self, active_layer=None):
         """Compress all ROI layers except the active one."""
+        import time
+        from montaris.core.event_logger import EventLogger
+        t0 = time.perf_counter()
+        count = 0
         for roi in self.roi_layers:
             if roi is not active_layer:
                 roi.compress()
+                count += 1
+        EventLogger.instance().log("compress", "compress_inactive",
+            duration_ms=(time.perf_counter() - t0) * 1000, count=count)
 
 
 @dataclass

@@ -152,6 +152,7 @@ class ImageCanvas(QGraphicsView):
                      'Transform (selected)', 'Transform All'}
 
     def set_tool(self, tool):
+        t0 = time.perf_counter()
         # Clean up old tool's scene items (e.g. transform handles)
         old = self._tool
         if old is not None and hasattr(old, '_clear_handles'):
@@ -166,6 +167,10 @@ class ImageCanvas(QGraphicsView):
             self._flatten_all_offsets()
         if tool is not None and hasattr(tool, 'on_activate'):
             tool.on_activate(self._active_layer, self)
+        from montaris.core.event_logger import EventLogger
+        EventLogger.instance().log("tool", "set_tool",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            tool=getattr(tool, 'name', 'None'))
 
     def _flatten_all_offsets(self):
         """Bake any non-zero layer offsets into masks and clear undo stack."""
@@ -200,6 +205,7 @@ class ImageCanvas(QGraphicsView):
             self.refresh_overlays()
 
     def set_active_layer(self, layer):
+        t0 = time.perf_counter()
         if layer is not self._active_layer:
             old = self._active_layer
             # Clear transform/move handles when switching layers
@@ -215,6 +221,9 @@ class ImageCanvas(QGraphicsView):
                 tool.on_activate(layer, self)
         else:
             self._active_layer = layer
+        from montaris.core.event_logger import EventLogger
+        EventLogger.instance().log("tool", "set_active_layer",
+            duration_ms=(time.perf_counter() - t0) * 1000)
 
     def _on_selection_changed(self, layers):
         """Sync _active_layer to primary selection and update highlights."""
@@ -332,7 +341,7 @@ class ImageCanvas(QGraphicsView):
         h, w = img_layer.data.shape[:2]
         m = min(w, h) // 4  # 25% margin
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
-        self._report_render((time.perf_counter() - t0) * 1000)
+        self._report_render((time.perf_counter() - t0) * 1000, "refresh_image")
 
     def _get_display_uint8(self):
         """Get a cached uint8 display copy of the image data.
@@ -480,7 +489,7 @@ class ImageCanvas(QGraphicsView):
         finally:
             self._refreshing = False
 
-    def _report_render(self, ms):
+    def _report_render(self, ms, render_type="overlay"):
         """Report a frame to the perf monitor if available."""
         win = self.parent()
         if win and hasattr(win, 'perf_monitor'):
@@ -493,6 +502,8 @@ class ImageCanvas(QGraphicsView):
                 win.perf_monitor.set_tile_cache_info(f"{cache.size}/{cache._max_size}")
             else:
                 win.perf_monitor.set_tile_cache_info("0")
+        from montaris.core.event_logger import EventLogger
+        EventLogger.instance().log("render", render_type, duration_ms=ms)
 
     def _do_refresh_overlays(self):
         """Internal: actual rebuild of all ROI pixmap items."""
@@ -606,7 +617,7 @@ class ImageCanvas(QGraphicsView):
         if show_progress:
             self._progress_bar.hide()
 
-        self._report_render((time.perf_counter() - t0) * 1000)
+        self._report_render((time.perf_counter() - t0) * 1000, "refresh_overlays")
         self._update_selection_highlights()
 
     def flash_progress(self, message=None):
@@ -678,7 +689,7 @@ class ImageCanvas(QGraphicsView):
         t0 = time.perf_counter()
         for lid, (layer, bbox) in pending.items():
             self._render_dirty_region(layer, bbox, lod_level=lod)
-        self._report_render((time.perf_counter() - t0) * 1000)
+        self._report_render((time.perf_counter() - t0) * 1000, "flush_dirty")
 
     def _render_dirty_region(self, layer, dirty_bbox, lod_level=0):
         """Render a single dirty region onto the layer's pixmap item."""

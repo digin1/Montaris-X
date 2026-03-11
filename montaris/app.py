@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 import numpy as np
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileDialog,
@@ -474,6 +475,9 @@ class MontarisApp(QMainWindow):
         guide_act.setShortcut(QKeySequence("F1"))
         guide_act.triggered.connect(self._show_help)
         help_menu.addAction(guide_act)
+        diag_act = QAction("Export &Diagnostics...", self)
+        diag_act.triggered.connect(self._export_diagnostics)
+        help_menu.addAction(diag_act)
 
     def _setup_statusbar(self):
         self.statusbar = QStatusBar()
@@ -771,7 +775,7 @@ class MontarisApp(QMainWindow):
 
     def fix_overlaps(self, priority="later_wins"):
         from montaris.core.roi_ops import fix_overlaps
-        with busy_cursor("Fixing overlaps...", self):
+        with busy_cursor("Fixing overlaps...", self, log_as="tool.fix_overlaps"):
             fix_overlaps(self.layer_stack.roi_layers, priority)
             self.canvas.refresh_overlays()
         self.statusbar.showMessage(f"Fixed overlaps ({priority})")
@@ -829,7 +833,7 @@ class MontarisApp(QMainWindow):
             if ok and item != items[0]:
                 ds_factor = int(item[0])
         skipped = []
-        with busy_cursor("Loading image...", self):
+        with busy_cursor("Loading image...", self, log_as="io.open_image"):
             for path in paths:
                 try:
                     # Split multi-channel TIFFs into individual images
@@ -975,7 +979,7 @@ class MontarisApp(QMainWindow):
         )
         if path:
             try:
-                with busy_cursor("Loading ROIs...", self):
+                with busy_cursor("Loading ROIs...", self, log_as="io.load_rois"):
                     rois = load_roi_set(path)
                     for roi in rois:
                         self.layer_stack.add_roi(roi)
@@ -998,7 +1002,7 @@ class MontarisApp(QMainWindow):
         )
         if path:
             try:
-                with busy_cursor("Saving ROIs...", self):
+                with busy_cursor("Saving ROIs...", self, log_as="io.save_rois"):
                     save_roi_set(path, self.layer_stack.roi_layers)
                 self.toast.show(f"Saved {len(self.layer_stack.roi_layers)} ROI(s)", "success")
             except Exception as e:
@@ -1006,8 +1010,7 @@ class MontarisApp(QMainWindow):
 
     def _flatten_roi_offsets(self):
         """Flatten all layer offsets before export/save operations."""
-        import time
-        with busy_cursor("Flattening offsets...", self):
+        with busy_cursor("Flattening offsets...", self, log_as="tool.flatten_offsets"):
             _last_pe = time.monotonic()
             for roi in self.layer_stack.roi_layers:
                 roi.flatten_offset()
@@ -1061,7 +1064,7 @@ class MontarisApp(QMainWindow):
                 img = Image.fromarray(mask)
                 img.save(out_path)
 
-            with busy_cursor("Exporting PNG masks...", self):
+            with busy_cursor("Exporting PNG masks...", self, log_as="io.export_png"):
                 # Build jobs
                 jobs = []
                 for i, roi in enumerate(rois):
@@ -1123,7 +1126,7 @@ class MontarisApp(QMainWindow):
                 progress.setWindowModality(Qt.WindowModal)
             else:
                 progress = None
-            with busy_cursor("Importing ImageJ ROIs...", self):
+            with busy_cursor("Importing ImageJ ROIs...", self, log_as="io.import_imagej"):
                 for i, path in enumerate(paths):
                     if progress and progress.wasCanceled():
                         break
@@ -1158,7 +1161,7 @@ class MontarisApp(QMainWindow):
             return
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
-            with busy_cursor("Exporting ImageJ ROI...", self):
+            with busy_cursor("Exporting ImageJ ROI...", self, log_as="io.export_imagej_single"):
                 roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
                 if roi_dict:
                     write_imagej_roi(roi_dict, path)
@@ -1194,7 +1197,7 @@ class MontarisApp(QMainWindow):
                     return True
                 return False
 
-            with busy_cursor("Exporting ImageJ ROIs...", self):
+            with busy_cursor("Exporting ImageJ ROIs...", self, log_as="io.export_imagej_bulk"):
                 if n > 3:
                     from montaris.core.workers import get_pool
                     futures = []
@@ -1236,7 +1239,7 @@ class MontarisApp(QMainWindow):
         if not path:
             return
         try:
-            with busy_cursor("Batch exporting...", self):
+            with busy_cursor("Batch exporting...", self, log_as="io.batch_export"):
                 n = len(self.layer_stack.roi_layers)
                 if filt.startswith("NumPy"):
                     save_roi_set(path, self.layer_stack.roi_layers)
@@ -1381,7 +1384,7 @@ class MontarisApp(QMainWindow):
                     arr = np.array(img.resize((tw, th), Image.NEAREST))
                 return (arr > 0).astype(np.uint8) * 255
 
-            with busy_cursor("Importing PNG masks...", self):
+            with busy_cursor("Importing PNG masks...", self, log_as="io.import_png"):
                 if n > 3:
                     from montaris.core.workers import get_pool
                     futures = [(p, get_pool().submit(_decode_png_mask, p, w, h)) for p in paths]
@@ -1436,6 +1439,7 @@ class MontarisApp(QMainWindow):
             self.layer_stack.roi_layers.clear()
             self.layer_stack._color_index = 0
             self.canvas._selection.clear()
+        _t0 = time.perf_counter()
         try:
             import zipfile
             from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
@@ -1555,6 +1559,9 @@ class MontarisApp(QMainWindow):
             if need_scale:
                 msg += f" (scaled from {max_w}\u00d7{max_h} to {img_w}\u00d7{img_h})"
             self.toast.show(msg, "success")
+            from montaris.core.event_logger import EventLogger
+            EventLogger.instance().log("io", "import_roi_zip",
+                duration_ms=(time.perf_counter() - _t0) * 1000, count=count)
             QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
         except Exception as e:
             QApplication.restoreOverrideCursor()
@@ -1591,7 +1598,7 @@ class MontarisApp(QMainWindow):
                 return None
 
             # Compute in parallel, write to zipfile sequentially (not thread-safe)
-            with busy_cursor("Exporting ROIs to ZIP...", self):
+            with busy_cursor("Exporting ROIs to ZIP...", self, log_as="io.export_zip"):
                 if n > 3:
                     from montaris.core.workers import get_pool
                     futures = [
@@ -1744,6 +1751,22 @@ class MontarisApp(QMainWindow):
         dlg = HelpModal(self)
         dlg.exec()
 
+    def _export_diagnostics(self):
+        import json
+        from datetime import datetime
+        from montaris.core.event_logger import EventLogger
+        default_name = f"montaris_diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Diagnostics", default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        data = EventLogger.instance().export_json(app=self)
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+        self.toast.show(f"Exported {data['session']['total_events']} events", "success")
+
     def _view_instructions(self):
         text = getattr(self, '_last_instructions_text', None)
         if text is None:
@@ -1807,12 +1830,16 @@ class MontarisApp(QMainWindow):
             return
         cmd = self.undo_stack.undo()
         if cmd:
+            from montaris.core.event_logger import EventLogger
+            EventLogger.instance().log("undo", "undo", bytes=getattr(cmd, 'byte_size', 0))
             self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
 
     def redo(self):
         cmd = self.undo_stack.redo()
         if cmd:
+            from montaris.core.event_logger import EventLogger
+            EventLogger.instance().log("undo", "redo", bytes=getattr(cmd, 'byte_size', 0))
             self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
 
