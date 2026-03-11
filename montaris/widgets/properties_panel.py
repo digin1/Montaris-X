@@ -55,7 +55,7 @@ class PropertiesPanel(QWidget):
 
         if hasattr(layer, 'mask'):
             self.type_label.setText("ROI")
-            h, w = layer.mask.shape
+            h, w = layer.shape
             self.size_label.setText(f"{w} x {h}")
             self.opacity_slider.setValue(layer.opacity)
             fill_mode = getattr(layer, 'fill_mode', 'solid')

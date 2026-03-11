@@ -82,6 +82,12 @@ class BrushTool(BaseTool):
             sy1, sy2, sx1, sx2 = sb
             painted = layer.mask[sy1:sy2, sx1:sx2] > 0
             for other in self._overlap_layers:
+                ob = other.get_bbox()
+                if ob is None:
+                    continue
+                # Skip if other's bbox doesn't overlap stroke bbox
+                if ob[1] <= sy1 or ob[0] >= sy2 or ob[3] <= sx1 or ob[2] >= sx2:
+                    continue
                 other_crop = other.mask[sy1:sy2, sx1:sx2]
                 overlap = painted & (other_crop > 0)
                 if overlap.any():

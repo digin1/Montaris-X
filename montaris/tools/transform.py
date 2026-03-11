@@ -14,6 +14,7 @@ from montaris.core.roi_transform import (
     apply_affine_inplace, make_scale_matrix, make_rotation_matrix,
 )
 from montaris.core.components import get_component_at
+from montaris.core.rle import rle_encode, rle_decode
 
 HANDLE_HIT_RADIUS = 24
 
@@ -112,7 +113,7 @@ class TransformTool(BaseTool):
                 # On first click, share full mask ref as undo snapshot too.
                 if lid not in self._session_snapshots:
                     full_snap = l.mask.copy()
-                    self._session_snapshots[lid] = full_snap
+                    self._session_snapshots[lid] = rle_encode(full_snap)
                     self._session_bboxes[lid] = sb
                     self._snapshots[lid] = (l, full_snap, sb)
                 else:
@@ -306,7 +307,8 @@ class TransformTool(BaseTool):
             # Component-aware: transform only the clicked component
             l = self._target_layers[0]
             lid = id(l)
-            session_snap = self._session_snapshots.get(lid)
+            session_rle = self._session_snapshots.get(lid)
+            session_snap = rle_decode(*session_rle) if session_rle is not None else None
             snap_bb = self._snap_bboxes.get(lid)  # bbox before this drag
             if session_snap is not None and self._cumulative_matrix is not None:
                 cum_2x3 = self._cumulative_matrix[:2]
@@ -333,7 +335,8 @@ class TransformTool(BaseTool):
             for lid, (l, snap_data, sb) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
-                session_snap = self._session_snapshots.get(lid)
+                session_rle = self._session_snapshots.get(lid)
+                session_snap = rle_decode(*session_rle) if session_rle is not None else None
                 if session_snap is not None and self._cumulative_matrix is not None:
                     cum_2x3 = self._cumulative_matrix[:2]
                     l.mask[:] = 0
@@ -565,7 +568,8 @@ class TransformTool(BaseTool):
         mask_crop = l.mask[ly1:ly2, lx1:lx2]
 
         # Non-component = pixels in session snapshot outside the original component mask
-        session_snap = self._session_snapshots.get(lid)
+        session_rle = self._session_snapshots.get(lid)
+        session_snap = rle_decode(*session_rle) if session_rle is not None else None
         if session_snap is not None:
             snap_crop = session_snap[ly1:ly2, lx1:lx2]
             comp_crop_full = comp[ly1:ly2, lx1:lx2]

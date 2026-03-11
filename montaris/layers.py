@@ -1,6 +1,7 @@
 import numpy as np
 from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
+from montaris.core.rle import rle_encode, rle_decode
 
 # --- Napari-compatible label colormap (LAB + low-discrepancy sequence) ---
 
@@ -150,7 +151,9 @@ class ImageLayer:
 class ROILayer:
     def __init__(self, name, width, height, color=None):
         self.name = name
-        self.mask = np.zeros((height, width), dtype=np.uint8)
+        self._mask = np.zeros((height, width), dtype=np.uint8)
+        self._rle_data = None      # compressed bytes (mutually exclusive with _mask)
+        self._mask_shape = (height, width)
         self.color = color or ROI_COLORS[0]
         self.opacity = 128
         self.visible = True
@@ -162,8 +165,42 @@ class ROILayer:
         self.offset_y = 0
 
     @property
+    def mask(self):
+        if self._mask is None:
+            self._mask = rle_decode(self._rle_data, self._mask_shape)
+            self._rle_data = None
+        return self._mask
+
+    @mask.setter
+    def mask(self, value):
+        self._mask = value
+        self._rle_data = None
+        if value is not None:
+            self._mask_shape = value.shape
+
+    @property
     def shape(self):
-        return self.mask.shape
+        return self._mask_shape
+
+    def compress(self):
+        """Compress mask to RLE, freeing the numpy array."""
+        if self._mask is not None:
+            self._rle_data, self._mask_shape = rle_encode(self._mask)
+            self._mask = None
+
+    @property
+    def is_compressed(self):
+        return self._rle_data is not None
+
+    def get_mask_crop(self, bbox):
+        """Get a mask crop. If compressed, decompress transiently (no caching)."""
+        if self._mask is not None:
+            y1, y2, x1, x2 = bbox
+            return self._mask[y1:y2, x1:x2]
+        # Decompress full mask, extract crop, discard full mask
+        full = rle_decode(self._rle_data, self._mask_shape)
+        y1, y2, x1, x2 = bbox
+        return full[y1:y2, x1:x2]
 
     def invalidate_bbox(self):
         """Mark the cached bounding box as stale."""
@@ -346,6 +383,12 @@ class LayerStack(QObject):
             roi.color = self.next_color()
         self.roi_layers.insert(index, roi)
         self.changed.emit()
+
+    def compress_inactive(self, active_layer=None):
+        """Compress all ROI layers except the active one."""
+        for roi in self.roi_layers:
+            if roi is not active_layer:
+                roi.compress()
 
 
 @dataclass

@@ -196,11 +196,15 @@ class ImageCanvas(QGraphicsView):
 
     def set_active_layer(self, layer):
         if layer is not self._active_layer:
+            old = self._active_layer
             # Clear transform/move handles when switching layers
             tool = self._tool
             if tool is not None and hasattr(tool, '_clear_handles'):
                 tool._clear_handles(self)
             self._active_layer = layer
+            # Compress the old layer now that it's inactive
+            if old is not None and hasattr(old, 'compress'):
+                old.compress()
             # Re-show bbox for new layer if tool supports it
             if tool is not None and hasattr(tool, 'on_activate'):
                 tool.on_activate(layer, self)
@@ -565,7 +569,7 @@ class ImageCanvas(QGraphicsView):
                 # read the shared roi.mask while the main thread may
                 # modify it (e.g. during processEvents).
                 y1, y2, x1, x2 = bbox
-                mask_crop = roi.mask[y1:y2, x1:x2].copy()
+                mask_crop = roi.get_mask_crop((y1, y2, x1, x2)).copy()
                 fut = get_pool().submit(
                     _compute_roi_rgba_from_crop, mask_crop, roi.color,
                     eff_opacity, fill_mode, target_lod,
@@ -786,7 +790,7 @@ class ImageCanvas(QGraphicsView):
         effective_opacity = int(roi.opacity * gof)
         fill_mode = getattr(roi, 'fill_mode', 'solid')
 
-        mask_crop = roi.mask[y1:y2, x1:x2]
+        mask_crop = roi.get_mask_crop((y1, y2, x1, x2))
 
         # LOD downsampling: max-pool mask then scale up in Qt
         scale_factor = 1

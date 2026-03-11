@@ -976,6 +976,7 @@ class MontarisApp(QMainWindow):
                 for roi in rois:
                     self.layer_stack.add_roi(roi)
                 self._auto_fit_rois()
+                self.layer_stack.compress_inactive(self.canvas._active_layer)
                 self.canvas.refresh_overlays()
                 self.layer_panel.refresh()
                 self.statusbar.showMessage(f"Loaded {len(rois)} ROIs from {path}")
@@ -1392,6 +1393,7 @@ class MontarisApp(QMainWindow):
 
             if progress:
                 progress.close()
+            self.layer_stack.compress_inactive(self.canvas._active_layer)
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             self.toast.show(f"Imported {len(paths)} PNG mask(s)", "success")
@@ -1529,6 +1531,7 @@ class MontarisApp(QMainWindow):
                     QApplication.processEvents()
 
             progress.close()
+            self.layer_stack.compress_inactive(self.canvas._active_layer)
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             msg = f"Imported {count} ROI(s) from ZIP"
