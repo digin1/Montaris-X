@@ -1,4 +1,5 @@
 import numpy as np
+from montaris.core.undo import _cmd_byte_size
 
 
 class CompoundUndoCommand:
@@ -23,9 +24,13 @@ class CompoundUndoCommand:
         for cmd in self.commands:
             cmd.redo()
 
+    @property
+    def byte_size(self):
+        return sum(_cmd_byte_size(c) for c in self.commands)
+
 
 class SnapshotUndoCommand:
-    """Stores full mask snapshots for bulk operations across many layers."""
+    """Stores crop-based diffs for bulk operations across many layers."""
 
     def __init__(self, layer_snapshots):
         """
@@ -34,18 +39,33 @@ class SnapshotUndoCommand:
         """
         self._entries = []
         for layer, old_mask in layer_snapshots:
-            self._entries.append((layer, old_mask.copy(), layer.mask.copy()))
+            diff = old_mask != layer.mask
+            if not diff.any():
+                continue
+            ys, xs = np.where(diff)
+            y1, y2 = int(ys.min()), int(ys.max()) + 1
+            x1, x2 = int(xs.min()), int(xs.max()) + 1
+            bbox = (y1, y2, x1, x2)
+            self._entries.append((layer, bbox,
+                                  old_mask[y1:y2, x1:x2].copy(),
+                                  layer.mask[y1:y2, x1:x2].copy()))
 
     @property
     def roi_layer(self):
         return self._entries[0][0] if self._entries else None
 
     def undo(self):
-        for layer, old_mask, _ in self._entries:
-            layer.mask[:] = old_mask
+        for layer, bbox, old_crop, _ in self._entries:
+            y1, y2, x1, x2 = bbox
+            layer.mask[y1:y2, x1:x2] = old_crop
             layer.invalidate_bbox()
 
     def redo(self):
-        for layer, _, new_mask in self._entries:
-            layer.mask[:] = new_mask
+        for layer, bbox, _, new_crop in self._entries:
+            y1, y2, x1, x2 = bbox
+            layer.mask[y1:y2, x1:x2] = new_crop
             layer.invalidate_bbox()
+
+    @property
+    def byte_size(self):
+        return sum(e[2].nbytes + e[3].nbytes for e in self._entries)

@@ -1802,9 +1802,9 @@ class MontarisApp(QMainWindow):
                 if hasattr(sub, 'roi_layer') and sub.roi_layer is not None:
                     layers.add(sub.roi_layer)
         elif hasattr(cmd, '_entries'):
-            # SnapshotUndoCommand
-            for layer, _, _ in cmd._entries:
-                layers.add(layer)
+            # SnapshotUndoCommand (entries are 4-tuples: layer, bbox, old, new)
+            for entry in cmd._entries:
+                layers.add(entry[0])
         elif hasattr(cmd, 'roi_layer') and cmd.roi_layer is not None:
             layers.add(cmd.roi_layer)
 

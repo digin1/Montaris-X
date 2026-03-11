@@ -14,7 +14,7 @@ class BrushTool(BaseTool):
         self._painting = False
         self._last_pos = None
         self._snapshot = None
-        self._other_snapshots = {}  # id(layer) -> (layer, snapshot)
+        self._overlap_layers = []
         self._stroke_bbox = None  # (y1, y2, x1, x2) accumulated during stroke
         self._cached_circle = None
         self._cached_circle_size = -1
@@ -30,12 +30,11 @@ class BrushTool(BaseTool):
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
 
-        # Snapshot other layers if auto-overlap is on (C.7)
-        self._other_snapshots.clear()
+        # Track layers to check for auto-overlap (no copies yet)
+        self._overlap_layers = []
         if self.app._auto_overlap:
-            for other in self.app.layer_stack.roi_layers:
-                if other is not layer and hasattr(other, 'mask'):
-                    self._other_snapshots[id(other)] = (other, other.mask.copy())
+            self._overlap_layers = [other for other in self.app.layer_stack.roi_layers
+                                    if other is not layer and hasattr(other, 'mask')]
 
         self._paint(pos, layer)
         if self._stroke_bbox is not None:
@@ -76,21 +75,22 @@ class BrushTool(BaseTool):
                 commands.append(cmd)
 
         # Auto-overlap: zero other layers where we painted (C.7)
+        # Snapshot only the stroke bbox crop BEFORE modifying — no upfront full copies
         affected_layers = []
         sb = self._stroke_bbox
-        if self.app._auto_overlap and sb is not None:
+        if self.app._auto_overlap and sb is not None and self._overlap_layers:
             sy1, sy2, sx1, sx2 = sb
             painted = layer.mask[sy1:sy2, sx1:sx2] > 0
-            for lid, (other, snap) in self._other_snapshots.items():
+            for other in self._overlap_layers:
                 other_crop = other.mask[sy1:sy2, sx1:sx2]
                 overlap = painted & (other_crop > 0)
                 if overlap.any():
+                    snap_crop = other_crop.copy()  # Only crop, only if needed
                     other_crop[overlap] = 0
-                    snap_crop = snap[sy1:sy2, sx1:sx2]
                     if not np.array_equal(snap_crop, other_crop):
                         cmd = UndoCommand(
                             other, (sy1, sy2, sx1, sx2),
-                            snap_crop, other_crop,
+                            snap_crop, other_crop.copy(),
                         )
                         commands.append(cmd)
                         affected_layers.append(other)
@@ -109,7 +109,7 @@ class BrushTool(BaseTool):
 
         self._snapshot = None
         self._stroke_bbox = None
-        self._other_snapshots.clear()
+        self._overlap_layers = []
         canvas._update_selection_highlights()
 
     def _get_circle(self):

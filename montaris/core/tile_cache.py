@@ -2,9 +2,9 @@ from collections import OrderedDict
 
 
 class TileCache:
-    """LRU cache for tile QImages. Max 500 tiles by default."""
+    """LRU cache for tile QImages. Max 200 tiles by default."""
 
-    def __init__(self, max_size=500):
+    def __init__(self, max_size=200):
         self._cache = OrderedDict()
         self._max_size = max_size
 

@@ -92,6 +92,7 @@ class TilePyramid:
 
         # Cache for downsampled full arrays at each level (lazy)
         self._level_data = {0: image_data}
+        self._level_access_order = [0]  # LRU tracking for pyramid levels
 
     # ------------------------------------------------------------------
     # Public API
@@ -187,8 +188,16 @@ class TilePyramid:
 
     def _get_level_data(self, level):
         """Return the full numpy array for *level*, computing it lazily
-        by downsampling from the previous level."""
+        by downsampling from the previous level.
+
+        Evicts pyramid levels beyond the 2 most recently accessed
+        (level 0 is never evicted) to limit memory usage.
+        """
         if level in self._level_data:
+            # Update access order
+            if level in self._level_access_order:
+                self._level_access_order.remove(level)
+            self._level_access_order.append(level)
             return self._level_data[level]
 
         # Build all intermediate levels we don't have yet
@@ -197,6 +206,26 @@ class TilePyramid:
                 continue
             prev = self._get_level_data(lv - 1)
             self._level_data[lv] = self._downsample(prev)
+
+        # Update access order
+        if level in self._level_access_order:
+            self._level_access_order.remove(level)
+        self._level_access_order.append(level)
+
+        # Evict levels beyond 2 most recent (never evict level 0)
+        while len(self._level_access_order) > 3:  # level 0 + 2 others
+            oldest = self._level_access_order[0]
+            if oldest == 0:
+                # Never evict level 0, skip it
+                if len(self._level_access_order) > 1:
+                    oldest = self._level_access_order[1]
+                    self._level_access_order.pop(1)
+                else:
+                    break
+            else:
+                self._level_access_order.pop(0)
+            if oldest in self._level_data and oldest != 0:
+                del self._level_data[oldest]
 
         return self._level_data[level]
 

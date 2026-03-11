@@ -69,7 +69,9 @@ class TestSnapshotUndoCommand:
 
     def test_roi_layer_property(self):
         layer = ROILayer("test", 10, 10)
-        cmd = SnapshotUndoCommand([(layer, layer.mask.copy())])
+        old_mask = layer.mask.copy()
+        layer.mask[0, 0] = 255  # Create a real diff so entries is non-empty
+        cmd = SnapshotUndoCommand([(layer, old_mask)])
         assert cmd.roi_layer is layer
 
 
