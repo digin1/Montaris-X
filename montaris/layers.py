@@ -287,7 +287,7 @@ class ROILayer:
         if bbox is None:
             return False
         y1, y2, x1, x2 = bbox
-        h, w = self.mask.shape
+        h, w = self.shape
         dy1, dy2 = y1 + self.offset_y, y2 + self.offset_y
         dx1, dx2 = x1 + self.offset_x, x2 + self.offset_x
         return dy1 < 0 or dy2 > h or dx1 < 0 or dx2 > w

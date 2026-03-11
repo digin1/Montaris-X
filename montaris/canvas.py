@@ -155,13 +155,14 @@ class ImageCanvas(QGraphicsView):
         old = self._tool
         if old is not None and hasattr(old, '_clear_handles'):
             old._clear_handles(self)
-        # Flatten offsets when switching to paint/transform tools
-        if tool is not None and getattr(tool, 'name', None) in self._PAINT_TOOLS:
-            self._flatten_all_offsets()
+        # Set new tool BEFORE flatten so events during slow ops use correct tool
         self._tool = tool
         self.hide_brush_preview()
         self._hide_stamp_preview()
         self._update_cursor()
+        # Flatten offsets when switching to paint/transform tools
+        if tool is not None and getattr(tool, 'name', None) in self._PAINT_TOOLS:
+            self._flatten_all_offsets()
         if tool is not None and hasattr(tool, 'on_activate'):
             tool.on_activate(self._active_layer, self)
 
