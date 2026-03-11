@@ -483,21 +483,31 @@ class TransformTool(BaseTool):
             gof = canvas.layer_stack._global_opacity_factor
 
             if is_batch and len(affected) > 3:
-                # Parallel rebuild for Transform All
+                # Parallel rebuild for Transform All with viewport culling
                 from montaris.core.workers import get_pool
                 from montaris.canvas import _compute_roi_rgba_from_crop
+                from PySide6.QtCore import QRectF
+                vp_rect = canvas.mapToScene(canvas.viewport().rect()).boundingRect()
+                use_culling = vp_rect.width() > 0 and vp_rect.height() > 0
                 futures = []
                 for l in affected:
                     try:
                         idx = canvas.layer_stack.roi_layers.index(l)
                     except ValueError:
                         continue
+                    rid = id(l)
                     target_lod = 0 if l == canvas._active_layer else lod
                     bbox = l.get_bbox()
                     if bbox is None or not l.visible:
                         futures.append((l, idx, target_lod, None))
                         continue
                     y1, y2, x1, x2 = bbox
+                    # Viewport culling: skip off-screen ROIs
+                    if use_culling and l != canvas._active_layer:
+                        dx, dy = l.offset_x, l.offset_y
+                        if not vp_rect.intersects(QRectF(x1 + dx, y1 + dy, x2 - x1, y2 - y1)):
+                            canvas._roi_stale.add(rid)
+                            continue
                     mask_crop = l.get_mask_crop((y1, y2, x1, x2)).copy()
                     eff = int(l.opacity * gof)
                     fill_mode = getattr(l, 'fill_mode', 'solid')

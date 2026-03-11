@@ -949,9 +949,11 @@ class ImageCanvas(QGraphicsView):
 
     def zoom_in(self):
         self.scale(1.25, 1.25)
+        self.viewport_changed.emit()
 
     def zoom_out(self):
         self.scale(1 / 1.25, 1 / 1.25)
+        self.viewport_changed.emit()
 
     # ------------------------------------------------------------------
     # LOD / viewport culling
@@ -974,7 +976,8 @@ class ImageCanvas(QGraphicsView):
             self._lod_timer = QTimer(self)
             self._lod_timer.setSingleShot(True)
             self._lod_timer.timeout.connect(self._on_viewport_changed_lod)
-        self._lod_timer.start(50)
+        # 250ms debounce — avoids re-rasterization during continuous zoom/scroll
+        self._lod_timer.start(250)
 
     _LOD_BATCH_SIZE = 6
 
