@@ -26,6 +26,7 @@ from montaris.core.display_modes import DisplayCompositor
 from montaris.widgets.toast import ToastManager
 from montaris.io.image_io import load_image, load_image_stack
 from montaris.io.roi_io import save_roi_set, load_roi_set
+from montaris.core.busy import busy_cursor, should_process_events
 
 
 def apply_dark_theme(app):
@@ -770,8 +771,9 @@ class MontarisApp(QMainWindow):
 
     def fix_overlaps(self, priority="later_wins"):
         from montaris.core.roi_ops import fix_overlaps
-        fix_overlaps(self.layer_stack.roi_layers, priority)
-        self.canvas.refresh_overlays()
+        with busy_cursor("Fixing overlaps...", self):
+            fix_overlaps(self.layer_stack.roi_layers, priority)
+            self.canvas.refresh_overlays()
         self.statusbar.showMessage(f"Fixed overlaps ({priority})")
 
     def _toggle_auto_overlap(self, checked):
@@ -827,14 +829,15 @@ class MontarisApp(QMainWindow):
             if ok and item != items[0]:
                 ds_factor = int(item[0])
         skipped = []
-        for path in paths:
-            try:
-                # Split multi-channel TIFFs into individual images
-                channels = load_image_stack(path)
-                for name, data in channels:
-                    self._load_single_channel(name, data, ds_factor, skipped)
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
+        with busy_cursor("Loading image...", self):
+            for path in paths:
+                try:
+                    # Split multi-channel TIFFs into individual images
+                    channels = load_image_stack(path)
+                    for name, data in channels:
+                        self._load_single_channel(name, data, ds_factor, skipped)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
         if skipped:
             QMessageBox.warning(
                 self, "Dimension Mismatch",
@@ -972,12 +975,13 @@ class MontarisApp(QMainWindow):
         )
         if path:
             try:
-                rois = load_roi_set(path)
-                for roi in rois:
-                    self.layer_stack.add_roi(roi)
-                self._auto_fit_rois()
-                self.canvas.refresh_overlays()
-                self.layer_panel.refresh()
+                with busy_cursor("Loading ROIs...", self):
+                    rois = load_roi_set(path)
+                    for roi in rois:
+                        self.layer_stack.add_roi(roi)
+                    self._auto_fit_rois()
+                    self.canvas.refresh_overlays()
+                    self.layer_panel.refresh()
                 self.statusbar.showMessage(f"Loaded {len(rois)} ROIs from {path}")
                 QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
             except Exception as e:
@@ -994,15 +998,20 @@ class MontarisApp(QMainWindow):
         )
         if path:
             try:
-                save_roi_set(path, self.layer_stack.roi_layers)
+                with busy_cursor("Saving ROIs...", self):
+                    save_roi_set(path, self.layer_stack.roi_layers)
                 self.toast.show(f"Saved {len(self.layer_stack.roi_layers)} ROI(s)", "success")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save ROIs:\n{e}")
 
     def _flatten_roi_offsets(self):
         """Flatten all layer offsets before export/save operations."""
-        for roi in self.layer_stack.roi_layers:
-            roi.flatten_offset()
+        import time
+        with busy_cursor("Flattening offsets...", self):
+            _last_pe = time.monotonic()
+            for roi in self.layer_stack.roi_layers:
+                roi.flatten_offset()
+                _last_pe = should_process_events(_last_pe)
 
     def export_roi_png(self):
         if not self.layer_stack.roi_layers:
@@ -1052,33 +1061,34 @@ class MontarisApp(QMainWindow):
                 img = Image.fromarray(mask)
                 img.save(out_path)
 
-            # Build jobs
-            jobs = []
-            for i, roi in enumerate(rois):
-                mask = self._upscale_mask_if_needed(roi.mask)
-                if n == 1:
-                    out_path = base + ext
-                else:
-                    safe_name = roi.name.replace("/", "_").replace("\\", "_")
-                    out_path = f"{base}_{safe_name}{ext}"
-                jobs.append((mask, out_path))
+            with busy_cursor("Exporting PNG masks...", self):
+                # Build jobs
+                jobs = []
+                for i, roi in enumerate(rois):
+                    mask = self._upscale_mask_if_needed(roi.mask)
+                    if n == 1:
+                        out_path = base + ext
+                    else:
+                        safe_name = roi.name.replace("/", "_").replace("\\", "_")
+                        out_path = f"{base}_{safe_name}{ext}"
+                    jobs.append((mask, out_path))
 
-            if n > 3:
-                from montaris.core.workers import get_pool
-                futures = [get_pool().submit(_export_single_png, m, p) for m, p in jobs]
-                for i, fut in enumerate(futures):
-                    if progress and progress.wasCanceled():
-                        return
-                    fut.result()
-                    if progress:
-                        progress.setValue(i + 1)
-            else:
-                for i, (mask, out_path) in enumerate(jobs):
-                    if progress and progress.wasCanceled():
-                        return
-                    _export_single_png(mask, out_path)
-                    if progress:
-                        progress.setValue(i + 1)
+                if n > 3:
+                    from montaris.core.workers import get_pool
+                    futures = [get_pool().submit(_export_single_png, m, p) for m, p in jobs]
+                    for i, fut in enumerate(futures):
+                        if progress and progress.wasCanceled():
+                            return
+                        fut.result()
+                        if progress:
+                            progress.setValue(i + 1)
+                else:
+                    for i, (mask, out_path) in enumerate(jobs):
+                        if progress and progress.wasCanceled():
+                            return
+                        _export_single_png(mask, out_path)
+                        if progress:
+                            progress.setValue(i + 1)
 
             if progress:
                 progress.close()
@@ -1113,17 +1123,18 @@ class MontarisApp(QMainWindow):
                 progress.setWindowModality(Qt.WindowModal)
             else:
                 progress = None
-            for i, path in enumerate(paths):
-                if progress and progress.wasCanceled():
-                    break
-                roi_dict = read_imagej_roi(path)
-                mask = imagej_roi_to_mask(roi_dict, w, h)
-                name = os.path.splitext(os.path.basename(path))[0]
-                roi = ROILayer(name, w, h)
-                roi.mask = mask
-                self.layer_stack.insert_roi(insert_at + i, roi)
-                if progress:
-                    progress.setValue(i + 1)
+            with busy_cursor("Importing ImageJ ROIs...", self):
+                for i, path in enumerate(paths):
+                    if progress and progress.wasCanceled():
+                        break
+                    roi_dict = read_imagej_roi(path)
+                    mask = imagej_roi_to_mask(roi_dict, w, h)
+                    name = os.path.splitext(os.path.basename(path))[0]
+                    roi = ROILayer(name, w, h)
+                    roi.mask = mask
+                    self.layer_stack.insert_roi(insert_at + i, roi)
+                    if progress:
+                        progress.setValue(i + 1)
             if progress:
                 progress.close()
             self.canvas.refresh_overlays()
@@ -1147,9 +1158,11 @@ class MontarisApp(QMainWindow):
             return
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
-            roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
+            with busy_cursor("Exporting ImageJ ROI...", self):
+                roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
+                if roi_dict:
+                    write_imagej_roi(roi_dict, path)
             if roi_dict:
-                write_imagej_roi(roi_dict, path)
                 self.toast.show(f"Exported {roi.name} as .roi", "success")
             else:
                 QMessageBox.warning(self, "Warning", "ROI mask is empty, nothing to export.")
@@ -1181,29 +1194,30 @@ class MontarisApp(QMainWindow):
                     return True
                 return False
 
-            if n > 3:
-                from montaris.core.workers import get_pool
-                futures = []
-                for roi in self.layer_stack.roi_layers:
-                    fut = get_pool().submit(_export_single_imagej, roi.mask, roi.name, dir_path)
-                    futures.append(fut)
-                count = 0
-                for i, fut in enumerate(futures):
-                    if progress and progress.wasCanceled():
-                        break
-                    if fut.result():
-                        count += 1
-                    if progress:
-                        progress.setValue(i + 1)
-            else:
-                count = 0
-                for i, roi in enumerate(self.layer_stack.roi_layers):
-                    if progress and progress.wasCanceled():
-                        break
-                    if _export_single_imagej(roi.mask, roi.name, dir_path):
-                        count += 1
-                    if progress:
-                        progress.setValue(i + 1)
+            with busy_cursor("Exporting ImageJ ROIs...", self):
+                if n > 3:
+                    from montaris.core.workers import get_pool
+                    futures = []
+                    for roi in self.layer_stack.roi_layers:
+                        fut = get_pool().submit(_export_single_imagej, roi.mask, roi.name, dir_path)
+                        futures.append(fut)
+                    count = 0
+                    for i, fut in enumerate(futures):
+                        if progress and progress.wasCanceled():
+                            break
+                        if fut.result():
+                            count += 1
+                        if progress:
+                            progress.setValue(i + 1)
+                else:
+                    count = 0
+                    for i, roi in enumerate(self.layer_stack.roi_layers):
+                        if progress and progress.wasCanceled():
+                            break
+                        if _export_single_imagej(roi.mask, roi.name, dir_path):
+                            count += 1
+                        if progress:
+                            progress.setValue(i + 1)
             if progress:
                 progress.close()
             self.toast.show(f"Exported {count} ImageJ ROI(s)", "success")
@@ -1222,30 +1236,31 @@ class MontarisApp(QMainWindow):
         if not path:
             return
         try:
-            n = len(self.layer_stack.roi_layers)
-            if filt.startswith("NumPy"):
-                save_roi_set(path, self.layer_stack.roi_layers)
-            elif filt.startswith("ImageJ"):
-                from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
-                os.makedirs(path, exist_ok=True)
-                progress = QProgressDialog("Exporting ImageJ ROIs...", "Cancel", 0, n, self)
-                progress.setWindowModality(Qt.WindowModal)
-                cancelled = False
-                for i, roi in enumerate(self.layer_stack.roi_layers):
-                    if progress.wasCanceled():
-                        cancelled = True
-                        break
-                    roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
-                    if roi_dict:
-                        safe_name = roi.name.replace("/", "_").replace("\\", "_")
-                        write_imagej_roi(roi_dict, os.path.join(path, f"{safe_name}.roi"))
-                    progress.setValue(i + 1)
-                progress.close()
-                if cancelled:
-                    self.toast.show("Export cancelled", "warning")
-                    return
-            elif filt.startswith("PNG"):
-                self.export_roi_png_to(path)
+            with busy_cursor("Batch exporting...", self):
+                n = len(self.layer_stack.roi_layers)
+                if filt.startswith("NumPy"):
+                    save_roi_set(path, self.layer_stack.roi_layers)
+                elif filt.startswith("ImageJ"):
+                    from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
+                    os.makedirs(path, exist_ok=True)
+                    progress = QProgressDialog("Exporting ImageJ ROIs...", "Cancel", 0, n, self)
+                    progress.setWindowModality(Qt.WindowModal)
+                    cancelled = False
+                    for i, roi in enumerate(self.layer_stack.roi_layers):
+                        if progress.wasCanceled():
+                            cancelled = True
+                            break
+                        roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
+                        if roi_dict:
+                            safe_name = roi.name.replace("/", "_").replace("\\", "_")
+                            write_imagej_roi(roi_dict, os.path.join(path, f"{safe_name}.roi"))
+                        progress.setValue(i + 1)
+                    progress.close()
+                    if cancelled:
+                        self.toast.show("Export cancelled", "warning")
+                        return
+                elif filt.startswith("PNG"):
+                    self.export_roi_png_to(path)
             self.toast.show(f"Batch exported to {os.path.basename(path)}", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to batch export:\n{e}")
@@ -1366,30 +1381,31 @@ class MontarisApp(QMainWindow):
                     arr = np.array(img.resize((tw, th), Image.NEAREST))
                 return (arr > 0).astype(np.uint8) * 255
 
-            if n > 3:
-                from montaris.core.workers import get_pool
-                futures = [(p, get_pool().submit(_decode_png_mask, p, w, h)) for p in paths]
-                for i, (p, fut) in enumerate(futures):
-                    if progress and progress.wasCanceled():
-                        break
-                    mask = fut.result()
-                    name = os.path.splitext(os.path.basename(p))[0]
-                    roi = ROILayer(name, w, h)
-                    roi.mask = mask
-                    self.layer_stack.insert_roi(insert_at + i, roi)
-                    if progress:
-                        progress.setValue(i + 1)
-            else:
-                for i, path in enumerate(paths):
-                    if progress and progress.wasCanceled():
-                        break
-                    mask = _decode_png_mask(path, w, h)
-                    name = os.path.splitext(os.path.basename(path))[0]
-                    roi = ROILayer(name, w, h)
-                    roi.mask = mask
-                    self.layer_stack.insert_roi(insert_at + i, roi)
-                    if progress:
-                        progress.setValue(i + 1)
+            with busy_cursor("Importing PNG masks...", self):
+                if n > 3:
+                    from montaris.core.workers import get_pool
+                    futures = [(p, get_pool().submit(_decode_png_mask, p, w, h)) for p in paths]
+                    for i, (p, fut) in enumerate(futures):
+                        if progress and progress.wasCanceled():
+                            break
+                        mask = fut.result()
+                        name = os.path.splitext(os.path.basename(p))[0]
+                        roi = ROILayer(name, w, h)
+                        roi.mask = mask
+                        self.layer_stack.insert_roi(insert_at + i, roi)
+                        if progress:
+                            progress.setValue(i + 1)
+                else:
+                    for i, path in enumerate(paths):
+                        if progress and progress.wasCanceled():
+                            break
+                        mask = _decode_png_mask(path, w, h)
+                        name = os.path.splitext(os.path.basename(path))[0]
+                        roi = ROILayer(name, w, h)
+                        roi.mask = mask
+                        self.layer_stack.insert_roi(insert_at + i, roi)
+                        if progress:
+                            progress.setValue(i + 1)
 
             if progress:
                 progress.close()
@@ -1466,6 +1482,7 @@ class MontarisApp(QMainWindow):
             else:
                 insert_at = len(self.layer_stack.roi_layers)
 
+            QApplication.setOverrideCursor(Qt.WaitCursor)
             count = 0
             total = len(roi_entries)
             progress = QProgressDialog(f"Importing {total} ROI(s)...", "Cancel", 0, total, self)
@@ -1533,12 +1550,14 @@ class MontarisApp(QMainWindow):
             progress.close()
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
+            QApplication.restoreOverrideCursor()
             msg = f"Imported {count} ROI(s) from ZIP"
             if need_scale:
                 msg += f" (scaled from {max_w}\u00d7{max_h} to {img_w}\u00d7{img_h})"
             self.toast.show(msg, "success")
             QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
         except Exception as e:
+            QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Error", f"Failed to import ZIP:\n{e}")
 
     # -- Export all ROIs as ZIP --
@@ -1572,31 +1591,32 @@ class MontarisApp(QMainWindow):
                 return None
 
             # Compute in parallel, write to zipfile sequentially (not thread-safe)
-            if n > 3:
-                from montaris.core.workers import get_pool
-                futures = [
-                    get_pool().submit(_compute_roi_bytes, roi.mask, roi.name)
-                    for roi in self.layer_stack.roi_layers
-                ]
-                results = []
-                cancelled = False
-                for i, fut in enumerate(futures):
-                    if progress and progress.wasCanceled():
-                        cancelled = True
-                        break
-                    results.append(fut.result())
-                    if progress:
-                        progress.setValue(i + 1)
-            else:
-                results = []
-                cancelled = False
-                for i, roi in enumerate(self.layer_stack.roi_layers):
-                    if progress and progress.wasCanceled():
-                        cancelled = True
-                        break
-                    results.append(_compute_roi_bytes(roi.mask, roi.name))
-                    if progress:
-                        progress.setValue(i + 1)
+            with busy_cursor("Exporting ROIs to ZIP...", self):
+                if n > 3:
+                    from montaris.core.workers import get_pool
+                    futures = [
+                        get_pool().submit(_compute_roi_bytes, roi.mask, roi.name)
+                        for roi in self.layer_stack.roi_layers
+                    ]
+                    results = []
+                    cancelled = False
+                    for i, fut in enumerate(futures):
+                        if progress and progress.wasCanceled():
+                            cancelled = True
+                            break
+                        results.append(fut.result())
+                        if progress:
+                            progress.setValue(i + 1)
+                else:
+                    results = []
+                    cancelled = False
+                    for i, roi in enumerate(self.layer_stack.roi_layers):
+                        if progress and progress.wasCanceled():
+                            cancelled = True
+                            break
+                        results.append(_compute_roi_bytes(roi.mask, roi.name))
+                        if progress:
+                            progress.setValue(i + 1)
 
             if not cancelled:
                 with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:

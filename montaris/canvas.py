@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush, QPainterPath,
 )
 from montaris.core.selection import SelectionModel
+from montaris.core.busy import busy_cursor, should_process_events
 
 
 # ------------------------------------------------------------------
@@ -168,16 +169,19 @@ class ImageCanvas(QGraphicsView):
 
     def _flatten_all_offsets(self):
         """Bake any non-zero layer offsets into masks and clear undo stack."""
-        any_offset = False
-        partially_clipped = []
-        for roi in self.layer_stack.roi_layers:
-            if roi.offset_x != 0 or roi.offset_y != 0:
-                if roi.has_oob_content():
-                    partially_clipped.append(roi.name)
-                result = roi.flatten_offset()
-                if result:
-                    any_offset = True
-                # result=False means fully OOB — offset preserved
+        with busy_cursor("Flattening layer offsets...", self.window()):
+            any_offset = False
+            partially_clipped = []
+            _last_pe = time.monotonic()
+            for roi in self.layer_stack.roi_layers:
+                if roi.offset_x != 0 or roi.offset_y != 0:
+                    if roi.has_oob_content():
+                        partially_clipped.append(roi.name)
+                    result = roi.flatten_offset()
+                    if result:
+                        any_offset = True
+                    # result=False means fully OOB — offset preserved
+                _last_pe = should_process_events(_last_pe)
         if partially_clipped:
             win = self.window()
             if hasattr(win, 'toast'):
