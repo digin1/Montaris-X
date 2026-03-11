@@ -343,11 +343,16 @@ def imagej_roi_to_mask(roi_dict, width, height):
         y_coords = roi_dict.get('y_coords')
         if x_coords is not None and y_coords is not None and len(x_coords) >= 3:
             from PIL import Image, ImageDraw
-            img = Image.new('L', (width, height), 0)
+            x0 = max(0, int(x_coords.min()))
+            y0 = max(0, int(y_coords.min()))
+            x1 = min(width, int(x_coords.max()) + 2)
+            y1 = min(height, int(y_coords.max()) + 2)
+            bw, bh = x1 - x0, y1 - y0
+            xy = list(zip((x_coords - x0).tolist(), (y_coords - y0).tolist()))
+            img = Image.new('L', (bw, bh), 0)
             draw = ImageDraw.Draw(img)
-            xy = list(zip(x_coords.tolist(), y_coords.tolist()))
             draw.polygon(xy, fill=255)
-            mask[:] = np.array(img)
+            mask[y0:y1, x0:x1] = np.array(img)
 
     return mask
 

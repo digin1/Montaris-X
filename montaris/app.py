@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QSettings, QRectF, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
 
 from montaris.canvas import ImageCanvas
-from montaris.layers import LayerStack, ImageLayer, ROILayer, generate_unique_roi_name, MontageDocument
+from montaris.layers import LayerStack, ImageLayer, ROILayer, ROI_COLORS, generate_unique_roi_name, MontageDocument
 from montaris.widgets.layer_panel import LayerPanel
 from montaris.widgets.tool_panel import ToolPanel
 from montaris.widgets.properties_panel import PropertiesPanel
@@ -1512,16 +1512,49 @@ class MontarisApp(QMainWindow):
                                 [(x * sx, y * sy) for x, y in p]
                                 for p in roi_dict['paths']
                             ]
-                    return imagej_roi_to_mask(roi_dict, tw, th)
+                    mask = imagej_roi_to_mask(roi_dict, tw, th)
+                    # Pre-compute bbox from roi_dict to avoid full-mask scan.
+                    # Pad bottom/right by +1 because rasterization uses +2
+                    # beyond coordinate max, so mask content can extend 1px
+                    # past the ImageJ header bbox.
+                    t, b = roi_dict['top'], roi_dict['bottom']
+                    l, r = roi_dict['left'], roi_dict['right']
+                    t = max(0, t); l = max(0, l)
+                    b = min(th, b + 1); r = min(tw, r + 1)
+                    bbox = (t, b, l, r) if b > t and r > l else None
+                    return mask, bbox
                 else:  # png
                     img = Image.open(_io.BytesIO(payload)).convert('L')
                     arr = np.array(img)
                     if arr.shape != (th, tw):
                         arr = np.array(img.resize((tw, th), Image.NEAREST))
-                    return (arr > 0).astype(np.uint8) * 255
+                    return (arr > 0).astype(np.uint8) * 255, None
 
             sx = scale_x if need_scale else 1.0
             sy = scale_y if need_scale else 1.0
+
+            def _init_roi(name, mask, bbox):
+                """Create ROILayer without double-allocating the mask."""
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = name
+                roi._mask = mask
+                roi._rle_data = None
+                roi._mask_shape = mask.shape
+                roi.color = ROI_COLORS[0]
+                roi.opacity = 128
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                # Pre-cache bbox to avoid full-mask scan
+                if bbox is not None:
+                    roi._cached_bbox = bbox
+                    roi._bbox_valid = True
+                else:
+                    roi._cached_bbox = None
+                    roi._bbox_valid = False
+                return roi
 
             if total > 3:
                 from montaris.core.workers import get_pool
@@ -1532,9 +1565,8 @@ class MontarisApp(QMainWindow):
                 for i, (base, fut) in enumerate(futures):
                     if progress.wasCanceled():
                         break
-                    mask = fut.result()
-                    roi = ROILayer(base, w, h)
-                    roi.mask = mask
+                    mask, bbox = fut.result()
+                    roi = _init_roi(base, mask, bbox)
                     self.layer_stack.insert_roi(insert_at + count, roi)
                     count += 1
                     progress.setValue(i + 1)
@@ -1543,9 +1575,8 @@ class MontarisApp(QMainWindow):
                 for i, (entry_type, base, payload) in enumerate(roi_entries):
                     if progress.wasCanceled():
                         break
-                    mask = _decode_roi_entry(entry_type, payload, w, h, sx, sy, need_scale)
-                    roi = ROILayer(base, w, h)
-                    roi.mask = mask
+                    mask, bbox = _decode_roi_entry(entry_type, payload, w, h, sx, sy, need_scale)
+                    roi = _init_roi(base, mask, bbox)
                     self.layer_stack.insert_roi(insert_at + count, roi)
                     count += 1
                     progress.setValue(i + 1)
