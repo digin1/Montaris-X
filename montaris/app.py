@@ -976,10 +976,10 @@ class MontarisApp(QMainWindow):
                 for roi in rois:
                     self.layer_stack.add_roi(roi)
                 self._auto_fit_rois()
-                self.layer_stack.compress_inactive(self.canvas._active_layer)
                 self.canvas.refresh_overlays()
                 self.layer_panel.refresh()
                 self.statusbar.showMessage(f"Loaded {len(rois)} ROIs from {path}")
+                QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load ROIs:\n{e}")
 
@@ -1393,10 +1393,10 @@ class MontarisApp(QMainWindow):
 
             if progress:
                 progress.close()
-            self.layer_stack.compress_inactive(self.canvas._active_layer)
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             self.toast.show(f"Imported {len(paths)} PNG mask(s)", "success")
+            QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import PNG masks:\n{e}")
 
@@ -1531,13 +1531,13 @@ class MontarisApp(QMainWindow):
                     QApplication.processEvents()
 
             progress.close()
-            self.layer_stack.compress_inactive(self.canvas._active_layer)
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             msg = f"Imported {count} ROI(s) from ZIP"
             if need_scale:
                 msg += f" (scaled from {max_w}\u00d7{max_h} to {img_w}\u00d7{img_h})"
             self.toast.show(msg, "success")
+            QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import ZIP:\n{e}")
 

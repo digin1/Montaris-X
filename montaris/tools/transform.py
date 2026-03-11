@@ -109,13 +109,16 @@ class TransformTool(BaseTool):
                 lid = id(l)
                 sb = l.get_bbox()
                 self._snap_bboxes[lid] = sb
-                # Session snapshot: taken once on first handle use (full mask).
-                # On first click, share full mask ref as undo snapshot too.
+                # Session snapshot: taken once on first handle use.
                 if lid not in self._session_snapshots:
-                    full_snap = l.mask.copy()
-                    self._session_snapshots[lid] = rle_encode(full_snap)
+                    if l.is_compressed:
+                        # Steal existing RLE — near zero cost
+                        self._session_snapshots[lid] = (l._rle_data, l._mask_shape)
+                    else:
+                        self._session_snapshots[lid] = rle_encode(l.mask)
                     self._session_bboxes[lid] = sb
-                    self._snapshots[lid] = (l, full_snap, sb)
+                    # snap_data=None → undo diff uses decoded session on release
+                    self._snapshots[lid] = (l, None, sb)
                 else:
                     # Subsequent ops: crop-only snapshot (fast)
                     if sb is not None:
@@ -303,6 +306,7 @@ class TransformTool(BaseTool):
 
         # Rasterize from session snapshot using cumulative matrix (preserves OOB pixels)
         bbox_pairs = {}  # lid -> (src_bbox, dst_bbox)
+        commands = []
         if M is not None and self._component_mask is not None:
             # Component-aware: transform only the clicked component
             l = self._target_layers[0]
@@ -331,59 +335,101 @@ class TransformTool(BaseTool):
                         min(src_bb[2], snap_bb[2]), max(src_bb[3], snap_bb[3]))
                 bbox_pairs[lid] = (src_bb, dst_bb)
                 l.invalidate_bbox()
+                # Component undo diff
+                snap_data = self._snapshots[lid][1]
+                undo_snap = snap_data if snap_data is not None else session_snap
+                if undo_snap is not None:
+                    bbs = [b for b in (src_bb, dst_bb) if b is not None]
+                    if bbs:
+                        uy1 = min(b[0] for b in bbs)
+                        uy2 = max(b[1] for b in bbs)
+                        ux1 = min(b[2] for b in bbs)
+                        ux2 = max(b[3] for b in bbs)
+                        region_old = undo_snap[uy1:uy2, ux1:ux2].copy()
+                        region_new = l.mask[uy1:uy2, ux1:ux2]
+                        if not np.array_equal(region_old, region_new):
+                            commands.append(UndoCommand(
+                                l, (uy1, uy2, ux1, ux2),
+                                region_old, region_new.copy()))
         elif M is not None:
+            # Merged transform + undo diff loop: decode session snapshot once,
+            # use for both affine rasterization and undo diff.
+            cum_2x3 = self._cumulative_matrix[:2] if self._cumulative_matrix is not None else None
+
+            def _transform_one(lid, l, snap_data, sb, session_rle, session_bbox):
+                """Decode session, apply affine, compute undo diff for one layer."""
+                session_snap = rle_decode(*session_rle) if session_rle is not None else None
+                if session_snap is not None and cum_2x3 is not None:
+                    l.mask[:] = 0
+                    src_bb, dst_bb = apply_affine_inplace(
+                        l.mask, session_snap, cum_2x3, src_bbox=session_bbox)
+                else:
+                    src_bb, dst_bb = apply_affine_inplace(
+                        l.mask, session_snap if session_snap is not None else snap_data, M,
+                        src_bbox=self._snap_bboxes.get(lid))
+                l.invalidate_bbox()
+                if src_bb is None and dst_bb is None:
+                    return None, None, None
+                bbs = [b for b in (src_bb, dst_bb) if b is not None]
+                y1 = min(b[0] for b in bbs)
+                y2 = max(b[1] for b in bbs)
+                x1 = min(b[2] for b in bbs)
+                x2 = max(b[3] for b in bbs)
+                # Undo diff: use snap_data if available, else decoded session
+                undo_snap = snap_data if snap_data is not None else session_snap
+                if sb is not None and undo_snap is not None and undo_snap.shape != l.mask.shape:
+                    sy1, sy2, sx1, sx2 = sb
+                    region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                    oy1, oy2 = max(y1, sy1), min(y2, sy2)
+                    ox1, ox2 = max(x1, sx1), min(x2, sx2)
+                    if oy2 > oy1 and ox2 > ox1:
+                        region_old[oy1 - y1:oy2 - y1, ox1 - x1:ox2 - x1] = \
+                            undo_snap[oy1 - sy1:oy2 - sy1, ox1 - sx1:ox2 - sx1]
+                elif undo_snap is not None:
+                    region_old = undo_snap[y1:y2, x1:x2].copy()
+                else:
+                    region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                return (src_bb, dst_bb), (y1, y2, x1, x2), region_old
+
+            # Build work items
+            work = []
             for lid, (l, snap_data, sb) in self._snapshots.items():
                 if not hasattr(l, 'mask'):
                     continue
                 session_rle = self._session_snapshots.get(lid)
-                session_snap = rle_decode(*session_rle) if session_rle is not None else None
-                if session_snap is not None and self._cumulative_matrix is not None:
-                    cum_2x3 = self._cumulative_matrix[:2]
-                    l.mask[:] = 0
-                    src_bb, dst_bb = apply_affine_inplace(
-                        l.mask, session_snap, cum_2x3,
-                        src_bbox=self._session_bboxes.get(lid))
-                else:
-                    # snap_data may be a full mask or crop — session path preferred
-                    src_bb, dst_bb = apply_affine_inplace(
-                        l.mask, session_snap if session_snap is not None else snap_data, M,
-                        src_bbox=self._snap_bboxes.get(lid))
-                bbox_pairs[lid] = (src_bb, dst_bb)
-                l.invalidate_bbox()
+                session_bbox = self._session_bboxes.get(lid)
+                work.append((lid, l, snap_data, sb, session_rle, session_bbox))
 
-        commands = []
-        for lid, (l, snap_data, sb) in self._snapshots.items():
-            src_bb, dst_bb = bbox_pairs.get(lid, (None, None))
-            if src_bb is None and dst_bb is None:
-                continue
-            bbs = [b for b in (src_bb, dst_bb) if b is not None]
-            y1 = min(b[0] for b in bbs)
-            y2 = max(b[1] for b in bbs)
-            x1 = min(b[2] for b in bbs)
-            x2 = max(b[3] for b in bbs)
-            # Reconstruct old region from snapshot (may be crop or full mask)
-            if sb is not None and snap_data is not None and snap_data.shape != l.mask.shape:
-                # Crop-only snapshot: embed into zero-padded region
-                sy1, sy2, sx1, sx2 = sb
-                region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-                # Overlap between union region and snap bbox
-                oy1, oy2 = max(y1, sy1), min(y2, sy2)
-                ox1, ox2 = max(x1, sx1), min(x2, sx2)
-                if oy2 > oy1 and ox2 > ox1:
-                    region_old[oy1 - y1:oy2 - y1, ox1 - x1:ox2 - x1] = \
-                        snap_data[oy1 - sy1:oy2 - sy1, ox1 - sx1:ox2 - sx1]
-            elif snap_data is not None:
-                region_old = snap_data[y1:y2, x1:x2].copy()
+            # Parallel decode+affine for many layers (Transform All)
+            if len(work) > 3:
+                from montaris.core.workers import get_pool
+                futures = [(lid, l, get_pool().submit(
+                    _transform_one, lid, l, sd, sb, sr, sbx))
+                    for lid, l, sd, sb, sr, sbx in work]
+                for lid, l, fut in futures:
+                    bb_pair, undo_region, region_old = fut.result()
+                    if bb_pair is not None:
+                        bbox_pairs[lid] = bb_pair
+                        region_new = l.mask[undo_region[0]:undo_region[1],
+                                            undo_region[2]:undo_region[3]]
+                        if not np.array_equal(region_old, region_new):
+                            commands.append(UndoCommand(
+                                l, undo_region,
+                                region_old if region_old.base is None else region_old.copy(),
+                                region_new.copy()))
             else:
-                region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-            region_new = l.mask[y1:y2, x1:x2]
-            if not np.array_equal(region_old, region_new):
-                cmd = UndoCommand(
-                    l, (y1, y2, x1, x2),
-                    region_old if region_old.base is None else region_old.copy(),
-                    region_new.copy(),
-                )
-                commands.append(cmd)
+                for lid, l, snap_data, sb, session_rle, session_bbox in work:
+                    bb_pair, undo_region, region_old = _transform_one(
+                        lid, l, snap_data, sb, session_rle, session_bbox)
+                    if bb_pair is not None:
+                        bbox_pairs[lid] = bb_pair
+                        region_new = l.mask[undo_region[0]:undo_region[1],
+                                            undo_region[2]:undo_region[3]]
+                        if not np.array_equal(region_old, region_new):
+                            commands.append(UndoCommand(
+                                l, undo_region,
+                                region_old if region_old.base is None else region_old.copy(),
+                                region_new.copy()))
 
         if commands:
             if len(commands) == 1:
@@ -426,16 +472,59 @@ class TransformTool(BaseTool):
         self._snapshots.clear()
 
         # Defer expensive visual rebuild to next frame (render + highlights)
+        is_batch = isinstance(self, TransformAllTool)
+
         def _deferred_rebuild():
             lod = canvas._current_lod_level()
-            for l in affected:
-                try:
-                    idx = canvas.layer_stack.roi_layers.index(l)
+            # Force minimum LOD 2 during Transform All for faster rebuilds
+            if is_batch:
+                lod = max(lod, 2)
+
+            gof = canvas.layer_stack._global_opacity_factor
+
+            if is_batch and len(affected) > 3:
+                # Parallel rebuild for Transform All
+                from montaris.core.workers import get_pool
+                from montaris.canvas import _compute_roi_rgba_from_crop
+                futures = []
+                for l in affected:
+                    try:
+                        idx = canvas.layer_stack.roi_layers.index(l)
+                    except ValueError:
+                        continue
                     target_lod = 0 if l == canvas._active_layer else lod
-                    canvas._refresh_roi_item(l, idx, lod_level=target_lod)
-                    canvas._roi_lod[id(l)] = target_lod
-                except ValueError:
-                    pass
+                    bbox = l.get_bbox()
+                    if bbox is None or not l.visible:
+                        futures.append((l, idx, target_lod, None))
+                        continue
+                    y1, y2, x1, x2 = bbox
+                    mask_crop = l.get_mask_crop((y1, y2, x1, x2)).copy()
+                    eff = int(l.opacity * gof)
+                    fill_mode = getattr(l, 'fill_mode', 'solid')
+                    fut = get_pool().submit(
+                        _compute_roi_rgba_from_crop, mask_crop, l.color,
+                        eff, fill_mode, target_lod,
+                        x1 + l.offset_x, y1 + l.offset_y)
+                    futures.append((l, idx, target_lod, fut))
+                for l, idx, target_lod, fut in futures:
+                    rid = id(l)
+                    if fut is None:
+                        existing = canvas._roi_items.get(rid)
+                        if existing is not None:
+                            existing.setVisible(False)
+                    else:
+                        canvas._apply_roi_rgba_result(l, idx, fut.result())
+                    canvas._roi_lod[rid] = target_lod
+            else:
+                for l in affected:
+                    try:
+                        idx = canvas.layer_stack.roi_layers.index(l)
+                        target_lod = 0 if l == canvas._active_layer else lod
+                        canvas._refresh_roi_item(l, idx, lod_level=target_lod)
+                        canvas._roi_lod[id(l)] = target_lod
+                    except ValueError:
+                        pass
+
             # Now that new pixmaps are ready, clean up stale preview
             for item in stale_preview_items:
                 item.resetTransform()
