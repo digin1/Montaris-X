@@ -32,14 +32,20 @@ ZIP_PATH = os.path.join(BASE, "test.zip")
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def get_rss_mb():
-    """Current RSS from /proc/self/status."""
+    """Current RSS in MB (cross-platform)."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except ImportError:
+        pass
     try:
         with open('/proc/self/status') as f:
             for line in f:
                 if line.startswith('VmRSS:'):
                     return int(line.split()[1]) / 1024  # kB -> MB
     except Exception:
-        return 0
+        pass
+    return 0
 
 PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"

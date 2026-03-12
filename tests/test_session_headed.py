@@ -10,24 +10,20 @@ Auto-quits — no manual interaction needed.
 
 import sys
 import os
-import signal
-import resource
+import threading
 import shutil
 import traceback
 import faulthandler
 
 # ── Resource caps ─────────────────────────────────────────────────────
-# 4 GB data segment (heap) limit — avoids capping virtual address space
-# which Qt's thread pool needs for stack reservations
-_FOUR_GB = 4 * 1024 * 1024 * 1024
-try:
-    resource.setrlimit(resource.RLIMIT_DATA, (_FOUR_GB, _FOUR_GB))
-except (ValueError, resource.error):
-    pass  # some systems don't support RLIMIT_DATA
+# Cross-platform wall-clock timeout (30s)
+def _timeout_kill():
+    print("\n[TIMEOUT] 30s exceeded — likely hung", file=sys.stderr)
+    os._exit(99)
 
-# 30 second wall-clock kill switch
-signal.signal(signal.SIGALRM, lambda *_: os._exit(99))
-signal.alarm(30)
+_timeout_timer = threading.Timer(30, _timeout_kill)
+_timeout_timer.daemon = True
+_timeout_timer.start()
 
 # Catch segfaults
 faulthandler.enable(all_threads=True)
@@ -235,5 +231,5 @@ if __name__ == "__main__":
     run_steps(w, app)
     rc = app.exec()
 
-    signal.alarm(0)  # cancel alarm
+    _timeout_timer.cancel()
     sys.exit(1 if FAILURES else rc)
