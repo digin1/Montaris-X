@@ -21,7 +21,7 @@ from montaris.core.rle import rle_encode
 from montaris.io.image_io import load_image
 
 ROOT = Path(__file__).resolve().parent.parent
-IMAGE_PATH = ROOT / "test - Copy.tif"
+IMAGE_PATH = ROOT / "test.tif"
 ZIP_PATH = ROOT / "test.zip"
 
 # ── Module-wide state ──────────────────────────────────────────────

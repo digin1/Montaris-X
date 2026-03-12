@@ -4,19 +4,20 @@
 Run:  LD_LIBRARY_PATH="" python3 tests/test_session_zoom_crash.py
 """
 
-import sys, os, signal, traceback, faulthandler, shutil, resource
+import sys, os, threading, traceback, faulthandler, shutil
 
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(_project_root)
 sys.path.insert(0, _project_root)
 
-# 4 GB heap, 45s wall-clock
-try:
-    resource.setrlimit(resource.RLIMIT_DATA, (4*1024**3, 4*1024**3))
-except Exception:
-    pass
-signal.signal(signal.SIGALRM, lambda *_: (print("\n[TIMEOUT] 45s exceeded — likely hung", file=sys.stderr), os._exit(99)))
-signal.alarm(45)
+# Cross-platform wall-clock timeout (45s)
+def _timeout_kill():
+    print("\n[TIMEOUT] 45s exceeded — likely hung", file=sys.stderr)
+    os._exit(99)
+
+_timeout_timer = threading.Timer(45, _timeout_kill)
+_timeout_timer.daemon = True
+_timeout_timer.start()
 faulthandler.enable(all_threads=True)
 
 from PySide6.QtWidgets import QApplication
@@ -172,5 +173,5 @@ if __name__ == "__main__":
     w.show()
     run(w, app)
     rc = app.exec()
-    signal.alarm(0)
+    _timeout_timer.cancel()
     sys.exit(1 if FAILURES else rc)

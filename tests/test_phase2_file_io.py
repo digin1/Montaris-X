@@ -32,11 +32,15 @@ class TestWriteImagejRoiBytes:
         roi_dict = mask_to_imagej_roi(mask, "test")
         data = write_imagej_roi_bytes(roi_dict)
 
-        with tempfile.NamedTemporaryFile(suffix='.roi', delete=False) as f:
-            write_imagej_roi(roi_dict, f.name)
-            with open(f.name, 'rb') as ff:
+        tmp = tempfile.NamedTemporaryFile(suffix='.roi', delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            write_imagej_roi(roi_dict, tmp_path)
+            with open(tmp_path, 'rb') as ff:
                 file_data = ff.read()
-            os.unlink(f.name)
+        finally:
+            os.unlink(tmp_path)
 
         assert data == file_data
 
