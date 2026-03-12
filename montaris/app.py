@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+from datetime import datetime
 import numpy as np
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileDialog,
@@ -47,6 +48,71 @@ def apply_dark_theme(app):
     palette.setColor(QPalette.Highlight, QColor(80, 140, 220))
     palette.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
     app.setPalette(palette)
+
+
+def _sanitize_roi_filename(name):
+    """Sanitize an ROI name for use as a filename component.
+
+    Replaces all characters that are illegal in Windows filenames:
+    ``/ \\ : * ? " < > |``
+    """
+    import re
+    return re.sub(r'[/\\:*?"<>|]', '_', name)
+
+
+def _save_session_from_snapshots(session_dir, snapshots, meta):
+    """Write ROI snapshots to a session folder (runs in background thread).
+
+    Snapshots contain bbox-cropped masks ('crop' + 'bbox') to avoid holding
+    full-resolution masks in memory.
+    """
+    import json as _json
+    from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
+
+    os.makedirs(session_dir, exist_ok=True)
+
+    # Use indexed filenames to avoid collisions from sanitization
+    roi_files = []
+    for i, snap in enumerate(snapshots):
+        name = snap['name']
+        safe_name = _sanitize_roi_filename(name)
+        filename = f"{i:04d}_{safe_name}.roi"
+        # Pass crop directly — mask_to_imagej_roi slices mask[top:bottom, left:right]
+        # so pass bbox=(0, h, 0, w) and let it use the crop as-is,
+        # then fix up the coordinates with the real offset.
+        bbox = snap['bbox']  # (y1, y2, x1, x2)
+        crop = snap.get('crop')
+        if crop is not None:
+            # Crop-based: run contour tracing on the small crop, then offset
+            roi_dict = mask_to_imagej_roi(crop, name, bbox=(0, crop.shape[0], 0, crop.shape[1]))
+        else:
+            # Full-mask fallback (used by tests / legacy callers)
+            roi_dict = mask_to_imagej_roi(snap['mask'], name, bbox=bbox)
+        if roi_dict is None:
+            roi_files.append(None)
+            continue
+        # Shift coordinates from crop-local to full-mask space (crop path only)
+        if crop is not None:
+            y_off, _, x_off, _ = bbox
+            roi_dict['top'] += y_off
+            roi_dict['bottom'] += y_off
+            roi_dict['left'] += x_off
+            roi_dict['right'] += x_off
+            if roi_dict.get('x_coords') is not None:
+                roi_dict['x_coords'] = roi_dict['x_coords'] + x_off
+                roi_dict['y_coords'] = roi_dict['y_coords'] + y_off
+            if roi_dict.get('paths'):
+                roi_dict['paths'] = [
+                    [(x + x_off, y + y_off) for x, y in p]
+                    for p in roi_dict['paths']
+                ]
+        write_imagej_roi(roi_dict, os.path.join(session_dir, filename))
+        roi_files.append(filename)
+
+    meta['roi_files'] = roi_files
+
+    with open(os.path.join(session_dir, 'session.json'), 'w') as f:
+        _json.dump(meta, f, indent=2)
 
 
 class MontarisApp(QMainWindow):
@@ -335,6 +401,12 @@ class MontarisApp(QMainWindow):
 
         file_menu.addSeparator()
 
+        restore_session_act = QAction("Restore from Session...", self)
+        restore_session_act.triggered.connect(self.restore_from_session)
+        file_menu.addAction(restore_session_act)
+
+        file_menu.addSeparator()
+
         quit_act = QAction("&Quit", self)
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
         quit_act.triggered.connect(self.close)
@@ -582,6 +654,12 @@ class MontarisApp(QMainWindow):
         self._tint_btn.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tint_btn.customContextMenuRequested.connect(self._clear_tint_color)
         toolbar.addWidget(self._tint_btn)
+
+        toolbar.addSeparator()
+        save_progress_btn = QAction("Save Progress", self)
+        save_progress_btn.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_progress_btn.triggered.connect(self.save_session_progress)
+        toolbar.addAction(save_progress_btn)
 
     def _update_cursor_info(self, x, y, value):
         roi_info = ""
@@ -864,6 +942,7 @@ class MontarisApp(QMainWindow):
         )
         if not paths:
             return
+        self._initial_session_saved = False
         self._update_last_dir(paths)
         # Ask downsample once for the batch
         first_data = load_image(paths[0])
@@ -883,7 +962,7 @@ class MontarisApp(QMainWindow):
                     # Split multi-channel TIFFs into individual images
                     channels = load_image_stack(path)
                     for name, data in channels:
-                        self._load_single_channel(name, data, ds_factor, skipped)
+                        self._load_single_channel(name, data, ds_factor, skipped, image_path=path)
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
         if skipped:
@@ -903,7 +982,10 @@ class MontarisApp(QMainWindow):
         # Auto-detect ROI ZIP in the same folder
         self._auto_detect_roi_zip(folder)
 
-    def _load_single_channel(self, name, data, ds_factor, skipped):
+        # Auto-detect previous sessions
+        self._auto_detect_session(folder)
+
+    def _load_single_channel(self, name, data, ds_factor, skipped, image_path=None):
         """Load one image/channel into the image stack."""
         if self._flip_on_load_act.isChecked():
             data = np.flip(data, axis=1).copy()
@@ -951,6 +1033,7 @@ class MontarisApp(QMainWindow):
             image_layer=new_layer,
             downsample_factor=ds_factor,
             original_shape=original_shape,
+            image_path=image_path,
         )
         self._documents.append(doc)
         self._active_doc_index = len(self._documents) - 1
@@ -971,6 +1054,7 @@ class MontarisApp(QMainWindow):
         """Close the current image, prompting user about ROIs."""
         if self.layer_stack.image_layer is None:
             return
+        self._initial_session_saved = False
 
         clear_rois = False
         if self.layer_stack.roi_layers:
@@ -1092,6 +1176,278 @@ class MontarisApp(QMainWindow):
             for roi in self.layer_stack.roi_layers:
                 roi.flatten_offset()
                 _last_pe = should_process_events(_last_pe)
+
+    # ── Session save / restore ──────────────────────────────────────
+
+    def save_session_progress(self):
+        """Save all ROIs as ImageJ .roi files in a timestamped session folder."""
+        if not self.layer_stack.roi_layers:
+            self.toast.show("No ROIs to save", "warning")
+            return
+        if self.layer_stack.image_layer is None:
+            self.toast.show("No image loaded", "warning")
+            return
+
+        # Determine image directory
+        doc = self._documents[self._active_doc_index] if self._documents else None
+        image_path = doc.image_path if doc and doc.image_path else None
+        if image_path:
+            image_dir = os.path.dirname(image_path)
+            stem = os.path.splitext(os.path.basename(image_path))[0]
+        else:
+            image_dir = self._last_dir()
+            stem = doc.name if doc else "untitled"
+            if not image_dir:
+                self.toast.show("No directory to save session", "warning")
+                return
+
+        # Flatten offsets before snapshotting
+        self._flatten_roi_offsets()
+
+        # Snapshot ROI data on main thread — crop to bbox to avoid
+        # decompressing full masks (which would spike memory for 100+ ROIs)
+        from montaris.io.session import build_session_folder_name, get_base_stem
+        snapshots = []
+        for roi in self.layer_stack.roi_layers:
+            bbox = roi.get_bbox()
+            if bbox is None:
+                continue  # skip empty masks
+            # get_mask_crop works on compressed ROIs without full decompression
+            crop = roi.get_mask_crop(bbox).copy()
+            snapshots.append({
+                'crop': crop,
+                'name': roi.name,
+                'color': list(roi.color),
+                'opacity': roi.opacity,
+                'bbox': bbox,
+            })
+
+        # Recompress ROIs that were decompressed during snapshotting
+        QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
+
+        if not snapshots:
+            self.toast.show("All ROIs are empty — nothing to save", "warning")
+            return
+
+        folder_name = build_session_folder_name(stem)
+        session_dir = os.path.join(image_dir, folder_name)
+        ds_factor = doc.downsample_factor if doc else 1
+        original_shape = doc.original_shape if doc else None
+        img = self.layer_stack.image_layer
+        canvas_shape = list(img.data.shape[:2]) if img else None
+        channel_names = [d.name for d in self._documents]
+        base_stem = get_base_stem(stem)
+
+        meta = {
+            'version': 1,
+            'timestamp': datetime.now().isoformat(),
+            'image_stem': base_stem,
+            'image_path': image_path or '',
+            'downsample_factor': ds_factor,
+            'original_shape': list(original_shape) if original_shape else None,
+            'canvas_shape': canvas_shape,
+            'channel_names': channel_names,
+            'roi_count': len(snapshots),
+            'roi_names': [s['name'] for s in snapshots],
+            'roi_colors': [s['color'] for s in snapshots],
+            'roi_opacities': [s['opacity'] for s in snapshots],
+        }
+
+        self.toast.show("Saving session...", "info")
+
+        from montaris.core.workers import get_pool
+        future = get_pool().submit(
+            _save_session_from_snapshots, session_dir, snapshots, meta
+        )
+
+        n_saved = len(snapshots)
+
+        def _poll_save():
+            if not future.done():
+                QTimer.singleShot(100, _poll_save)
+                return
+            try:
+                future.result()
+                self.toast.show(f"Session saved ({n_saved} ROIs)", "success")
+            except Exception as exc:
+                self.toast.show(f"Session save failed: {exc}", "error")
+
+        QTimer.singleShot(100, _poll_save)
+
+    def restore_from_session(self):
+        """Restore ROIs from a previous session folder."""
+        if self.layer_stack.image_layer is None:
+            self.toast.show("Load an image first", "warning")
+            return
+
+        doc = self._documents[self._active_doc_index] if self._documents else None
+        image_path = doc.image_path if doc and doc.image_path else None
+        if image_path:
+            image_dir = os.path.dirname(image_path)
+            stem = os.path.splitext(os.path.basename(image_path))[0]
+        else:
+            image_dir = self._last_dir()
+            stem = doc.name if doc else "untitled"
+
+        if not image_dir:
+            self.toast.show("No directory to search for sessions", "warning")
+            return
+
+        from montaris.io.session import find_sessions
+        sessions = find_sessions(image_dir, stem)
+        if not sessions:
+            self.toast.show("No sessions found", "info")
+            return
+
+        # Build selection list
+        items = []
+        for folder, meta in sessions:
+            ts = meta.get('timestamp', '?')
+            count = meta.get('roi_count', '?')
+            ds = meta.get('downsample_factor', 1)
+            items.append(f"{ts}  —  {count} ROIs  (ds={ds}x)")
+
+        item, ok = QInputDialog.getItem(
+            self, "Restore from Session",
+            f"Found {len(sessions)} session(s). Select one:",
+            items, 0, False,
+        )
+        if not ok:
+            return
+
+        idx = items.index(item)
+        folder, meta = sessions[idx]
+
+        # Ask replace or keep
+        action = self._ask_replace_or_keep()
+        if action is None:
+            return
+        if action == "replace":
+            self.canvas._selection.clear()
+            self.layer_stack.roi_layers.clear()
+            self.layer_stack._color_index = 0
+            self.canvas._active_layer = None
+
+        self._restore_session_rois(folder, meta)
+
+    def _restore_session_rois(self, folder, meta):
+        """Import ROIs from a session folder."""
+        from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask, scale_roi_dict
+
+        roi_names = meta.get('roi_names', [])
+        roi_colors = meta.get('roi_colors', [])
+        roi_opacities = meta.get('roi_opacities', [])
+        roi_files = meta.get('roi_files')  # indexed filenames (v1.1+), or None
+        session_ds = meta.get('downsample_factor', 1)
+
+        doc = self._documents[self._active_doc_index] if self._documents else None
+        current_ds = doc.downsample_factor if doc else 1
+        img = self.layer_stack.image_layer
+        img_h, img_w = img.data.shape[:2]
+
+        # Calculate scale factor if ds factors differ
+        need_scale = session_ds != current_ds
+        if need_scale:
+            scale = session_ds / current_ds  # e.g. session=2, current=1 → scale=2 (upscale)
+        else:
+            scale = 1.0
+
+        progress = QProgressDialog("Restoring ROIs...", "Cancel", 0, len(roi_names), self)
+        progress.setWindowTitle("Restore Session")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+
+        insert_at = len(self.layer_stack.roi_layers)
+        count = 0
+
+        for i, name in enumerate(roi_names):
+            if progress.wasCanceled():
+                break
+
+            # Resolve filename: prefer indexed roi_files, fall back to name-based
+            if roi_files and i < len(roi_files):
+                filename = roi_files[i]
+                if filename is None:
+                    continue  # was empty mask at save time
+            else:
+                safe_name = _sanitize_roi_filename(name)
+                filename = f"{safe_name}.roi"
+
+            roi_path = os.path.join(folder, filename)
+            if not os.path.isfile(roi_path):
+                continue
+
+            try:
+                roi_data = read_imagej_roi(roi_path)
+                if need_scale:
+                    roi_data = scale_roi_dict(roi_data, scale, scale)
+                mask = imagej_roi_to_mask(roi_data, img_w, img_h)
+                if not mask.any():
+                    continue
+
+                color = tuple(roi_colors[i]) if i < len(roi_colors) else ROI_COLORS[count % len(ROI_COLORS)]
+                opacity = roi_opacities[i] if i < len(roi_opacities) else 128
+                roi_name = generate_unique_roi_name(name, self.layer_stack.roi_layers)
+
+                roi = ROILayer(roi_name, img_w, img_h, color)
+                roi.mask = mask
+                roi.opacity = opacity
+                roi.compress()
+                self.layer_stack.insert_roi(insert_at + count, roi)
+                count += 1
+            except Exception:
+                continue  # skip corrupt .roi files
+
+            progress.setValue(i + 1)
+            QApplication.processEvents()
+
+        progress.close()
+        self.canvas.refresh_overlays()
+        self.layer_panel.refresh()
+
+        msg = f"Restored {count} ROI(s)"
+        if need_scale:
+            msg += f" (scaled from ds={session_ds}x to ds={current_ds}x)"
+        self.toast.show(msg, "success")
+        QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
+
+    def _auto_save_initial_session(self):
+        """Auto-save session after ROI import (called once per image load)."""
+        if not self.layer_stack.roi_layers:
+            return
+        if getattr(self, '_initial_session_saved', False):
+            return
+        self._initial_session_saved = True
+        self.save_session_progress()
+
+    def _auto_detect_session(self, folder):
+        """Prompt user if sessions are found for the current image."""
+        if not self._documents:
+            return
+        # Skip if ROIs were already loaded (e.g. from auto-detect ZIP)
+        if self.layer_stack.roi_layers:
+            return
+        doc = self._documents[self._active_doc_index]
+        stem = doc.name
+
+        from montaris.io.session import find_sessions
+        sessions = find_sessions(folder, stem)
+        if not sessions:
+            return
+
+        newest_folder, newest_meta = sessions[0]
+        ts = newest_meta.get('timestamp', '?')
+        count = newest_meta.get('roi_count', '?')
+
+        reply = QMessageBox.question(
+            self, "Session Found",
+            f"Found {len(sessions)} session(s) for this image.\n"
+            f"Most recent: {ts} ({count} ROIs)\n\nRestore most recent?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._restore_session_rois(newest_folder, newest_meta)
 
     def export_roi_png(self):
         if not self.layer_stack.roi_layers:
@@ -1781,6 +2137,7 @@ class MontarisApp(QMainWindow):
             EventLogger.instance().log("io", "import_roi_zip",
                 duration_ms=(time.perf_counter() - _t0) * 1000, count=count)
             QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
+            QTimer.singleShot(500, self._auto_save_initial_session)
         except Exception as e:
             QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Error", f"Failed to import ZIP:\n{e}")
@@ -2184,7 +2541,86 @@ class MontarisApp(QMainWindow):
         super().closeEvent(event)
 
 
+def _install_crash_handler(dump_dir):
+    """Install a global exception hook that writes crash dumps to *dump_dir*.
+
+    Captures:
+    - Python exceptions (sys.excepthook)
+    - C-level segfaults (faulthandler)
+    - Unhandled exceptions in Qt slots (sys.unraisablehook)
+    """
+    import traceback as _tb
+    import faulthandler as _fh
+    os.makedirs(dump_dir, exist_ok=True)
+
+    # Persistent file for faulthandler (segfaults)
+    _fh_path = os.path.join(dump_dir, "segfault.log")
+    _fh_file = open(_fh_path, 'w')
+    _fh.enable(file=_fh_file, all_threads=True)
+
+    _original_hook = sys.excepthook
+
+    def _crash_hook(exc_type, exc_value, exc_tb):
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        dump_path = os.path.join(dump_dir, f"crash_{ts}.log")
+        try:
+            lines = _tb.format_exception(exc_type, exc_value, exc_tb)
+            with open(dump_path, 'w') as f:
+                f.write(f"Montaris-X crash dump — {datetime.now().isoformat()}\n")
+                f.write(f"Python {sys.version}\n")
+                f.write(f"Platform: {sys.platform}\n\n")
+                f.write("".join(lines))
+            print(f"\n[CRASH] Dump written to: {dump_path}", file=sys.stderr)
+            print("".join(lines), file=sys.stderr)
+        except Exception:
+            pass
+        _original_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _crash_hook
+
+    # Catch exceptions swallowed by Qt slots (shows as "unraisable")
+    _original_unraisable = getattr(sys, 'unraisablehook', None)
+
+    def _unraisable_hook(unraisable):
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        dump_path = os.path.join(dump_dir, f"unraisable_{ts}.log")
+        try:
+            lines = _tb.format_exception(
+                type(unraisable.exc_value), unraisable.exc_value,
+                unraisable.exc_traceback,
+            )
+            with open(dump_path, 'w') as f:
+                f.write(f"Montaris-X unraisable exception — {datetime.now().isoformat()}\n")
+                f.write(f"Object: {unraisable.object}\n")
+                f.write(f"Message: {unraisable.err_msg}\n\n")
+                f.write("".join(lines))
+            print(f"\n[UNRAISABLE] Dump written to: {dump_path}", file=sys.stderr)
+            print("".join(lines), file=sys.stderr)
+        except Exception:
+            pass
+        if _original_unraisable:
+            _original_unraisable(unraisable)
+
+    sys.unraisablehook = _unraisable_hook
+
+
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="montaris",
+        description="Montaris-X — PySide6 ROI editor for scientific images",
+    )
+    parser.add_argument(
+        "--crash-dump", metavar="DIR",
+        help="Enable crash dump logging to DIR (creates dir if needed)",
+    )
+    parser.add_argument(
+        "--crash-dump-default", action="store_true",
+        help="Enable crash dump logging to ~/.montaris/crash_dumps/",
+    )
+    args, qt_args = parser.parse_known_args()
+
     # Windows: set AppUserModelID so taskbar uses our icon, not Python's
     if sys.platform == 'win32':
         try:
@@ -2193,7 +2629,14 @@ def main():
         except Exception:
             pass
 
-    app = QApplication(sys.argv)
+    dump_dir = args.crash_dump
+    if not dump_dir and args.crash_dump_default:
+        dump_dir = os.path.join(os.path.expanduser("~"), ".montaris", "crash_dumps")
+    if dump_dir:
+        _install_crash_handler(dump_dir)
+        print(f"[Montaris-X] Crash dumps enabled → {dump_dir}", file=sys.stderr)
+
+    app = QApplication([sys.argv[0]] + qt_args)
     app.setApplicationName("Montaris-X")
     app.setOrganizationName("Montaris")
 
