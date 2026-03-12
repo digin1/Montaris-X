@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtCore import Qt, QPointF
-from montaris.tools.base import BaseTool
+from montaris.tools.base import BaseTool, expand_snapshot
 from montaris.core.undo import UndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
 
@@ -13,7 +13,8 @@ class BrushTool(BaseTool):
         self.size = 100
         self._painting = False
         self._last_pos = None
-        self._snapshot = None
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._overlap_layers = []
         self._stroke_bbox = None  # (y1, y2, x1, x2) accumulated during stroke
         self._cached_circle = None
@@ -24,7 +25,8 @@ class BrushTool(BaseTool):
             return
         self._painting = True
         self._last_pos = pos
-        self._snapshot = layer.mask.copy()
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
         # Hide selection highlight while painting
         for item in canvas._selection_highlight_items:
@@ -63,9 +65,12 @@ class BrushTool(BaseTool):
 
         commands = []
         # Main layer undo — use accumulated stroke bbox for efficient diff
-        if self._snapshot is not None and self._stroke_bbox is not None:
+        if self._snapshot_crop is not None and self._stroke_bbox is not None:
             sy1, sy2, sx1, sx2 = self._stroke_bbox
-            old_crop = self._snapshot[sy1:sy2, sx1:sx2]
+            old_crop = self._snapshot_crop[
+                sy1 - self._snapshot_bbox[0]:sy2 - self._snapshot_bbox[0],
+                sx1 - self._snapshot_bbox[2]:sx2 - self._snapshot_bbox[2],
+            ]
             new_crop = layer.mask[sy1:sy2, sx1:sx2]
             if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
@@ -113,7 +118,8 @@ class BrushTool(BaseTool):
         else:
             canvas.refresh_active_overlay(layer)
 
-        self._snapshot = None
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
         self._overlap_layers = []
         canvas._update_selection_highlights()
@@ -144,6 +150,8 @@ class BrushTool(BaseTool):
         cx2 = circle.shape[1] - ((cx + r + 1) - x2)
 
         if y1 < y2 and x1 < x2 and cy1 < cy2 and cx1 < cx2:
+            self._snapshot_crop, self._snapshot_bbox = expand_snapshot(
+                layer.mask, (y1, y2, x1, x2), self._snapshot_crop, self._snapshot_bbox)
             region = layer.mask[y1:y2, x1:x2]
             np.putmask(region, circle[cy1:cy2, cx1:cx2], 255)
             layer.mark_dirty((x1, y1, x2 - x1, y2 - y1))

@@ -13,14 +13,12 @@ class CircleTool(BaseTool):
     def __init__(self, app):
         super().__init__(app)
         self._center = None
-        self._snapshot = None
         self._preview_item = None
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._center = pos
-        self._snapshot = layer.mask.copy()
 
     def on_move(self, pos, layer, canvas):
         if self._center is None:
@@ -43,7 +41,6 @@ class CircleTool(BaseTool):
 
         if radius < 1:
             self._center = None
-            self._snapshot = None
             return
 
         h, w = layer.mask.shape
@@ -58,7 +55,7 @@ class CircleTool(BaseTool):
             dist_sq = (x - cx) ** 2 + (y - cy) ** 2
             circle_mask = dist_sq <= radius * radius
 
-            old_crop = self._snapshot[by1:by2, bx1:bx2].copy()
+            old_crop = layer.mask[by1:by2, bx1:bx2].copy()
             layer.mask[by1:by2, bx1:bx2][circle_mask] = 255
             new_crop = layer.mask[by1:by2, bx1:bx2]
 
@@ -71,7 +68,6 @@ class CircleTool(BaseTool):
 
         canvas.refresh_active_overlay(layer)
         self._center = None
-        self._snapshot = None
 
     def _update_preview(self, pos, canvas):
         self._clear_preview(canvas)

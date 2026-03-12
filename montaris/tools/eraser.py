@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtCore import Qt, QPointF
-from montaris.tools.base import BaseTool
+from montaris.tools.base import BaseTool, expand_snapshot
 from montaris.core.undo import UndoCommand
 
 
@@ -12,7 +12,8 @@ class EraserTool(BaseTool):
         self.size = 100
         self._erasing = False
         self._last_pos = None
-        self._snapshot = None
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
         self._cached_circle = None
         self._cached_circle_size = -1
@@ -22,7 +23,8 @@ class EraserTool(BaseTool):
             return
         self._erasing = True
         self._last_pos = pos
-        self._snapshot = layer.mask.copy()
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
         # Hide selection highlight while erasing
         for item in canvas._selection_highlight_items:
@@ -50,9 +52,12 @@ class EraserTool(BaseTool):
         if not self._erasing or layer is None:
             return
         self._erasing = False
-        if self._snapshot is not None and self._stroke_bbox is not None:
+        if self._snapshot_crop is not None and self._stroke_bbox is not None:
             sy1, sy2, sx1, sx2 = self._stroke_bbox
-            old_crop = self._snapshot[sy1:sy2, sx1:sx2]
+            old_crop = self._snapshot_crop[
+                sy1 - self._snapshot_bbox[0]:sy2 - self._snapshot_bbox[0],
+                sx1 - self._snapshot_bbox[2]:sx2 - self._snapshot_bbox[2],
+            ]
             new_crop = layer.mask[sy1:sy2, sx1:sx2]
             if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
@@ -61,7 +66,8 @@ class EraserTool(BaseTool):
                 )
                 self.app.undo_stack.push(cmd)
         canvas.refresh_active_overlay(layer)
-        self._snapshot = None
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
         canvas._update_selection_highlights()
 
@@ -91,6 +97,8 @@ class EraserTool(BaseTool):
         cx2 = circle.shape[1] - ((cx + r + 1) - x2)
 
         if y1 < y2 and x1 < x2 and cy1 < cy2 and cx1 < cx2:
+            self._snapshot_crop, self._snapshot_bbox = expand_snapshot(
+                layer.mask, (y1, y2, x1, x2), self._snapshot_crop, self._snapshot_bbox)
             layer.mask[y1:y2, x1:x2][circle[cy1:cy2, cx1:cx2]] = 0
             layer.mark_dirty((x1, y1, x2 - x1, y2 - y1))
             if self._stroke_bbox is None:

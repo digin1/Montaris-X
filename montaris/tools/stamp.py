@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtCore import Qt, QPointF
-from montaris.tools.base import BaseTool
+from montaris.tools.base import BaseTool, expand_snapshot
 from montaris.core.undo import UndoCommand
 
 
@@ -14,7 +14,8 @@ class StampTool(BaseTool):
         self.height = 20
         self._stamping = False
         self._last_pos = None
-        self._snapshot = None
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
 
     def on_press(self, pos, layer, canvas):
@@ -22,7 +23,8 @@ class StampTool(BaseTool):
             return
         self._stamping = True
         self._last_pos = pos
-        self._snapshot = layer.mask.copy()
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
         self._stamp(pos, layer)
         if self._stroke_bbox is not None:
@@ -47,9 +49,12 @@ class StampTool(BaseTool):
         if not self._stamping or layer is None:
             return
         self._stamping = False
-        if self._snapshot is not None and self._stroke_bbox is not None:
+        if self._snapshot_crop is not None and self._stroke_bbox is not None:
             sy1, sy2, sx1, sx2 = self._stroke_bbox
-            old_crop = self._snapshot[sy1:sy2, sx1:sx2]
+            old_crop = self._snapshot_crop[
+                sy1 - self._snapshot_bbox[0]:sy2 - self._snapshot_bbox[0],
+                sx1 - self._snapshot_bbox[2]:sx2 - self._snapshot_bbox[2],
+            ]
             new_crop = layer.mask[sy1:sy2, sx1:sx2]
             if not np.array_equal(old_crop, new_crop):
                 cmd = UndoCommand(
@@ -58,7 +63,8 @@ class StampTool(BaseTool):
                 )
                 self.app.undo_stack.push(cmd)
         canvas.refresh_active_overlay(layer)
-        self._snapshot = None
+        self._snapshot_crop = None
+        self._snapshot_bbox = None
         self._stroke_bbox = None
 
     def _stamp(self, pos, layer):
@@ -74,6 +80,8 @@ class StampTool(BaseTool):
         x2 = min(mw, cx - half_w + sw)
 
         if y1 < y2 and x1 < x2:
+            self._snapshot_crop, self._snapshot_bbox = expand_snapshot(
+                layer.mask, (y1, y2, x1, x2), self._snapshot_crop, self._snapshot_bbox)
             layer.mask[y1:y2, x1:x2] = 255
             layer.mark_dirty((x1, y1, x2 - x1, y2 - y1))
             if self._stroke_bbox is None:
