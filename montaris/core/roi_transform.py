@@ -64,13 +64,16 @@ def apply_affine_to_mask(mask, matrix, output_shape=None):
     return result
 
 
-def apply_affine_inplace(dest, snap, matrix, src_bbox=None, clear_src=True):
+def apply_affine_inplace(dest, snap, matrix, src_bbox=None, clear_src=True,
+                         snap_is_crop=False):
     """Transform snap and write result into dest in-place.
 
     Uses Pillow's C-accelerated affine transform on the bbox crop only.
     If *src_bbox* is provided, skips the expensive full-mask bbox scan.
     If *clear_src* is False, the source region in dest is not zeroed first
     (useful when dest has other data that must be preserved, e.g. component mode).
+    If *snap_is_crop* is True, ``snap`` is already the bbox crop (matching
+    src_bbox dimensions) — avoids slicing a full-size mask.
 
     Returns:
         (src_bbox, dst_bbox) tuple, or (None, None) if no pixels to transform.
@@ -86,7 +89,7 @@ def apply_affine_inplace(dest, snap, matrix, src_bbox=None, clear_src=True):
     if clear_src:
         dest[sy1:sy2, sx1:sx2] = 0
 
-    crop = snap[sy1:sy2, sx1:sx2]
+    crop = snap if snap_is_crop else snap[sy1:sy2, sx1:sx2]
 
     M3 = np.array([
         [matrix[0, 0], matrix[0, 1], matrix[0, 2]],

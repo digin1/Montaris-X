@@ -264,12 +264,8 @@ class ToolPanel(QWidget):
         self.tool_changed.emit(tool)
 
     def _deselect_tool(self):
-        """Deselect all tools (C.23)."""
-        for btn in self._tool_buttons.values():
-            btn.setChecked(False)
-        self._current_tool = None
-        self._current_tool_name = None
-        self.tool_changed.emit(None)
+        """Deselect current tool and activate Hand (C.23)."""
+        self._select_tool('Hand')
 
     def _on_size_changed(self, value):
         if self._current_tool and hasattr(self._current_tool, 'size'):

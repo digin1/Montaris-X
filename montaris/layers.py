@@ -1,7 +1,7 @@
 import numpy as np
 from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
-from montaris.core.rle import rle_encode, rle_decode
+from montaris.core.rle import rle_encode, rle_decode, rle_decode_crop
 
 # --- Napari-compatible label colormap (LAB + low-discrepancy sequence) ---
 
@@ -194,14 +194,11 @@ class ROILayer:
         return self._rle_data is not None
 
     def get_mask_crop(self, bbox):
-        """Get a mask crop. If compressed, decompress transiently (no caching)."""
+        """Get a mask crop. If compressed, decompress only the bbox region."""
         if self._mask is not None:
             y1, y2, x1, x2 = bbox
             return self._mask[y1:y2, x1:x2]
-        # Decompress full mask, extract crop, discard full mask
-        full = rle_decode(self._rle_data, self._mask_shape)
-        y1, y2, x1, x2 = bbox
-        return full[y1:y2, x1:x2]
+        return rle_decode_crop(self._rle_data, self._mask_shape, bbox)
 
     def invalidate_bbox(self):
         """Mark the cached bounding box as stale."""
@@ -389,8 +386,13 @@ class LayerStack(QObject):
         """Compress all ROI layers except the active one."""
         import time
         from montaris.core.event_logger import EventLogger
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import Qt
         t0 = time.perf_counter()
         targets = [r for r in self.roi_layers if r is not active_layer and r._mask is not None]
+        if not targets:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         if len(targets) > 3:
             # Parallel RLE encode — numpy releases GIL
             from montaris.core.workers import get_pool
@@ -402,6 +404,7 @@ class LayerStack(QObject):
         else:
             for roi in targets:
                 roi.compress()
+        QApplication.restoreOverrideCursor()
         EventLogger.instance().log("compress", "compress_inactive",
             duration_ms=(time.perf_counter() - t0) * 1000, count=len(targets))
 

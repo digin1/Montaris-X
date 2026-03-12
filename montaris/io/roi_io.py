@@ -48,6 +48,8 @@ def load_roi_set(path):
         roi = ROILayer(name, w, h, color)
         roi.mask = mask
         roi.opacity = opacity
+        # Compress immediately to minimize peak memory
+        roi.compress()
         roi_layers.append(roi)
 
     return roi_layers

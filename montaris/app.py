@@ -462,6 +462,14 @@ class MontarisApp(QMainWindow):
 
         view_menu.addSeparator()
 
+        # GPU acceleration toggle
+        self._gpu_act = QAction("&Hardware Acceleration (OpenGL)", self)
+        self._gpu_act.setCheckable(True)
+        self._gpu_act.triggered.connect(self._toggle_opengl)
+        view_menu.addAction(self._gpu_act)
+
+        view_menu.addSeparator()
+
         # Dock toggles
         view_menu.addAction(self._display_dock.toggleViewAction())
         view_menu.addAction(self._adj_dock.toggleViewAction())
@@ -616,6 +624,27 @@ class MontarisApp(QMainWindow):
         """Update global opacity factor from toolbar slider."""
         self.layer_stack._global_opacity_factor = value / 100.0
         self.canvas.refresh_overlays_lut_only()
+
+    def _toggle_opengl(self, checked):
+        """Toggle GPU-accelerated rendering via OpenGL."""
+        if checked:
+            ok = self.canvas.enable_opengl(True)
+            if not ok:
+                self._gpu_act.setChecked(False)
+                QMessageBox.warning(self, "OpenGL Unavailable",
+                    "Hardware acceleration could not be enabled.\n"
+                    "Your system may not support OpenGL.")
+                return
+            self.settings.setValue("use_opengl", True)
+            self.toast.show("Hardware acceleration enabled (OpenGL)", "success")
+        else:
+            self.canvas.enable_opengl(False)
+            self.settings.setValue("use_opengl", False)
+            self.toast.show("Hardware acceleration disabled", "success")
+        # Re-render with new viewport
+        if self.layer_stack.image_layer is not None:
+            self.canvas.refresh_image()
+            self.canvas.refresh_overlays()
 
     def _on_tool_changed(self, tool):
         self.active_tool = tool
@@ -814,13 +843,25 @@ class MontarisApp(QMainWindow):
 
     # -- File operations --
 
+    def _last_dir(self):
+        """Return the last used file dialog directory."""
+        return self.settings.value("last_dir", "")
+
+    def _update_last_dir(self, path):
+        """Store the directory of *path* for next file dialog."""
+        if path:
+            d = os.path.dirname(path if isinstance(path, str) else path[0])
+            if d:
+                self.settings.setValue("last_dir", d)
+
     def open_image(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Image(s)", "",
+            self, "Open Image(s)", self._last_dir(),
             "Image Files (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
         )
         if not paths:
             return
+        self._update_last_dir(paths)
         # Ask downsample once for the batch
         first_data = load_image(paths[0])
         ds_factor = 1
@@ -974,18 +1015,34 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "Load an image first.")
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load ROI Set", "",
+            self, "Load ROI Set", self._last_dir(),
             "ROI Files (*.npz);;All Files (*)",
         )
         if path:
+            self._update_last_dir(path)
             try:
                 with busy_cursor("Loading ROIs...", self, log_as="io.load_rois"):
                     rois = load_roi_set(path)
-                    for roi in rois:
+                    n = len(rois)
+                    progress = None
+                    if n > 5:
+                        progress = QProgressDialog("Loading ROIs…", None, 0, n + 1, self)
+                        progress.setWindowModality(Qt.WindowModal)
+                        progress.setMinimumDuration(0)
+                        progress.show()
+                        QApplication.processEvents()
+                    for i, roi in enumerate(rois):
                         self.layer_stack.add_roi(roi)
+                        if progress:
+                            progress.setValue(i + 1)
                     self._auto_fit_rois()
+                    if progress:
+                        progress.setLabelText("Rendering ROIs…")
+                        progress.setValue(n)
                     self.canvas.refresh_overlays()
                     self.layer_panel.refresh()
+                    if progress:
+                        progress.close()
                 self.statusbar.showMessage(f"Loaded {len(rois)} ROIs from {path}")
                 QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
             except Exception as e:
@@ -997,10 +1054,11 @@ class MontarisApp(QMainWindow):
             return
         self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save ROI Set", "rois.npz",
+            self, "Save ROI Set", os.path.join(self._last_dir(), "rois.npz"),
             "NumPy Archive (*.npz);;All Files (*)",
         )
         if path:
+            self._update_last_dir(path)
             try:
                 with busy_cursor("Saving ROIs...", self, log_as="io.save_rois"):
                     save_roi_set(path, self.layer_stack.roi_layers)
@@ -1022,10 +1080,11 @@ class MontarisApp(QMainWindow):
             return
         self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export ROI(s) as PNG", "roi_export.png",
+            self, "Export ROI(s) as PNG", os.path.join(self._last_dir(), "roi_export.png"),
             "PNG (*.png);;All Files (*)",
         )
         if path:
+            self._update_last_dir(path)
             self.export_roi_png_to(path)
 
     def _upscale_mask_if_needed(self, mask):
@@ -1106,11 +1165,12 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "Load an image first.")
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Import ImageJ ROI(s)", "",
+            self, "Import ImageJ ROI(s)", self._last_dir(),
             "ImageJ ROI (*.roi);;All Files (*)",
         )
         if not paths:
             return
+        self._update_last_dir(paths)
         try:
             from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
             h, w = self.layer_stack.image_layer.shape[:2]
@@ -1122,7 +1182,7 @@ class MontarisApp(QMainWindow):
             else:
                 insert_at = len(self.layer_stack.roi_layers)
             if n > 1:
-                progress = QProgressDialog("Importing ImageJ ROIs...", "Cancel", 0, n, self)
+                progress = QProgressDialog("Importing ImageJ ROIs…", "Cancel", 0, n + 1, self)
                 progress.setWindowModality(Qt.WindowModal)
             else:
                 progress = None
@@ -1138,10 +1198,13 @@ class MontarisApp(QMainWindow):
                     self.layer_stack.insert_roi(insert_at + i, roi)
                     if progress:
                         progress.setValue(i + 1)
+                if progress:
+                    progress.setLabelText("Rendering ROIs…")
+                    progress.setValue(n)
+                self.canvas.refresh_overlays()
+                self.layer_panel.refresh()
             if progress:
                 progress.close()
-            self.canvas.refresh_overlays()
-            self.layer_panel.refresh()
             self.toast.show(f"Imported {len(paths)} ImageJ ROI(s)", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import:\n{e}")
@@ -1154,7 +1217,7 @@ class MontarisApp(QMainWindow):
         self._flatten_roi_offsets()
         safe_name = roi.name.replace("/", "_").replace("\\", "_")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Active ROI as .roi", f"{safe_name}.roi",
+            self, "Export Active ROI as .roi", os.path.join(self._last_dir(), f"{safe_name}.roi"),
             "ImageJ ROI (*.roi);;All Files (*)",
         )
         if not path:
@@ -1233,7 +1296,7 @@ class MontarisApp(QMainWindow):
             return
         self._flatten_roi_offsets()
         path, filt = QFileDialog.getSaveFileName(
-            self, "Batch Export ROIs", "rois",
+            self, "Batch Export ROIs", os.path.join(self._last_dir(), "rois"),
             "NumPy Archive (*.npz);;ImageJ ROI Directory;;PNG (*.png)",
         )
         if not path:
@@ -1312,7 +1375,7 @@ class MontarisApp(QMainWindow):
 
     def load_instructions_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Instructions", "",
+            self, "Load Instructions", self._last_dir(),
             "Text (*.txt);;All Files (*)",
         )
         if not path:
@@ -1349,11 +1412,12 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "Load an image first.")
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Import PNG Masks", "",
+            self, "Import PNG Masks", self._last_dir(),
             "PNG Masks (*.png);;All Files (*)",
         )
         if not paths:
             return
+        self._update_last_dir(paths)
         action = self._ask_replace_or_keep()
         if action is None:
             return
@@ -1427,11 +1491,12 @@ class MontarisApp(QMainWindow):
             return
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
-                self, "Import ROI ZIP", "",
+                self, "Import ROI ZIP", self._last_dir(),
                 "ZIP Archive (*.zip);;All Files (*)",
             )
             if not path:
                 return
+            self._update_last_dir(path)
         action = self._ask_replace_or_keep()
         if action is None:
             return
@@ -1496,6 +1561,7 @@ class MontarisApp(QMainWindow):
             QApplication.processEvents()
 
             def _decode_roi_entry(entry_type, payload, tw, th, sx, sy, do_scale):
+                from montaris.core.rle import rle_encode
                 if entry_type == 'roi':
                     roi_dict = payload
                     if do_scale:
@@ -1522,24 +1588,28 @@ class MontarisApp(QMainWindow):
                     t = max(0, t); l = max(0, l)
                     b = min(th, b + 1); r = min(tw, r + 1)
                     bbox = (t, b, l, r) if b > t and r > l else None
-                    return mask, bbox
+                    # RLE-compress immediately to avoid holding full mask in memory
+                    rle_bytes, rle_shape = rle_encode(mask)
+                    return rle_bytes, rle_shape, bbox
                 else:  # png
                     img = Image.open(_io.BytesIO(payload)).convert('L')
                     arr = np.array(img)
                     if arr.shape != (th, tw):
                         arr = np.array(img.resize((tw, th), Image.NEAREST))
-                    return (arr > 0).astype(np.uint8) * 255, None
+                    mask = (arr > 0).astype(np.uint8) * 255
+                    rle_bytes, rle_shape = rle_encode(mask)
+                    return rle_bytes, rle_shape, None
 
             sx = scale_x if need_scale else 1.0
             sy = scale_y if need_scale else 1.0
 
-            def _init_roi(name, mask, bbox):
-                """Create ROILayer without double-allocating the mask."""
+            def _init_roi(name, rle_bytes, rle_shape, bbox):
+                """Create ROILayer pre-compressed to minimize peak memory."""
                 roi = ROILayer.__new__(ROILayer)
                 roi.name = name
-                roi._mask = mask
-                roi._rle_data = None
-                roi._mask_shape = mask.shape
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
                 roi.color = ROI_COLORS[0]
                 roi.opacity = 128
                 roi.visible = True
@@ -1565,8 +1635,8 @@ class MontarisApp(QMainWindow):
                 for i, (base, fut) in enumerate(futures):
                     if progress.wasCanceled():
                         break
-                    mask, bbox = fut.result()
-                    roi = _init_roi(base, mask, bbox)
+                    rle_bytes, rle_shape, bbox = fut.result()
+                    roi = _init_roi(base, rle_bytes, rle_shape, bbox)
                     self.layer_stack.insert_roi(insert_at + count, roi)
                     count += 1
                     progress.setValue(i + 1)
@@ -1575,16 +1645,19 @@ class MontarisApp(QMainWindow):
                 for i, (entry_type, base, payload) in enumerate(roi_entries):
                     if progress.wasCanceled():
                         break
-                    mask, bbox = _decode_roi_entry(entry_type, payload, w, h, sx, sy, need_scale)
-                    roi = _init_roi(base, mask, bbox)
+                    rle_bytes, rle_shape, bbox = _decode_roi_entry(entry_type, payload, w, h, sx, sy, need_scale)
+                    roi = _init_roi(base, rle_bytes, rle_shape, bbox)
                     self.layer_stack.insert_roi(insert_at + count, roi)
                     count += 1
                     progress.setValue(i + 1)
                     QApplication.processEvents()
 
-            progress.close()
+            progress.setLabelText("Rendering ROIs…")
+            progress.setRange(0, 0)  # indeterminate
+            QApplication.processEvents()
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
+            progress.close()
             QApplication.restoreOverrideCursor()
             msg = f"Imported {count} ROI(s) from ZIP"
             if need_scale:
@@ -1606,7 +1679,7 @@ class MontarisApp(QMainWindow):
             return
         self._flatten_roi_offsets()
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export All ROIs as ZIP", "rois.zip",
+            self, "Export All ROIs as ZIP", os.path.join(self._last_dir(), "rois.zip"),
             "ZIP Archive (*.zip);;All Files (*)",
         )
         if not path:
@@ -1788,7 +1861,7 @@ class MontarisApp(QMainWindow):
         from montaris.core.event_logger import EventLogger
         default_name = f"montaris_diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Diagnostics", default_name,
+            self, "Export Diagnostics", os.path.join(self._last_dir(), default_name),
             "JSON Files (*.json);;All Files (*)",
         )
         if not path:
@@ -1951,6 +2024,12 @@ class MontarisApp(QMainWindow):
         for d in [self._layer_dock, self._props_dock,
                   self._display_dock, self._adj_dock]:
             d.setVisible(True)
+
+        # Restore OpenGL setting
+        use_gl = self.settings.value("use_opengl", False, type=bool)
+        if use_gl:
+            ok = self.canvas.enable_opengl(True)
+            self._gpu_act.setChecked(ok)
 
     def _apply_dock_widths(self):
         """Set compact right sidebar width after layout is ready."""
