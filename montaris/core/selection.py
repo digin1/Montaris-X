@@ -53,10 +53,18 @@ class SelectionModel(QObject):
             self.changed.emit(self._layers)
 
     def select_all(self, all_layers):
-        roi_layers = [l for l in all_layers if hasattr(l, 'mask')]
+        roi_layers = [l for l in all_layers if getattr(l, 'is_roi', False)]
         if roi_layers != self._layers:
             self._layers = roi_layers
             self.changed.emit(self._layers)
+
+    def select_all_silent(self, all_layers):
+        """Set selection to all ROI layers WITHOUT emitting changed signal.
+
+        Caller is responsible for triggering deferred UI sync.
+        """
+        roi_layers = [l for l in all_layers if getattr(l, 'is_roi', False)]
+        self._layers = roi_layers
 
     def contains(self, layer):
         return layer in self._layers
@@ -66,7 +74,7 @@ class SelectionModel(QObject):
         """Search roi_layers in reverse z-order, return first whose mask[y,x] > 0."""
         ix, iy = int(x), int(y)
         for layer in reversed(roi_layers):
-            if not hasattr(layer, 'mask'):
+            if not getattr(layer, 'is_roi', False):
                 continue
             mask = layer.mask
             # Convert canvas coords to mask coords by subtracting offset

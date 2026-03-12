@@ -1,10 +1,11 @@
 import math
+import time
 import numpy as np
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QTimer
 from PySide6.QtGui import QPen, QColor, QBrush, QTransform, QImage, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
-    QGraphicsPixmapItem, QGraphicsItem, QProgressDialog, QApplication,
+    QGraphicsPixmapItem, QGraphicsItem, QApplication,
 )
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -86,13 +87,21 @@ class TransformTool(BaseTool):
         return (y1_min, y2_max, x1_min, x2_max)
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if getattr(self, '_applying', False):
+            return
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._canvas = canvas
 
         # Check if clicking on a handle
         handle = self._hit_test_handle(pos)
         if handle:
+            from montaris.core.event_logger import EventLogger
+            _log = EventLogger.instance()
+            _t0 = time.perf_counter()
+            _log.log_mem("on_press.start", tool=self.name,
+                         handle=handle.handle_type,
+                         n_targets=len(self._get_target_layers(layer, canvas)))
             self._active_handle = handle
             self._start_pos = pos
             self._dragging = True
@@ -105,50 +114,33 @@ class TransformTool(BaseTool):
             # current mask state for undo diff (crop-only for speed)
             self._snapshots = {}
             self._snap_bboxes = {}
-            # Count how many layers need new session snapshots
-            need_snap = [l for l in self._target_layers
-                         if id(l) not in self._session_snapshots]
-            progress = None
-            if len(need_snap) > 5:
-                progress = QProgressDialog(
-                    "Preparing transform snapshots…", None,
-                    0, len(need_snap), canvas.window())
-                progress.setWindowModality(Qt.WindowModal)
-                progress.setMinimumDuration(0)
-                progress.show()
-                QApplication.processEvents()
-            snap_count = 0
             for l in self._target_layers:
                 lid = id(l)
                 sb = l.get_bbox()
                 self._snap_bboxes[lid] = sb
-                # Session snapshot: taken once on first handle use.
-                # Store bbox-crop RLE to avoid full-mask decode on release.
+                # Always store a crop copy — never None.
+                if sb is not None:
+                    if l.is_compressed:
+                        crop = rle_decode_crop(
+                            l._rle_data, l._mask_shape, sb)
+                    else:
+                        crop = l.mask[sb[0]:sb[1], sb[2]:sb[3]]
+                    crop = crop.copy()
+                else:
+                    crop = None
+                # Session snapshot: taken once on first handle use
                 if lid not in self._session_snapshots:
-                    if sb is not None:
-                        if l.is_compressed:
-                            crop = rle_decode_crop(
-                                l._rle_data, l._mask_shape, sb)
-                        else:
-                            crop = l.mask[sb[0]:sb[1], sb[2]:sb[3]]
+                    if crop is not None:
                         self._session_snapshots[lid] = rle_encode(crop)
                     else:
                         self._session_snapshots[lid] = (b'', (0, 0))
                     self._session_bboxes[lid] = sb
-                    # snap_data=None → undo diff uses decoded session on release
-                    self._snapshots[lid] = (l, None, sb)
-                    if progress:
-                        snap_count += 1
-                        progress.setValue(snap_count)
-                else:
-                    # Subsequent ops: crop-only snapshot (fast)
-                    if sb is not None:
-                        crop = l.mask[sb[0]:sb[1], sb[2]:sb[3]].copy()
-                    else:
-                        crop = None
-                    self._snapshots[lid] = (l, crop, sb)
-            if progress:
-                progress.close()
+                self._snapshots[lid] = (l, crop, sb)
+            _log.log("transform", "on_press",
+                     duration_ms=(time.perf_counter() - _t0) * 1000,
+                     tool=self.name, handle=handle.handle_type,
+                     n_targets=len(self._target_layers))
+            _log.log_mem("on_press.end", tool=self.name)
             self._create_previews(canvas)
             return
 
@@ -163,7 +155,7 @@ class TransformTool(BaseTool):
 
         # If single layer and clicking on painted pixel, detect component
         if (len(self._target_layers) == 1
-                and hasattr(layer, 'mask')):
+                and getattr(layer, 'is_roi', False)):
             ix, iy = int(pos.x()), int(pos.y())
             h, w = layer.mask.shape
             if 0 <= iy < h and 0 <= ix < w and layer.mask[iy, ix] > 0:
@@ -191,6 +183,8 @@ class TransformTool(BaseTool):
         self._show_handles(bbox, canvas)
 
     def on_move(self, pos, layer, canvas):
+        if getattr(self, '_applying', False):
+            return
         self._canvas = canvas
 
         # Update shift state from keyboard modifiers
@@ -310,6 +304,11 @@ class TransformTool(BaseTool):
         if not self._dragging or not self._snapshots:
             return
         self._dragging = False
+        from montaris.core.event_logger import EventLogger
+        _log = EventLogger.instance()
+        _release_t0 = time.perf_counter()
+        _log.log_mem("on_release.start", tool=self.name,
+                     n_snapshots=len(self._snapshots))
         QApplication.setOverrideCursor(Qt.WaitCursor)
         canvas.flash_progress("Applying transform…")
 
@@ -389,11 +388,10 @@ class TransformTool(BaseTool):
             cum_2x3 = self._cumulative_matrix[:2] if self._cumulative_matrix is not None else None
 
             def _transform_one(lid, l, snap_data, sb, session_rle, session_bbox):
-                """Decode session crop, apply affine, compute undo diff."""
-                # Session snapshots are now bbox-crop RLE (not full-mask).
+                """Decode, apply affine, build undo command, compress — all in worker."""
+                session_crop = None
                 if session_rle is not None and session_rle[0] and cum_2x3 is not None:
                     session_crop = rle_decode(*session_rle)
-                    # Clear only the old content bbox (sb), not the entire mask
                     if sb:
                         l.mask[sb[0]:sb[1], sb[2]:sb[3]] = 0
                     src_bb, dst_bb = apply_affine_inplace(
@@ -402,30 +400,29 @@ class TransformTool(BaseTool):
                         snap_is_crop=True)
                 elif snap_data is not None:
                     src_bb, dst_bb = apply_affine_inplace(
-                        l.mask, snap_data, M,
-                        src_bbox=self._snap_bboxes.get(lid))
+                        l.mask, snap_data, M, src_bbox=sb)
                 elif session_rle is not None and session_rle[0]:
                     session_crop = rle_decode(*session_rle)
                     src_bb, dst_bb = apply_affine_inplace(
                         l.mask, session_crop, M,
                         src_bbox=session_bbox, snap_is_crop=True)
                 else:
-                    return None, None, None
+                    return None, None
                 l.invalidate_bbox()
                 if src_bb is None and dst_bb is None:
-                    return None, None, None
+                    return None, None
                 bbs = [b for b in (src_bb, dst_bb) if b is not None]
                 y1 = min(b[0] for b in bbs)
                 y2 = max(b[1] for b in bbs)
                 x1 = min(b[2] for b in bbs)
                 x2 = max(b[3] for b in bbs)
-                # Undo diff: use snap_data if available, else decoded session crop
+                # Undo diff: use snap_data if available, else reuse decoded session crop
                 if snap_data is not None:
                     undo_snap = snap_data
                     undo_is_crop = (sb is not None
                                     and snap_data.shape != l.mask.shape)
-                elif session_rle is not None and session_rle[0]:
-                    undo_snap = rle_decode(*session_rle)
+                elif session_crop is not None:
+                    undo_snap = session_crop
                     undo_is_crop = True
                 else:
                     undo_snap = None
@@ -442,47 +439,123 @@ class TransformTool(BaseTool):
                     region_old = undo_snap[y1:y2, x1:x2].copy()
                 else:
                     region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-                return (src_bb, dst_bb), (y1, y2, x1, x2), region_old
+                # Extract region_new and compress within the worker
+                region_new = l.mask[y1:y2, x1:x2].copy()
+                l.compress()
+                bb_pair = (src_bb, dst_bb)
+                if not np.array_equal(region_old, region_new):
+                    return bb_pair, UndoCommand(
+                        l, (y1, y2, x1, x2), region_old, region_new)
+                return bb_pair, None
 
             # Build work items
             work = []
             for lid, (l, snap_data, sb) in self._snapshots.items():
-                if not hasattr(l, 'mask'):
+                if not getattr(l, 'is_roi', False):
                     continue
                 session_rle = self._session_snapshots.get(lid)
                 session_bbox = self._session_bboxes.get(lid)
                 work.append((lid, l, snap_data, sb, session_rle, session_bbox))
 
-            # Parallel decode+affine for many layers (Transform All)
+            # Parallel transform: decode, affine, undo diff, and compress
+            # all run inside workers.  The pool's own concurrency limit
+            # (worker_count threads) caps peak memory automatically.
             if len(work) > 3:
                 from montaris.core.workers import get_pool
-                futures = [(lid, l, get_pool().submit(
+                pool = get_pool()
+                futures = [(lid, pool.submit(
                     _transform_one, lid, l, sd, sb, sr, sbx))
                     for lid, l, sd, sb, sr, sbx in work]
-                for lid, l, fut in futures:
-                    bb_pair, undo_region, region_old = fut.result()
-                    if bb_pair is not None:
-                        bbox_pairs[lid] = bb_pair
-                        region_new = l.mask[undo_region[0]:undo_region[1],
-                                            undo_region[2]:undo_region[3]]
-                        if not np.array_equal(region_old, region_new):
-                            commands.append(UndoCommand(
-                                l, undo_region,
-                                region_old if region_old.base is None else region_old.copy(),
-                                region_new.copy()))
+
+                # Capture state needed for finalization before returning
+                self._async_state = {
+                    'futures': futures,
+                    'bbox_pairs': bbox_pairs,
+                    'commands': commands,
+                    'affected': affected,
+                    'release_t0': _release_t0,
+                    'canvas': canvas,
+                    'was_rotate': (self._active_handle
+                                   and self._active_handle.handle_type == 'rotate'),
+                    'saved_bbox': self._bbox,
+                    'stale_preview_items': self._preview_items[:],
+                    'stale_temp_items': self._temp_scene_items[:],
+                    'hidden_layers': self._hidden_layers[:],
+                }
+                # Reset interaction state immediately so no re-entrancy
+                self._active_handle = None
+                self._start_pos = None
+                self._current_matrix = None
+                self._preview_items.clear()
+                self._temp_scene_items.clear()
+                self._hidden_layers = []
+                self._applying = True
+
+                # Poll for completion — keeps UI responsive
+                self._poll_timer = QTimer()
+                self._poll_timer.timeout.connect(self._poll_transform)
+                self._poll_timer.start(50)
+                return  # UI stays responsive while workers run
+
             else:
                 for lid, l, snap_data, sb, session_rle, session_bbox in work:
-                    bb_pair, undo_region, region_old = _transform_one(
+                    bb_pair, cmd = _transform_one(
                         lid, l, snap_data, sb, session_rle, session_bbox)
                     if bb_pair is not None:
                         bbox_pairs[lid] = bb_pair
-                        region_new = l.mask[undo_region[0]:undo_region[1],
-                                            undo_region[2]:undo_region[3]]
-                        if not np.array_equal(region_old, region_new):
-                            commands.append(UndoCommand(
-                                l, undo_region,
-                                region_old if region_old.base is None else region_old.copy(),
-                                region_new.copy()))
+                    if cmd is not None:
+                        commands.append(cmd)
+
+        self._finalize_release(bbox_pairs, commands, affected,
+                               _release_t0, canvas)
+
+    def _poll_transform(self):
+        """Timer callback: check if all futures are done, show progress."""
+        state = self._async_state
+        futures = state['futures']
+        total = len(futures)
+        n_done = sum(1 for _, f in futures if f.done())
+
+        state['canvas'].flash_progress(
+            f"Applying transform\u2026 {n_done}/{total}")
+
+        if n_done < total:
+            return
+
+        # All workers finished — collect results
+        self._poll_timer.stop()
+        self._poll_timer.deleteLater()
+        self._poll_timer = None
+
+        bbox_pairs = state['bbox_pairs']
+        commands = state['commands']
+        for lid, fut in futures:
+            bb_pair, cmd = fut.result()
+            if bb_pair is not None:
+                bbox_pairs[lid] = bb_pair
+            if cmd is not None:
+                commands.append(cmd)
+
+        canvas = state['canvas']
+        self._finalize_release(
+            bbox_pairs, commands, state['affected'],
+            state['release_t0'], canvas,
+            was_rotate=state['was_rotate'],
+            saved_bbox=state['saved_bbox'],
+            stale_preview_items=state['stale_preview_items'],
+            stale_temp_items=state['stale_temp_items'],
+            hidden_layers=state['hidden_layers'])
+        self._async_state = None
+        self._applying = False
+
+    def _finalize_release(self, bbox_pairs, commands, affected,
+                          release_t0, canvas, **overrides):
+        """Push undo, update handles, schedule deferred rebuild."""
+        from montaris.core.event_logger import EventLogger
+        _log = EventLogger.instance()
+        _transform_ms = (time.perf_counter() - release_t0) * 1000
+        _log.log_mem("on_release.after_transform", tool=self.name,
+                     n_commands=len(commands))
 
         if commands:
             if len(commands) == 1:
@@ -490,24 +563,32 @@ class TransformTool(BaseTool):
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
 
-        # Accumulate rotation and preserve original bbox for visual
-        was_rotate = self._active_handle and self._active_handle.handle_type == 'rotate'
-        saved_bbox = self._bbox  # preserve before _clear_handles resets it
+        # Use overrides from async path, or read live state for sync path
+        was_rotate = overrides.get(
+            'was_rotate',
+            self._active_handle and self._active_handle.handle_type == 'rotate')
+        saved_bbox = overrides.get('saved_bbox', self._bbox)
         if was_rotate:
             self._rotation += getattr(self, '_drag_angle', 0.0)
         self._drag_angle = 0.0
 
-        self._active_handle = None
-        self._start_pos = None
-        self._current_matrix = None
+        if 'was_rotate' not in overrides:
+            # Sync path: reset interaction state here
+            self._active_handle = None
+            self._start_pos = None
+            self._current_matrix = None
 
         # Keep preview visible until deferred rebuild finishes re-rendering
-        stale_preview_items = self._preview_items[:]
-        self._preview_items.clear()
-        stale_temp_items = self._temp_scene_items[:]
-        self._temp_scene_items.clear()
-        hidden_layers = self._hidden_layers[:]
-        self._hidden_layers = []
+        stale_preview_items = overrides.get(
+            'stale_preview_items', self._preview_items[:])
+        stale_temp_items = overrides.get(
+            'stale_temp_items', self._temp_scene_items[:])
+        hidden_layers = overrides.get(
+            'hidden_layers', self._hidden_layers[:])
+        if 'stale_preview_items' not in overrides:
+            self._preview_items.clear()
+            self._temp_scene_items.clear()
+            self._hidden_layers = []
 
         # After rotation: keep original bbox (don't use inflated axis-aligned bbox)
         # After scale: use new rasterized bbox, reset rotation
@@ -524,10 +605,24 @@ class TransformTool(BaseTool):
                 self._show_handles((y1, y2, x1, x2), canvas)
         self._snapshots.clear()
 
+        # Log transform completion (before deferred rebuild)
+        _log.log("transform", "on_release",
+                 duration_ms=_transform_ms,
+                 tool=self.name,
+                 n_affected=len(affected),
+                 n_undo_commands=len(commands),
+                 handle='none')
+        _log.log_mem("on_release.before_rebuild", tool=self.name)
+
         # Defer expensive visual rebuild to next frame (render + highlights)
         is_batch = isinstance(self, TransformAllTool)
+        _tool_name = self.name  # capture for closure
 
         def _deferred_rebuild():
+            _rb_t0 = time.perf_counter()
+            _rb_log = EventLogger.instance()
+            _rb_log.log_mem("deferred_rebuild.start", tool=_tool_name,
+                            n_affected=len(affected))
             lod = canvas._current_lod_level()
             # Force minimum LOD 2 during Transform All for faster rebuilds
             if is_batch:
@@ -600,6 +695,10 @@ class TransformTool(BaseTool):
                 if rid in canvas._roi_items:
                     canvas._roi_items[rid].setVisible(True)
             canvas._update_selection_highlights()
+            _rb_log.log("transform", "deferred_rebuild",
+                        duration_ms=(time.perf_counter() - _rb_t0) * 1000,
+                        tool=_tool_name, n_affected=len(affected))
+            _rb_log.log_mem("deferred_rebuild.end", tool=_tool_name)
 
         QApplication.restoreOverrideCursor()
         QTimer.singleShot(0, _deferred_rebuild)
@@ -931,19 +1030,44 @@ class TransformAllTool(TransformTool):
     name = "Transform All"
 
     def on_activate(self, layer, canvas):
-        """Select all ROIs and show transform handles immediately."""
+        """Select all ROIs and show transform handles immediately.
+
+        Uses silent selection to avoid the expensive signal cascade
+        (which triggers recursive on_activate, 102-item list widget
+        sync, and properties panel updates).  UI sync is deferred to
+        the next event loop tick so tool activation feels instant.
+        """
         all_rois = list(canvas.layer_stack.roi_layers)
-        if all_rois:
-            canvas._selection.select_all(canvas.layer_stack.roi_layers)
-            self._canvas = canvas
-            self._target_layers = all_rois
-            self._rotation = 0.0
-            self._session_snapshots.clear()
-            self._session_bboxes.clear()
-            self._cumulative_matrix = None
-            bbox = self._compute_union_bbox(all_rois)
-            if bbox:
-                self._show_handles(bbox, canvas)
+        if not all_rois:
+            return
+        # Guard: skip redundant work if already set up for this canvas
+        if (self._target_layers == all_rois and self._bbox is not None
+                and self._canvas is canvas):
+            return
+        from montaris.core.event_logger import EventLogger
+        _log = EventLogger.instance()
+        _t0 = time.perf_counter()
+        _log.log_mem("on_activate.start", tool=self.name,
+                     n_rois=len(all_rois))
+        # Set selection silently — no signal cascade
+        canvas._selection.select_all_silent(canvas.layer_stack.roi_layers)
+        canvas._active_layer = all_rois[0]
+        self._canvas = canvas
+        self._target_layers = all_rois
+        self._rotation = 0.0
+        self._session_snapshots.clear()
+        self._session_bboxes.clear()
+        self._cumulative_matrix = None
+        bbox = self._compute_union_bbox(all_rois)
+        if bbox:
+            self._show_handles(bbox, canvas)
+        _log.log("transform", "on_activate",
+                 duration_ms=(time.perf_counter() - _t0) * 1000,
+                 tool=self.name, n_rois=len(all_rois))
+        _log.log_mem("on_activate.end", tool=self.name)
+        # Deferred UI sync: layer panel selection, status bar, properties
+        QTimer.singleShot(0, lambda: canvas._selection.changed.emit(
+            canvas._selection._layers))
 
     def _get_target_layers(self, layer, canvas):
         return list(canvas.layer_stack.roi_layers)

@@ -17,7 +17,7 @@ class CircleTool(BaseTool):
         self._preview_item = None
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._center = pos
         self._snapshot = layer.mask.copy()

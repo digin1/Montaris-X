@@ -53,7 +53,7 @@ class PropertiesPanel(QWidget):
 
         self.name_label.setText(layer.name)
 
-        if hasattr(layer, 'mask'):
+        if getattr(layer, 'is_roi', False):
             self.type_label.setText("ROI")
             h, w = layer.shape
             self.size_label.setText(f"{w} x {h}")
@@ -68,7 +68,7 @@ class PropertiesPanel(QWidget):
                 px = 0
             else:
                 y1, y2, x1, x2 = bbox
-                px = int(np.count_nonzero(layer.mask[y1:y2, x1:x2]))
+                px = int(np.count_nonzero(layer.get_mask_crop((y1, y2, x1, x2))))
             self.pixel_count_label.setText(f"{px:,}")
         else:
             self.type_label.setText("Image")

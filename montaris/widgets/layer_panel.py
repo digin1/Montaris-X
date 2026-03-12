@@ -215,14 +215,20 @@ class LayerPanel(QWidget):
             self.list_widget.addItem(item)
 
         px_counts = []
+        # For large ROI sets, use bbox area as proxy to avoid
+        # O(n) RLE decodes just for the layer panel pixel counts.
+        use_bbox_area = len(roi_layers) > 20
         for i, roi in enumerate(roi_layers):
             icon = self._color_icon(roi.color)
             bbox = roi.get_bbox()
             if bbox is None:
                 px_count = 0
+            elif use_bbox_area:
+                y1, y2, x1, x2 = bbox
+                px_count = (y2 - y1) * (x2 - x1)
             else:
                 y1, y2, x1, x2 = bbox
-                px_count = int(np.count_nonzero(roi.mask[y1:y2, x1:x2]))
+                px_count = int(np.count_nonzero(roi.get_mask_crop((y1, y2, x1, x2))))
             px_counts.append(px_count)
             display_name = f"{i + 1}. {roi.name}"
             item = QListWidgetItem(display_name)
@@ -241,13 +247,17 @@ class LayerPanel(QWidget):
         roi_layers = self.layer_stack.roi_layers
         if px_counts is None:
             px_counts = []
+            use_bbox_area = len(roi_layers) > 20
             for roi in roi_layers:
                 bbox = roi.get_bbox()
                 if bbox is None:
                     px_counts.append(0)
+                elif use_bbox_area:
+                    y1, y2, x1, x2 = bbox
+                    px_counts.append((y2 - y1) * (x2 - x1))
                 else:
                     y1, y2, x1, x2 = bbox
-                    px_counts.append(int(np.count_nonzero(roi.mask[y1:y2, x1:x2])))
+                    px_counts.append(int(np.count_nonzero(roi.get_mask_crop((y1, y2, x1, x2)))))
         total = sum(max(1, c) for c in px_counts) if px_counts else 1
         segments = []
         for i, roi in enumerate(roi_layers):
@@ -285,22 +295,28 @@ class LayerPanel(QWidget):
         if self._updating:
             return
         self._updating = True
+        # Suppress all visual updates during bulk selection
+        self.list_widget.setUpdatesEnabled(False)
+        self.list_widget.blockSignals(True)
         self.list_widget.clearSelection()
         primary_item = None
+        layer_ids = {id(l) for l in layers}
+        primary_id = id(layers[0]) if layers else None
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             data = item.data(Qt.UserRole)
             if data and data[0] == "roi":
                 roi = self.layer_stack.get_roi(data[1])
-                if roi in layers:
+                if roi is not None and id(roi) in layer_ids:
                     item.setSelected(True)
-                    if roi is (layers[0] if layers else None):
+                    if id(roi) == primary_id:
                         primary_item = item
-        # Set current item without clearing multi-selection
         if primary_item is not None:
             self.list_widget.setCurrentItem(
                 primary_item, QItemSelectionModel.Current
             )
+        self.list_widget.blockSignals(False)
+        self.list_widget.setUpdatesEnabled(True)
         self._updating = False
         # Emit selection_changed for primary so app syncs active_layer
         if layers:

@@ -19,8 +19,8 @@ TOOL_ICONS = {
     'Stamp': '■',
     'Transform (selected)': '🔧',
     'Move (selected)': '✥',
-    'Transform All': '🔧✱',
-    'Move All': '✥✱',
+    'Transform All': '⛭',
+    'Move All': '⊞',
 }
 
 

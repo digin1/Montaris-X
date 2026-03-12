@@ -462,11 +462,11 @@ class MontarisApp(QMainWindow):
 
         view_menu.addSeparator()
 
-        # GPU acceleration toggle
-        self._gpu_act = QAction("&Hardware Acceleration (OpenGL)", self)
-        self._gpu_act.setCheckable(True)
-        self._gpu_act.triggered.connect(self._toggle_opengl)
-        view_menu.addAction(self._gpu_act)
+        # JIT acceleration toggle
+        self._accel_act = QAction("&JIT Acceleration (Numba)", self)
+        self._accel_act.setCheckable(True)
+        self._accel_act.triggered.connect(self._toggle_accel)
+        view_menu.addAction(self._accel_act)
 
         view_menu.addSeparator()
 
@@ -585,7 +585,7 @@ class MontarisApp(QMainWindow):
 
     def _update_cursor_info(self, x, y, value):
         roi_info = ""
-        if self.canvas._active_layer and hasattr(self.canvas._active_layer, 'mask'):
+        if self.canvas._active_layer and getattr(self.canvas._active_layer, 'is_roi', False):
             mask = self.canvas._active_layer.mask
             if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1]:
                 roi_info = f"  ROI: {'yes' if mask[y, x] > 0 else 'no'}"
@@ -625,25 +625,28 @@ class MontarisApp(QMainWindow):
         self.layer_stack._global_opacity_factor = value / 100.0
         self.canvas.refresh_overlays_lut_only()
 
-    def _toggle_opengl(self, checked):
-        """Toggle GPU-accelerated rendering via OpenGL."""
-        if checked:
-            ok = self.canvas.enable_opengl(True)
-            if not ok:
-                self._gpu_act.setChecked(False)
-                QMessageBox.warning(self, "OpenGL Unavailable",
-                    "Hardware acceleration could not be enabled.\n"
-                    "Your system may not support OpenGL.")
+    def _toggle_accel(self, checked):
+        """Toggle Numba JIT acceleration."""
+        try:
+            from montaris.core.accel import set_enabled, get_mode, HAS_NUMBA
+            if checked and not HAS_NUMBA:
+                self._accel_act.setChecked(False)
+                QMessageBox.warning(self, "Numba Not Available",
+                    "JIT acceleration requires the numba package.\n"
+                    "Install with: pip install numba")
                 return
-            self.settings.setValue("use_opengl", True)
-            self.toast.show("Hardware acceleration enabled (OpenGL)", "success")
-        else:
-            self.canvas.enable_opengl(False)
-            self.settings.setValue("use_opengl", False)
-            self.toast.show("Hardware acceleration disabled", "success")
-        # Re-render with new viewport
+            set_enabled(checked)
+            mode = get_mode()
+            self.settings.setValue("use_jit_accel", checked)
+            if checked:
+                self.toast.show(f"JIT acceleration enabled — {mode}", "success")
+            else:
+                self.toast.show("JIT acceleration disabled (numpy fallback)", "success")
+        except ImportError:
+            self._accel_act.setChecked(False)
+            self.toast.show("Acceleration module not available", "error")
+        # Re-render with new backend
         if self.layer_stack.image_layer is not None:
-            self.canvas.refresh_image()
             self.canvas.refresh_overlays()
 
     def _on_tool_changed(self, tool):
@@ -1211,7 +1214,7 @@ class MontarisApp(QMainWindow):
 
     def export_active_imagej_roi(self):
         roi = self.canvas._active_layer
-        if not roi or not hasattr(roi, 'mask'):
+        if not roi or not getattr(roi, 'is_roi', False):
             QMessageBox.information(self, "Info", "No active ROI selected.")
             return
         self._flatten_roi_offsets()
@@ -1627,20 +1630,24 @@ class MontarisApp(QMainWindow):
                 return roi
 
             if total > 3:
-                from montaris.core.workers import get_pool
-                futures = [
-                    (base, get_pool().submit(_decode_roi_entry, et, pl, w, h, sx, sy, need_scale))
-                    for et, base, pl in roi_entries
-                ]
-                for i, (base, fut) in enumerate(futures):
-                    if progress.wasCanceled():
-                        break
-                    rle_bytes, rle_shape, bbox = fut.result()
-                    roi = _init_roi(base, rle_bytes, rle_shape, bbox)
-                    self.layer_stack.insert_roi(insert_at + count, roi)
-                    count += 1
-                    progress.setValue(i + 1)
-                    QApplication.processEvents()
+                from montaris.core.workers import get_pool, worker_count
+                pool = get_pool()
+                batch_sz = worker_count()
+                for batch_start in range(0, total, batch_sz):
+                    batch = roi_entries[batch_start:batch_start + batch_sz]
+                    futures = [
+                        (base, pool.submit(_decode_roi_entry, et, pl, w, h, sx, sy, need_scale))
+                        for et, base, pl in batch
+                    ]
+                    for i, (base, fut) in enumerate(futures):
+                        if progress.wasCanceled():
+                            break
+                        rle_bytes, rle_shape, bbox = fut.result()
+                        roi = _init_roi(base, rle_bytes, rle_shape, bbox)
+                        self.layer_stack.insert_roi(insert_at + count, roi)
+                        count += 1
+                        progress.setValue(batch_start + i + 1)
+                        QApplication.processEvents()
             else:
                 for i, (entry_type, base, payload) in enumerate(roi_entries):
                     if progress.wasCanceled():
@@ -1894,7 +1901,7 @@ class MontarisApp(QMainWindow):
         selected = self.canvas._selection.layers
         if not selected:
             layer = self.canvas._active_layer
-            if layer and hasattr(layer, 'mask') and layer in self.layer_stack.roi_layers:
+            if layer and getattr(layer, 'is_roi', False) and layer in self.layer_stack.roi_layers:
                 selected = [layer]
         if not selected:
             return
@@ -2025,11 +2032,14 @@ class MontarisApp(QMainWindow):
                   self._display_dock, self._adj_dock]:
             d.setVisible(True)
 
-        # Restore OpenGL setting
-        use_gl = self.settings.value("use_opengl", False, type=bool)
-        if use_gl:
-            ok = self.canvas.enable_opengl(True)
-            self._gpu_act.setChecked(ok)
+        # Restore JIT acceleration setting
+        try:
+            from montaris.core.accel import set_enabled, HAS_NUMBA, is_enabled
+            use_jit = self.settings.value("use_jit_accel", True, type=bool)
+            set_enabled(use_jit and HAS_NUMBA)
+            self._accel_act.setChecked(is_enabled())
+        except ImportError:
+            self._accel_act.setChecked(False)
 
     def _apply_dock_widths(self):
         """Set compact right sidebar width after layout is ready."""
@@ -2065,4 +2075,14 @@ def main():
     apply_dark_theme(app)
     window = MontarisApp()
     window.show()
+
+    # Background warmup of JIT kernels
+    try:
+        from montaris.core.accel import warmup, HAS_NUMBA
+        if HAS_NUMBA:
+            from montaris.core.workers import get_pool
+            get_pool().submit(warmup)
+    except ImportError:
+        pass
+
     sys.exit(app.exec())

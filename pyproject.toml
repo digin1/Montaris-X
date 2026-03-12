@@ -22,6 +22,9 @@ test = [
     "pytest>=7.0",
     "pytest-qt>=4.2",
 ]
+accel = [
+    "numba>=0.58.0",
+]
 
 [project.scripts]
 montaris = "montaris.app:main"
