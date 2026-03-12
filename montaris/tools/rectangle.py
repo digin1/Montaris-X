@@ -11,14 +11,12 @@ class RectangleTool(BaseTool):
     def __init__(self, app):
         super().__init__(app)
         self._start = None
-        self._snapshot = None
         self._preview_item = None
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._start = pos
-        self._snapshot = layer.mask.copy()
 
     def on_move(self, pos, layer, canvas):
         if self._start is None:
@@ -43,7 +41,7 @@ class RectangleTool(BaseTool):
         y2 = min(h, y2 + 1)
 
         if x1 < x2 and y1 < y2:
-            old_crop = self._snapshot[y1:y2, x1:x2]
+            old_crop = layer.mask[y1:y2, x1:x2].copy()
             layer.mask[y1:y2, x1:x2] = 255
             new_crop = layer.mask[y1:y2, x1:x2]
 
@@ -56,7 +54,6 @@ class RectangleTool(BaseTool):
 
         canvas.refresh_active_overlay(layer)
         self._start = None
-        self._snapshot = None
 
     def _update_preview(self, pos, canvas):
         self._clear_preview(canvas)

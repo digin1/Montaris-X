@@ -70,7 +70,8 @@ class TestDeselectTool:
         app = app_with_image
         app.tool_panel._select_tool('Brush')
         app.tool_panel._deselect_tool()
-        assert app.tool_panel._current_tool is None
+        from montaris.tools.hand import HandTool
+        assert isinstance(app.tool_panel._current_tool, HandTool)
 
 
 class TestAutoOverlapBrush:

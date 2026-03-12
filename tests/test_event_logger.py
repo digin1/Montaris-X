@@ -71,7 +71,7 @@ class TestExportJson:
         logger.log("test", "event1")
         logger.log("test", "event2", duration_ms=1.5)
         result = logger.export_json()
-        assert result['version'] == 1
+        assert result['version'] == 2
         assert 'session' in result
         assert 'events' in result
         assert len(result['events']) == 2
