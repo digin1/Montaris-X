@@ -486,3 +486,4 @@ class MontageDocument:
     downsample_factor: int = 1
     original_shape: tuple = None
     tint_color: tuple = None  # (R, G, B) or None for grayscale
+    image_path: str = None  # full path to the source image file
