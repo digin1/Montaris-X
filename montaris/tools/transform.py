@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QTimer
 from PySide6.QtGui import QPen, QColor, QBrush, QTransform, QImage, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
-    QGraphicsPixmapItem, QGraphicsItem,
+    QGraphicsPixmapItem, QGraphicsItem, QProgressDialog, QApplication,
 )
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
@@ -14,7 +14,7 @@ from montaris.core.roi_transform import (
     apply_affine_inplace, make_scale_matrix, make_rotation_matrix,
 )
 from montaris.core.components import get_component_at
-from montaris.core.rle import rle_encode, rle_decode
+from montaris.core.rle import rle_encode, rle_decode, rle_decode_crop
 
 HANDLE_HIT_RADIUS = 24
 
@@ -105,20 +105,41 @@ class TransformTool(BaseTool):
             # current mask state for undo diff (crop-only for speed)
             self._snapshots = {}
             self._snap_bboxes = {}
+            # Count how many layers need new session snapshots
+            need_snap = [l for l in self._target_layers
+                         if id(l) not in self._session_snapshots]
+            progress = None
+            if len(need_snap) > 5:
+                progress = QProgressDialog(
+                    "Preparing transform snapshots…", None,
+                    0, len(need_snap), canvas.window())
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setMinimumDuration(0)
+                progress.show()
+                QApplication.processEvents()
+            snap_count = 0
             for l in self._target_layers:
                 lid = id(l)
                 sb = l.get_bbox()
                 self._snap_bboxes[lid] = sb
                 # Session snapshot: taken once on first handle use.
+                # Store bbox-crop RLE to avoid full-mask decode on release.
                 if lid not in self._session_snapshots:
-                    if l.is_compressed:
-                        # Steal existing RLE — near zero cost
-                        self._session_snapshots[lid] = (l._rle_data, l._mask_shape)
+                    if sb is not None:
+                        if l.is_compressed:
+                            crop = rle_decode_crop(
+                                l._rle_data, l._mask_shape, sb)
+                        else:
+                            crop = l.mask[sb[0]:sb[1], sb[2]:sb[3]]
+                        self._session_snapshots[lid] = rle_encode(crop)
                     else:
-                        self._session_snapshots[lid] = rle_encode(l.mask)
+                        self._session_snapshots[lid] = (b'', (0, 0))
                     self._session_bboxes[lid] = sb
                     # snap_data=None → undo diff uses decoded session on release
                     self._snapshots[lid] = (l, None, sb)
+                    if progress:
+                        snap_count += 1
+                        progress.setValue(snap_count)
                 else:
                     # Subsequent ops: crop-only snapshot (fast)
                     if sb is not None:
@@ -126,6 +147,8 @@ class TransformTool(BaseTool):
                     else:
                         crop = None
                     self._snapshots[lid] = (l, crop, sb)
+            if progress:
+                progress.close()
             self._create_previews(canvas)
             return
 
@@ -287,6 +310,7 @@ class TransformTool(BaseTool):
         if not self._dragging or not self._snapshots:
             return
         self._dragging = False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         canvas.flash_progress("Applying transform…")
 
         affected = [l for l, _ in self._hidden_layers]
@@ -312,7 +336,15 @@ class TransformTool(BaseTool):
             l = self._target_layers[0]
             lid = id(l)
             session_rle = self._session_snapshots.get(lid)
-            session_snap = rle_decode(*session_rle) if session_rle is not None else None
+            session_bbox = self._session_bboxes.get(lid)
+            # Component mode needs full-size mask — reconstruct from crop
+            if session_rle is not None and session_rle[0] and session_bbox is not None:
+                crop = rle_decode(*session_rle)
+                session_snap = np.zeros(l.mask.shape, dtype=np.uint8)
+                by1, by2, bx1, bx2 = session_bbox
+                session_snap[by1:by2, bx1:bx2] = crop
+            else:
+                session_snap = None
             snap_bb = self._snap_bboxes.get(lid)  # bbox before this drag
             if session_snap is not None and self._cumulative_matrix is not None:
                 cum_2x3 = self._cumulative_matrix[:2]
@@ -357,16 +389,28 @@ class TransformTool(BaseTool):
             cum_2x3 = self._cumulative_matrix[:2] if self._cumulative_matrix is not None else None
 
             def _transform_one(lid, l, snap_data, sb, session_rle, session_bbox):
-                """Decode session, apply affine, compute undo diff for one layer."""
-                session_snap = rle_decode(*session_rle) if session_rle is not None else None
-                if session_snap is not None and cum_2x3 is not None:
-                    l.mask[:] = 0
+                """Decode session crop, apply affine, compute undo diff."""
+                # Session snapshots are now bbox-crop RLE (not full-mask).
+                if session_rle is not None and session_rle[0] and cum_2x3 is not None:
+                    session_crop = rle_decode(*session_rle)
+                    # Clear only the old content bbox (sb), not the entire mask
+                    if sb:
+                        l.mask[sb[0]:sb[1], sb[2]:sb[3]] = 0
                     src_bb, dst_bb = apply_affine_inplace(
-                        l.mask, session_snap, cum_2x3, src_bbox=session_bbox)
-                else:
+                        l.mask, session_crop, cum_2x3,
+                        src_bbox=session_bbox, clear_src=False,
+                        snap_is_crop=True)
+                elif snap_data is not None:
                     src_bb, dst_bb = apply_affine_inplace(
-                        l.mask, session_snap if session_snap is not None else snap_data, M,
+                        l.mask, snap_data, M,
                         src_bbox=self._snap_bboxes.get(lid))
+                elif session_rle is not None and session_rle[0]:
+                    session_crop = rle_decode(*session_rle)
+                    src_bb, dst_bb = apply_affine_inplace(
+                        l.mask, session_crop, M,
+                        src_bbox=session_bbox, snap_is_crop=True)
+                else:
+                    return None, None, None
                 l.invalidate_bbox()
                 if src_bb is None and dst_bb is None:
                     return None, None, None
@@ -375,9 +419,18 @@ class TransformTool(BaseTool):
                 y2 = max(b[1] for b in bbs)
                 x1 = min(b[2] for b in bbs)
                 x2 = max(b[3] for b in bbs)
-                # Undo diff: use snap_data if available, else decoded session
-                undo_snap = snap_data if snap_data is not None else session_snap
-                if sb is not None and undo_snap is not None and undo_snap.shape != l.mask.shape:
+                # Undo diff: use snap_data if available, else decoded session crop
+                if snap_data is not None:
+                    undo_snap = snap_data
+                    undo_is_crop = (sb is not None
+                                    and snap_data.shape != l.mask.shape)
+                elif session_rle is not None and session_rle[0]:
+                    undo_snap = rle_decode(*session_rle)
+                    undo_is_crop = True
+                else:
+                    undo_snap = None
+                    undo_is_crop = False
+                if sb is not None and undo_snap is not None and undo_is_crop:
                     sy1, sy2, sx1, sx2 = sb
                     region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
                     oy1, oy2 = max(y1, sy1), min(y2, sy2)
@@ -385,7 +438,7 @@ class TransformTool(BaseTool):
                     if oy2 > oy1 and ox2 > ox1:
                         region_old[oy1 - y1:oy2 - y1, ox1 - x1:ox2 - x1] = \
                             undo_snap[oy1 - sy1:oy2 - sy1, ox1 - sx1:ox2 - sx1]
-                elif undo_snap is not None:
+                elif undo_snap is not None and not undo_is_crop:
                     region_old = undo_snap[y1:y2, x1:x2].copy()
                 else:
                     region_old = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
@@ -548,6 +601,7 @@ class TransformTool(BaseTool):
                     canvas._roi_items[rid].setVisible(True)
             canvas._update_selection_highlights()
 
+        QApplication.restoreOverrideCursor()
         QTimer.singleShot(0, _deferred_rebuild)
 
     def on_key_press(self, key, canvas):
@@ -668,9 +722,17 @@ class TransformTool(BaseTool):
 
         # Non-component = pixels in session snapshot outside the original component mask
         session_rle = self._session_snapshots.get(lid)
-        session_snap = rle_decode(*session_rle) if session_rle is not None else None
-        if session_snap is not None:
-            snap_crop = session_snap[ly1:ly2, lx1:lx2]
+        session_bbox = self._session_bboxes.get(lid)
+        if session_rle is not None and session_rle[0] and session_bbox is not None:
+            sess_crop = rle_decode(*session_rle)
+            sby1, sby2, sbx1, sbx2 = session_bbox
+            # Build snap_crop aligned to layer_bb
+            snap_crop = np.zeros((lh, lw), dtype=np.uint8)
+            oy1 = max(ly1, sby1); oy2 = min(ly2, sby2)
+            ox1 = max(lx1, sbx1); ox2 = min(lx2, sbx2)
+            if oy2 > oy1 and ox2 > ox1:
+                snap_crop[oy1-ly1:oy2-ly1, ox1-lx1:ox2-lx1] = \
+                    sess_crop[oy1-sby1:oy2-sby1, ox1-sbx1:ox2-sbx1]
             comp_crop_full = comp[ly1:ly2, lx1:lx2]
             non_comp = (snap_crop > 0) & ~comp_crop_full
         else:
@@ -867,6 +929,21 @@ class TransformTool(BaseTool):
 class TransformAllTool(TransformTool):
     """Transform ALL ROI layers, not just selected ones."""
     name = "Transform All"
+
+    def on_activate(self, layer, canvas):
+        """Select all ROIs and show transform handles immediately."""
+        all_rois = list(canvas.layer_stack.roi_layers)
+        if all_rois:
+            canvas._selection.select_all(canvas.layer_stack.roi_layers)
+            self._canvas = canvas
+            self._target_layers = all_rois
+            self._rotation = 0.0
+            self._session_snapshots.clear()
+            self._session_bboxes.clear()
+            self._cumulative_matrix = None
+            bbox = self._compute_union_bbox(all_rois)
+            if bbox:
+                self._show_handles(bbox, canvas)
 
     def _get_target_layers(self, layer, canvas):
         return list(canvas.layer_stack.roi_layers)

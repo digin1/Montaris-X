@@ -143,6 +143,32 @@ class ImageCanvas(QGraphicsView):
         self._progress_hide_timer.setSingleShot(True)
         self._progress_hide_timer.timeout.connect(self._progress_bar.hide)
 
+    def enable_opengl(self, enabled=True):
+        """Switch viewport between QOpenGLWidget (GPU) and default QWidget (CPU).
+
+        Returns True if OpenGL was successfully enabled, False on failure.
+        """
+        if enabled:
+            try:
+                from PySide6.QtOpenGLWidgets import QOpenGLWidget
+                gl = QOpenGLWidget()
+                self.setViewport(gl)
+                self._opengl_active = True
+            except (ImportError, Exception):
+                self._opengl_active = False
+                return False
+        else:
+            from PySide6.QtWidgets import QWidget
+            self.setViewport(QWidget())
+            self._opengl_active = False
+        # Re-apply mouse tracking after viewport swap
+        self.viewport().setMouseTracking(True)
+        return True
+
+    @property
+    def opengl_active(self):
+        return getattr(self, '_opengl_active', False)
+
     # ------------------------------------------------------------------
     # Tool / layer management
     # ------------------------------------------------------------------
@@ -571,7 +597,9 @@ class ImageCanvas(QGraphicsView):
         # Parallel path: compute RGBA arrays in threads, apply on main thread
         if nv > 3:
             from montaris.core.workers import get_pool
+            from montaris.core.busy import should_process_events
             futures = []
+            _last_pe = time.monotonic()
             for idx, roi, target_lod in visible_jobs:
                 if not roi.visible:
                     futures.append((idx, roi, target_lod, None))
@@ -593,6 +621,7 @@ class ImageCanvas(QGraphicsView):
                     x1 + roi.offset_x, y1 + roi.offset_y,
                 )
                 futures.append((idx, roi, target_lod, fut))
+                _last_pe = should_process_events(_last_pe)
 
             for job_i, (idx, roi, target_lod, fut) in enumerate(futures):
                 rid = id(roi)
@@ -607,6 +636,7 @@ class ImageCanvas(QGraphicsView):
                 self._roi_lod[rid] = target_lod
                 if show_progress:
                     self._progress_bar.setValue(job_i + 1)
+                    _last_pe = should_process_events(_last_pe)
         else:
             # Sequential path for small counts
             for job_i, (idx, roi, target_lod) in enumerate(visible_jobs):
@@ -1026,6 +1056,9 @@ class ImageCanvas(QGraphicsView):
                 target_lod = 0 if roi == self._active_layer else lod
                 if self._roi_lod.get(rid) != target_lod and rid not in self._roi_stale:
                     self._roi_lod_pending.add(rid)
+
+        # Show progress flash during LOD re-render
+        self.flash_progress()
 
         # Process stale entries + LOD pending in a single batched pass
         budget = self._LOD_BATCH_SIZE

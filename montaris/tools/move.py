@@ -1,7 +1,7 @@
 import numpy as np
 from PySide6.QtCore import Qt, QRectF, QTimer
 from PySide6.QtGui import QPen, QColor, QImage, QPixmap
-from PySide6.QtWidgets import QGraphicsPixmapItem
+from PySide6.QtWidgets import QGraphicsPixmapItem, QApplication
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand, OffsetUndoCommand
 from montaris.core.multi_undo import CompoundUndoCommand
@@ -249,6 +249,7 @@ class MoveTool(BaseTool):
 
         affected = [l for l, _ in self._comp_hidden_layers]
         self._remove_component_previews(canvas, re_render=False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         canvas.flash_progress("Applying move...")
 
         l = self._target_layers[0]
@@ -329,6 +330,8 @@ class MoveTool(BaseTool):
             except ValueError:
                 pass
         canvas._update_selection_highlights()
+
+        QApplication.restoreOverrideCursor()
 
         if self._multi_comp_mask is not None and moved_layer is not None:
             self._show_marching_ants_for_mask(self._multi_comp_mask, moved_layer, canvas)
@@ -650,6 +653,12 @@ class MoveTool(BaseTool):
 class MoveAllTool(MoveTool):
     """Move ALL ROI layers, not just selected ones."""
     name = "Move All"
+
+    def on_activate(self, layer, canvas):
+        """Select all ROIs so the layer panel highlights them."""
+        all_rois = list(canvas.layer_stack.roi_layers)
+        if all_rois:
+            canvas._selection.select_all(canvas.layer_stack.roi_layers)
 
     def _get_target_layers(self, layer, canvas):
         return list(canvas.layer_stack.roi_layers)
