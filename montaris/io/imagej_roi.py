@@ -215,25 +215,38 @@ def write_imagej_roi_bytes(roi_dict):
     return _build_roi_bytes(roi_dict)
 
 
-def mask_to_imagej_roi(mask, name=""):
+def mask_to_imagej_roi(mask, name="", bbox=None):
     """Convert a binary mask to an ImageJ ROI dict.
 
     Uses skimage.measure.find_contours for proper contour tracing.
     Single contour → freehand ROI with x/y coords.
     Multiple contours (holes) → composite ROI with paths.
+
+    Args:
+        mask: 2D uint8 array
+        name: ROI name string
+        bbox: optional (top, bottom, left, right) tuple to skip full-mask scan
     """
     from skimage.measure import find_contours
 
-    ys, xs = np.where(mask > 0)
-    if len(ys) == 0:
+    if bbox is not None:
+        top, bottom, left, right = bbox
+    else:
+        ys, xs = np.where(mask > 0)
+        if len(ys) == 0:
+            return None
+        top = int(ys.min())
+        bottom = int(ys.max()) + 1
+        left = int(xs.min())
+        right = int(xs.max()) + 1
+
+    submask = mask[top:bottom, left:right]
+    if not submask.any():
         return None
 
-    top = int(ys.min())
-    bottom = int(ys.max()) + 1
-    left = int(xs.min())
-    right = int(xs.max()) + 1
-
-    contours = find_contours(mask, 0.5)
+    # Pad with zeros so find_contours detects edges at submask boundary
+    padded = np.pad(submask, 1, mode='constant', constant_values=0)
+    contours = find_contours(padded, 0.5)
     if not contours:
         return None
 
@@ -243,8 +256,9 @@ def mask_to_imagej_roi(mask, name=""):
         if np.allclose(c[0], c[-1]) and len(c) > 1:
             c = c[:-1]
         # find_contours returns (row, col) = (y, x)
-        x_coords = np.round(c[:, 1]).astype(np.int32)
-        y_coords = np.round(c[:, 0]).astype(np.int32)
+        # Subtract 1 for padding, then offset back to full-mask space
+        x_coords = np.round(c[:, 1] - 1).astype(np.int32) + left
+        y_coords = np.round(c[:, 0] - 1).astype(np.int32) + top
         return {
             'type': ROI_FREEHAND,
             'top': top,
@@ -262,7 +276,8 @@ def mask_to_imagej_roi(mask, name=""):
         for c in contours:
             if np.allclose(c[0], c[-1]) and len(c) > 1:
                 c = c[:-1]
-            path = [(float(pt[1]), float(pt[0])) for pt in c]
+            # Subtract 1 for padding, then offset back to full-mask space
+            path = [(float(pt[1]) - 1 + left, float(pt[0]) - 1 + top) for pt in c]
             paths.append(path)
         return {
             'type': ROI_RECT,
@@ -355,5 +370,20 @@ def imagej_roi_to_mask(roi_dict, width, height):
             mask[y0:y1, x0:x1] = np.array(img)
 
     return mask
+
+
+def scale_roi_dict(roi_dict, sx, sy):
+    """Scale all coordinates in an ImageJ ROI dict. Returns a new dict."""
+    d = dict(roi_dict)
+    d['top'] = int(d['top'] * sy)
+    d['bottom'] = int(d['bottom'] * sy)
+    d['left'] = int(d['left'] * sx)
+    d['right'] = int(d['right'] * sx)
+    if d.get('x_coords') is not None:
+        d['x_coords'] = (d['x_coords'] * sx).astype(np.int32)
+        d['y_coords'] = (d['y_coords'] * sy).astype(np.int32)
+    if d.get('paths'):
+        d['paths'] = [[(x * sx, y * sy) for x, y in p] for p in d['paths']]
+    return d
 
 

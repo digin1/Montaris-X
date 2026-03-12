@@ -1056,6 +1056,10 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "No ROIs to save.")
             return
         self._flatten_roi_offsets()
+        resolution = self._ask_export_resolution()
+        if resolution is None:
+            return
+        upscale = resolution == "original"
         path, _ = QFileDialog.getSaveFileName(
             self, "Save ROI Set", os.path.join(self._last_dir(), "rois.npz"),
             "NumPy Archive (*.npz);;All Files (*)",
@@ -1063,8 +1067,20 @@ class MontarisApp(QMainWindow):
         if path:
             self._update_last_dir(path)
             try:
+                n = len(self.layer_stack.roi_layers)
+                progress = QProgressDialog("Saving ROIs (compressing)...", None, 0, n, self)
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setMinimumDuration(0)
+                _last_pe = [time.monotonic()]
+
+                def _on_progress(i):
+                    progress.setValue(i)
+                    _last_pe[0] = should_process_events(_last_pe[0])
+
+                mt = self._upscale_mask_if_needed if upscale else None
                 with busy_cursor("Saving ROIs...", self, log_as="io.save_rois"):
-                    save_roi_set(path, self.layer_stack.roi_layers)
+                    save_roi_set(path, self.layer_stack.roi_layers, progress_callback=_on_progress, mask_transform=mt)
+                progress.close()
                 self.toast.show(f"Saved {len(self.layer_stack.roi_layers)} ROI(s)", "success")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save ROIs:\n{e}")
@@ -1082,13 +1098,16 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
         self._flatten_roi_offsets()
+        resolution = self._ask_export_resolution()
+        if resolution is None:
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, "Export ROI(s) as PNG", os.path.join(self._last_dir(), "roi_export.png"),
             "PNG (*.png);;All Files (*)",
         )
         if path:
             self._update_last_dir(path)
-            self.export_roi_png_to(path)
+            self.export_roi_png_to(path, upscale=(resolution == "original"))
 
     def _upscale_mask_if_needed(self, mask):
         """Upscale mask if image was downsampled (A.14)."""
@@ -1105,18 +1124,16 @@ class MontarisApp(QMainWindow):
             upscaled = upscaled[:oh, :ow]
         return upscaled
 
-    def export_roi_png_to(self, path):
+    def export_roi_png_to(self, path, upscale=True):
         try:
             from PIL import Image
             h, w = self.layer_stack.image_layer.shape[:2]
 
             rois = self.layer_stack.roi_layers
             n = len(rois)
-            if n > 1:
-                progress = QProgressDialog("Exporting PNG masks...", "Cancel", 0, n, self)
-                progress.setWindowModality(Qt.WindowModal)
-            else:
-                progress = None
+            progress = QProgressDialog("Exporting PNG masks...", "Cancel", 0, n, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
 
             base, ext = os.path.splitext(path)
             if not ext:
@@ -1130,7 +1147,7 @@ class MontarisApp(QMainWindow):
                 # Build jobs
                 jobs = []
                 for i, roi in enumerate(rois):
-                    mask = self._upscale_mask_if_needed(roi.mask)
+                    mask = self._get_export_mask(roi, upscale)
                     if n == 1:
                         out_path = base + ext
                     else:
@@ -1138,25 +1155,25 @@ class MontarisApp(QMainWindow):
                         out_path = f"{base}_{safe_name}{ext}"
                     jobs.append((mask, out_path))
 
+                _last_pe = time.monotonic()
                 if n > 3:
                     from montaris.core.workers import get_pool
                     futures = [get_pool().submit(_export_single_png, m, p) for m, p in jobs]
                     for i, fut in enumerate(futures):
-                        if progress and progress.wasCanceled():
+                        if progress.wasCanceled():
                             return
                         fut.result()
-                        if progress:
-                            progress.setValue(i + 1)
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
                 else:
                     for i, (mask, out_path) in enumerate(jobs):
-                        if progress and progress.wasCanceled():
+                        if progress.wasCanceled():
                             return
                         _export_single_png(mask, out_path)
-                        if progress:
-                            progress.setValue(i + 1)
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
 
-            if progress:
-                progress.close()
+            progress.close()
             self.toast.show(f"Exported {n} PNG mask(s)", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
@@ -1175,8 +1192,9 @@ class MontarisApp(QMainWindow):
             return
         self._update_last_dir(paths)
         try:
-            from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask
+            from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask, scale_roi_dict
             h, w = self.layer_stack.image_layer.shape[:2]
+            ds = self._downsample_factor
             n = len(paths)
             # Insert after currently selected ROI, or append at end
             active = self.canvas._active_layer
@@ -1194,6 +1212,8 @@ class MontarisApp(QMainWindow):
                     if progress and progress.wasCanceled():
                         break
                     roi_dict = read_imagej_roi(path)
+                    if ds > 1:
+                        roi_dict = scale_roi_dict(roi_dict, 1.0 / ds, 1.0 / ds)
                     mask = imagej_roi_to_mask(roi_dict, w, h)
                     name = os.path.splitext(os.path.basename(path))[0]
                     roi = ROILayer(name, w, h)
@@ -1218,6 +1238,10 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "No active ROI selected.")
             return
         self._flatten_roi_offsets()
+        resolution = self._ask_export_resolution()
+        if resolution is None:
+            return
+        upscale = resolution == "original"
         safe_name = roi.name.replace("/", "_").replace("\\", "_")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Active ROI as .roi", os.path.join(self._last_dir(), f"{safe_name}.roi"),
@@ -1228,7 +1252,9 @@ class MontarisApp(QMainWindow):
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
             with busy_cursor("Exporting ImageJ ROI...", self, log_as="io.export_imagej_single"):
-                roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
+                mask = self._get_export_mask(roi, upscale)
+                bbox = self._get_export_bbox(roi, upscale)
+                roi_dict = mask_to_imagej_roi(mask, roi.name, bbox=bbox)
                 if roi_dict:
                     write_imagej_roi(roi_dict, path)
             if roi_dict:
@@ -1243,20 +1269,22 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
         self._flatten_roi_offsets()
+        resolution = self._ask_export_resolution()
+        if resolution is None:
+            return
+        upscale = resolution == "original"
         dir_path = QFileDialog.getExistingDirectory(self, "Export ImageJ ROIs to Directory")
         if not dir_path:
             return
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
             n = len(self.layer_stack.roi_layers)
-            if n > 1:
-                progress = QProgressDialog("Exporting ImageJ ROIs...", "Cancel", 0, n, self)
-                progress.setWindowModality(Qt.WindowModal)
-            else:
-                progress = None
+            progress = QProgressDialog("Exporting ImageJ ROIs...", "Cancel", 0, n, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
 
-            def _export_single_imagej(mask, name, dp):
-                roi_dict = mask_to_imagej_roi(mask, name)
+            def _export_single_imagej(mask, name, dp, bbox=None):
+                roi_dict = mask_to_imagej_roi(mask, name, bbox=bbox)
                 if roi_dict:
                     safe_name = name.replace("/", "_").replace("\\", "_")
                     write_imagej_roi(roi_dict, os.path.join(dp, f"{safe_name}.roi"))
@@ -1264,31 +1292,44 @@ class MontarisApp(QMainWindow):
                 return False
 
             with busy_cursor("Exporting ImageJ ROIs...", self, log_as="io.export_imagej_bulk"):
-                if n > 3:
+                _last_pe = time.monotonic()
+                if upscale:
+                    # Serial path: upscaled masks are large, process one at a time
+                    count = 0
+                    for i, roi in enumerate(self.layer_stack.roi_layers):
+                        if progress.wasCanceled():
+                            break
+                        mask = self._get_export_mask(roi, True)
+                        bbox = self._get_export_bbox(roi, True)
+                        if _export_single_imagej(mask, roi.name, dir_path, bbox):
+                            count += 1
+                        del mask
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
+                elif n > 3:
                     from montaris.core.workers import get_pool
                     futures = []
                     for roi in self.layer_stack.roi_layers:
-                        fut = get_pool().submit(_export_single_imagej, roi.mask, roi.name, dir_path)
+                        fut = get_pool().submit(_export_single_imagej, roi.mask, roi.name, dir_path, roi.get_bbox())
                         futures.append(fut)
                     count = 0
                     for i, fut in enumerate(futures):
-                        if progress and progress.wasCanceled():
+                        if progress.wasCanceled():
                             break
                         if fut.result():
                             count += 1
-                        if progress:
-                            progress.setValue(i + 1)
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
                 else:
                     count = 0
                     for i, roi in enumerate(self.layer_stack.roi_layers):
-                        if progress and progress.wasCanceled():
+                        if progress.wasCanceled():
                             break
-                        if _export_single_imagej(roi.mask, roi.name, dir_path):
+                        if _export_single_imagej(roi.mask, roi.name, dir_path, roi.get_bbox()):
                             count += 1
-                        if progress:
-                            progress.setValue(i + 1)
-            if progress:
-                progress.close()
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
+            progress.close()
             self.toast.show(f"Exported {count} ImageJ ROI(s)", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
@@ -1298,6 +1339,10 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
         self._flatten_roi_offsets()
+        resolution = self._ask_export_resolution()
+        if resolution is None:
+            return
+        upscale = resolution == "original"
         path, filt = QFileDialog.getSaveFileName(
             self, "Batch Export ROIs", os.path.join(self._last_dir(), "rois"),
             "NumPy Archive (*.npz);;ImageJ ROI Directory;;PNG (*.png)",
@@ -1308,28 +1353,45 @@ class MontarisApp(QMainWindow):
             with busy_cursor("Batch exporting...", self, log_as="io.batch_export"):
                 n = len(self.layer_stack.roi_layers)
                 if filt.startswith("NumPy"):
-                    save_roi_set(path, self.layer_stack.roi_layers)
+                    progress = QProgressDialog("Saving ROIs (compressing)...", None, 0, n, self)
+                    progress.setWindowModality(Qt.WindowModal)
+                    progress.setMinimumDuration(0)
+                    _last_pe = [time.monotonic()]
+
+                    def _on_progress(i):
+                        progress.setValue(i)
+                        _last_pe[0] = should_process_events(_last_pe[0])
+
+                    mt = self._upscale_mask_if_needed if upscale else None
+                    save_roi_set(path, self.layer_stack.roi_layers, progress_callback=_on_progress, mask_transform=mt)
+                    progress.close()
                 elif filt.startswith("ImageJ"):
                     from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
                     os.makedirs(path, exist_ok=True)
                     progress = QProgressDialog("Exporting ImageJ ROIs...", "Cancel", 0, n, self)
                     progress.setWindowModality(Qt.WindowModal)
+                    progress.setMinimumDuration(0)
                     cancelled = False
+                    _last_pe = time.monotonic()
                     for i, roi in enumerate(self.layer_stack.roi_layers):
                         if progress.wasCanceled():
                             cancelled = True
                             break
-                        roi_dict = mask_to_imagej_roi(roi.mask, roi.name)
+                        mask = self._get_export_mask(roi, upscale)
+                        bbox = self._get_export_bbox(roi, upscale)
+                        roi_dict = mask_to_imagej_roi(mask, roi.name, bbox=bbox)
                         if roi_dict:
                             safe_name = roi.name.replace("/", "_").replace("\\", "_")
                             write_imagej_roi(roi_dict, os.path.join(path, f"{safe_name}.roi"))
+                        del mask
                         progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
                     progress.close()
                     if cancelled:
                         self.toast.show("Export cancelled", "warning")
                         return
                 elif filt.startswith("PNG"):
-                    self.export_roi_png_to(path)
+                    self.export_roi_png_to(path, upscale=upscale)
             self.toast.show(f"Batch exported to {os.path.basename(path)}", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to batch export:\n{e}")
@@ -1407,6 +1469,56 @@ class MontarisApp(QMainWindow):
         elif result == "Keep & Add New":
             return "keep"
         return None
+
+    def _ask_export_resolution(self):
+        """Ask whether to export at original or current resolution.
+
+        Returns 'original', 'current', or None (cancelled).
+        Skips dialog silently when ds_factor == 1.
+        """
+        ds = self._downsample_factor
+        if ds <= 1:
+            return "current"
+        h, w = self.layer_stack.image_layer.shape[:2]
+        orig_w, orig_h = w * ds, h * ds
+        original_shape = None
+        if 0 <= self._active_doc_index < len(self._documents):
+            original_shape = self._documents[self._active_doc_index].original_shape
+        if original_shape:
+            orig_h, orig_w = original_shape[:2]
+        from montaris.widgets.alert_modal import AlertModal
+        result = AlertModal.confirm(
+            self, "Export Resolution",
+            f"Image was downsampled {ds}x. Export at which resolution?",
+            [f"Original ({orig_w}\u00d7{orig_h})", f"Current ({w}\u00d7{h})", "Cancel"],
+        )
+        if result and result.startswith("Original"):
+            return "original"
+        elif result and result.startswith("Current"):
+            return "current"
+        return None
+
+    def _get_export_mask(self, roi, upscale):
+        """Get mask, optionally upscaled to original resolution."""
+        if not upscale or self._downsample_factor <= 1:
+            return roi.mask
+        return self._upscale_mask_if_needed(roi.mask)
+
+    def _get_export_bbox(self, roi, upscale):
+        """Get bbox, optionally scaled to original resolution."""
+        bbox = roi.get_bbox()
+        if not upscale or self._downsample_factor <= 1 or bbox is None:
+            return bbox
+        f = self._downsample_factor
+        t, b, l, r = bbox
+        scaled = (t * f, b * f, l * f, r * f)
+        original_shape = None
+        if 0 <= self._active_doc_index < len(self._documents):
+            original_shape = self._documents[self._active_doc_index].original_shape
+        if original_shape:
+            oh, ow = original_shape[:2]
+            scaled = (scaled[0], min(scaled[1], oh), scaled[2], min(scaled[3], ow))
+        return scaled
 
     # -- Import PNG masks --
 
@@ -1542,10 +1654,16 @@ class MontarisApp(QMainWindow):
 
             # Scale ROI coordinates to fit image if needed
             w, h = img_w, img_h
-            need_scale = max_w > img_w or max_h > img_h
-            if need_scale:
-                scale_x = img_w / max_w
-                scale_y = img_h / max_h
+            ds = self._downsample_factor
+            if ds > 1:
+                need_scale = True
+                scale_x = 1.0 / ds
+                scale_y = 1.0 / ds
+            else:
+                need_scale = max_w > img_w or max_h > img_h
+                if need_scale:
+                    scale_x = img_w / max(max_w, 1)
+                    scale_y = img_h / max(max_h, 1)
 
             # Insert after currently selected ROI, or append at end
             active = self.canvas._active_layer
@@ -1568,19 +1686,8 @@ class MontarisApp(QMainWindow):
                 if entry_type == 'roi':
                     roi_dict = payload
                     if do_scale:
-                        roi_dict = dict(roi_dict)
-                        roi_dict['top'] = int(roi_dict['top'] * sy)
-                        roi_dict['bottom'] = int(roi_dict['bottom'] * sy)
-                        roi_dict['left'] = int(roi_dict['left'] * sx)
-                        roi_dict['right'] = int(roi_dict['right'] * sx)
-                        if roi_dict.get('x_coords') is not None:
-                            roi_dict['x_coords'] = (roi_dict['x_coords'] * sx).astype(np.int32)
-                            roi_dict['y_coords'] = (roi_dict['y_coords'] * sy).astype(np.int32)
-                        if roi_dict.get('paths'):
-                            roi_dict['paths'] = [
-                                [(x * sx, y * sy) for x, y in p]
-                                for p in roi_dict['paths']
-                            ]
+                        from montaris.io.imagej_roi import scale_roi_dict
+                        roi_dict = scale_roi_dict(roi_dict, sx, sy)
                     mask = imagej_roi_to_mask(roi_dict, tw, th)
                     # Pre-compute bbox from roi_dict to avoid full-mask scan.
                     # Pad bottom/right by +1 because rasterization uses +2
@@ -1685,6 +1792,10 @@ class MontarisApp(QMainWindow):
             QMessageBox.information(self, "Info", "No ROIs to export.")
             return
         self._flatten_roi_offsets()
+        resolution = self._ask_export_resolution()
+        if resolution is None:
+            return
+        upscale = resolution == "original"
         path, _ = QFileDialog.getSaveFileName(
             self, "Export All ROIs as ZIP", os.path.join(self._last_dir(), "rois.zip"),
             "ZIP Archive (*.zip);;All Files (*)",
@@ -1695,14 +1806,12 @@ class MontarisApp(QMainWindow):
             import zipfile
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi_bytes
             n = len(self.layer_stack.roi_layers)
-            if n > 1:
-                progress = QProgressDialog("Exporting ROIs to ZIP...", "Cancel", 0, n, self)
-                progress.setWindowModality(Qt.WindowModal)
-            else:
-                progress = None
+            progress = QProgressDialog("Exporting ROIs to ZIP...", "Cancel", 0, n, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
 
-            def _compute_roi_bytes(mask, name):
-                roi_dict = mask_to_imagej_roi(mask, name)
+            def _compute_roi_bytes(mask, name, bbox=None):
+                roi_dict = mask_to_imagej_roi(mask, name, bbox=bbox)
                 if roi_dict:
                     safe = name.replace("/", "_").replace("\\", "_")
                     return (f"{safe}.roi", write_imagej_roi_bytes(roi_dict))
@@ -1710,40 +1819,60 @@ class MontarisApp(QMainWindow):
 
             # Compute in parallel, write to zipfile sequentially (not thread-safe)
             with busy_cursor("Exporting ROIs to ZIP...", self, log_as="io.export_zip"):
-                if n > 3:
+                _last_pe = time.monotonic()
+                if upscale:
+                    # Serial: upscaled masks are large, compute+write one at a time
+                    results = []
+                    cancelled = False
+                    for i, roi in enumerate(self.layer_stack.roi_layers):
+                        if progress.wasCanceled():
+                            cancelled = True
+                            break
+                        mask = self._get_export_mask(roi, True)
+                        bbox = self._get_export_bbox(roi, True)
+                        results.append(_compute_roi_bytes(mask, roi.name, bbox))
+                        del mask
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
+                elif n > 3:
                     from montaris.core.workers import get_pool
                     futures = [
-                        get_pool().submit(_compute_roi_bytes, roi.mask, roi.name)
+                        get_pool().submit(_compute_roi_bytes, roi.mask, roi.name, roi.get_bbox())
                         for roi in self.layer_stack.roi_layers
                     ]
                     results = []
                     cancelled = False
                     for i, fut in enumerate(futures):
-                        if progress and progress.wasCanceled():
+                        if progress.wasCanceled():
                             cancelled = True
                             break
                         results.append(fut.result())
-                        if progress:
-                            progress.setValue(i + 1)
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
                 else:
                     results = []
                     cancelled = False
                     for i, roi in enumerate(self.layer_stack.roi_layers):
-                        if progress and progress.wasCanceled():
+                        if progress.wasCanceled():
                             cancelled = True
                             break
-                        results.append(_compute_roi_bytes(roi.mask, roi.name))
-                        if progress:
-                            progress.setValue(i + 1)
+                        results.append(_compute_roi_bytes(roi.mask, roi.name, roi.get_bbox()))
+                        progress.setValue(i + 1)
+                        _last_pe = should_process_events(_last_pe)
 
             if not cancelled:
+                progress.setLabelText("Writing ZIP file...")
+                progress.setValue(0)
+                progress.setMaximum(len(results))
+                _last_pe = time.monotonic()
                 with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for entry in results:
+                    for j, entry in enumerate(results):
                         if entry is not None:
                             zf.writestr(entry[0], entry[1])
+                        progress.setValue(j + 1)
+                        _last_pe = should_process_events(_last_pe)
 
-            if progress:
-                progress.close()
+            progress.close()
             if cancelled:
                 if os.path.exists(path):
                     os.remove(path)
