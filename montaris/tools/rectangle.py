@@ -34,7 +34,7 @@ class RectangleTool(BaseTool):
         x2 = int(max(self._start.x(), pos.x()))
         y2 = int(max(self._start.y(), pos.y()))
 
-        h, w = layer.mask.shape
+        h, w = layer.shape
         x1 = max(0, x1)
         y1 = max(0, y1)
         x2 = min(w, x2 + 1)

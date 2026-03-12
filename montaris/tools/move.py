@@ -68,7 +68,7 @@ class MoveTool(BaseTool):
             # Convert canvas coords to mask coords for component detection
             mx = ix - layer.offset_x
             my = iy - layer.offset_y
-            h, w = layer.mask.shape
+            h, w = layer.shape
             if 0 <= my < h and 0 <= mx < w and layer.mask[my, mx] > 0:
                 layer_bbox = layer.get_bbox()
                 comp = get_component_at(layer.mask, mx, my, bbox=layer_bbox)
@@ -458,7 +458,7 @@ class MoveTool(BaseTool):
         if not self._target_layers or self._component_bbox is None:
             return dx, dy
         l = self._target_layers[0]
-        h, w = l.mask.shape
+        h, w = l.shape
         cy1, cy2, cx1, cx2 = self._component_bbox
         idx = int(round(dx))
         idy = int(round(dy))
@@ -475,7 +475,7 @@ class MoveTool(BaseTool):
             if bbox is None:
                 continue
             y1, y2, x1, x2 = bbox
-            h, w = l.mask.shape
+            h, w = l.shape
             lid = id(l)
             old_ox, old_oy = self._old_offsets.get(lid, (0, 0))
             # Display position = bbox + old_offset + delta

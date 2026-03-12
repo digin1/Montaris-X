@@ -33,7 +33,7 @@ class StampTool(BaseTool):
     def on_move(self, pos, layer, canvas):
         if not self._stamping or layer is None:
             return
-        h, w = layer.mask.shape
+        h, w = layer.shape
         hw, hh = self.width // 2, self.height // 2
         lx, ly = int(self._last_pos.x()), int(self._last_pos.y())
         px, py = int(pos.x()), int(pos.y())
@@ -72,7 +72,7 @@ class StampTool(BaseTool):
         sw, sh = self.width, self.height
         half_w = sw // 2
         half_h = sh // 2
-        mh, mw = layer.mask.shape
+        mh, mw = layer.shape
 
         y1 = max(0, cy - half_h)
         y2 = min(mh, cy - half_h + sh)

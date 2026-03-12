@@ -43,7 +43,7 @@ class CircleTool(BaseTool):
             self._center = None
             return
 
-        h, w = layer.mask.shape
+        h, w = layer.shape
         # Compute bbox of the circle and clamp to mask bounds
         by1 = max(0, cy - radius)
         by2 = min(h, cy + radius + 1)

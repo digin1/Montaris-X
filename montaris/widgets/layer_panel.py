@@ -561,6 +561,7 @@ class LayerPanel(QWidget):
     def _insert_roi_from_file(self, index, fmt):
         import os
         from PySide6.QtWidgets import QFileDialog
+        from montaris.core.rle import rle_encode
         img = self.layer_stack.image_layer
         if img is None:
             return
@@ -577,8 +578,21 @@ class LayerPanel(QWidget):
                 roi_dict = read_imagej_roi(path)
                 mask = imagej_roi_to_mask(roi_dict, w, h)
                 name = os.path.splitext(os.path.basename(path))[0]
-                roi = ROILayer(name, w, h)
-                roi.mask = mask
+                rle_bytes, rle_shape = rle_encode(mask)
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = name
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
+                roi.color = ROI_COLORS[0]
+                roi.opacity = 128
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                roi._cached_bbox = None
+                roi._bbox_valid = False
                 self.layer_stack.insert_roi(index + i, roi)
         elif fmt == "png":
             paths, _ = QFileDialog.getOpenFileNames(
@@ -594,9 +608,22 @@ class LayerPanel(QWidget):
                 if arr.shape != (h, w):
                     arr = np.array(pil_img.resize((w, h), Image.NEAREST))
                 mask = (arr > 0).astype(np.uint8) * 255
+                rle_bytes, rle_shape = rle_encode(mask)
                 name = os.path.splitext(os.path.basename(path))[0]
-                roi = ROILayer(name, w, h)
-                roi.mask = mask
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = name
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
+                roi.color = ROI_COLORS[0]
+                roi.opacity = 128
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                roi._cached_bbox = None
+                roi._bbox_valid = False
                 self.layer_stack.insert_roi(index + i, roi)
         self.refresh()
         self.visibility_changed.emit()

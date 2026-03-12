@@ -36,7 +36,7 @@ class EraserTool(BaseTool):
     def on_move(self, pos, layer, canvas):
         if not self._erasing or layer is None:
             return
-        h, w = layer.mask.shape
+        h, w = layer.shape
         r = self.size // 2
         lx, ly = int(self._last_pos.x()), int(self._last_pos.y())
         px, py = int(pos.x()), int(pos.y())
@@ -83,7 +83,7 @@ class EraserTool(BaseTool):
     def _erase(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
         r = self.size // 2
-        h, w = layer.mask.shape
+        h, w = layer.shape
         circle = self._get_circle()
 
         y1 = max(0, cy - r)

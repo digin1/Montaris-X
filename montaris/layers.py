@@ -222,6 +222,11 @@ class ROILayer:
         self.offset_y = 0
 
     @property
+    def shape(self):
+        """Return (height, width) without decompressing the mask."""
+        return self._mask_shape
+
+    @property
     def mask(self):
         if self._mask is None:
             self._mask = rle_decode(self._rle_data, self._mask_shape)
@@ -320,7 +325,7 @@ class ROILayer:
             self.offset_y = 0
             return True
         y1, y2, x1, x2 = bbox
-        h, w = self.mask.shape
+        h, w = self.shape
         # Destination region in mask coords
         dy1, dy2 = y1 + dy, y2 + dy
         dx1, dx2 = x1 + dx, x2 + dx
@@ -422,13 +427,26 @@ class LayerStack(QObject):
         """Duplicate ROI layer with a new distinct color."""
         if 0 <= index < len(self.roi_layers):
             src = self.roi_layers[index]
-            h, w = src.mask.shape
-            new_roi = ROILayer(f"{src.name} (copy)", w, h, self.next_color())
-            new_roi.mask = src.mask.copy()
+            # Copy compressed data directly if available (avoids full decompression)
+            new_roi = ROILayer.__new__(ROILayer)
+            new_roi.name = f"{src.name} (copy)"
+            if src._rle_data is not None:
+                new_roi._mask = None
+                new_roi._rle_data = src._rle_data  # bytes are immutable, safe to share
+                new_roi._mask_shape = src._mask_shape
+            else:
+                new_roi._mask = src._mask.copy()
+                new_roi._rle_data = None
+                new_roi._mask_shape = src._mask_shape
+            new_roi.color = self.next_color()
             new_roi.opacity = src.opacity
+            new_roi.visible = True
             new_roi.fill_mode = src.fill_mode
+            new_roi._dirty_rect = None
             new_roi.offset_x = src.offset_x
             new_roi.offset_y = src.offset_y
+            new_roi._cached_bbox = src._cached_bbox
+            new_roi._bbox_valid = src._bbox_valid
             self.roi_layers.insert(index + 1, new_roi)
             self.changed.emit()
 

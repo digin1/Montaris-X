@@ -71,6 +71,14 @@ def _save_session_from_snapshots(session_dir, snapshots, meta):
 
     os.makedirs(session_dir, exist_ok=True)
 
+    # Remove stale .roi files from previous save so deleted ROIs don't linger
+    for existing in os.listdir(session_dir):
+        if existing.lower().endswith('.roi'):
+            try:
+                os.remove(os.path.join(session_dir, existing))
+            except OSError:
+                pass
+
     # Use indexed filenames to avoid collisions from sanitization
     roi_files = []
     for i, snap in enumerate(snapshots):
@@ -141,6 +149,7 @@ class MontarisApp(QMainWindow):
         self._documents = []
         self._active_doc_index = -1
         self._composite_mode = False
+        self._session_dir = None  # current session folder path (reused on save)
 
         self._setup_canvas()
         self._setup_panels()
@@ -943,6 +952,7 @@ class MontarisApp(QMainWindow):
         if not paths:
             return
         self._initial_session_saved = False
+        self._session_dir = None
         self._update_last_dir(paths)
         # Ask downsample once for the batch
         first_data = load_image(paths[0])
@@ -1055,6 +1065,7 @@ class MontarisApp(QMainWindow):
         if self.layer_stack.image_layer is None:
             return
         self._initial_session_saved = False
+        self._session_dir = None
 
         clear_rois = False
         if self.layer_stack.roi_layers:
@@ -1229,8 +1240,12 @@ class MontarisApp(QMainWindow):
             self.toast.show("All ROIs are empty — nothing to save", "warning")
             return
 
-        folder_name = build_session_folder_name(stem)
-        session_dir = os.path.join(image_dir, folder_name)
+        if self._session_dir and os.path.isdir(self._session_dir):
+            session_dir = self._session_dir
+        else:
+            folder_name = build_session_folder_name(stem)
+            session_dir = os.path.join(image_dir, folder_name)
+            self._session_dir = session_dir
         ds_factor = doc.downsample_factor if doc else 1
         original_shape = doc.original_shape if doc else None
         img = self.layer_stack.image_layer
@@ -1328,6 +1343,7 @@ class MontarisApp(QMainWindow):
             self.layer_stack._color_index = 0
             self.canvas._active_layer = None
 
+        self._session_dir = folder
         self._restore_session_rois(folder, meta)
 
     def _restore_session_rois(self, folder, meta):
@@ -1390,10 +1406,23 @@ class MontarisApp(QMainWindow):
                 opacity = roi_opacities[i] if i < len(roi_opacities) else 128
                 roi_name = generate_unique_roi_name(name, self.layer_stack.roi_layers)
 
-                roi = ROILayer(roi_name, img_w, img_h, color)
-                roi.mask = mask
+                from montaris.core.rle import rle_encode
+                rle_bytes, rle_shape = rle_encode(mask)
+                del mask
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = roi_name
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
+                roi.color = color
                 roi.opacity = opacity
-                roi.compress()
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                roi._cached_bbox = None
+                roi._bbox_valid = False
                 self.layer_stack.insert_roi(insert_at + count, roi)
                 count += 1
             except Exception:
@@ -1447,6 +1476,7 @@ class MontarisApp(QMainWindow):
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
+            self._session_dir = newest_folder
             self._restore_session_rois(newest_folder, newest_meta)
 
     def export_roi_png(self):
@@ -1549,6 +1579,7 @@ class MontarisApp(QMainWindow):
         self._update_last_dir(paths)
         try:
             from montaris.io.imagej_roi import read_imagej_roi, imagej_roi_to_mask, scale_roi_dict
+            from montaris.core.rle import rle_encode
             h, w = self.layer_stack.image_layer.shape[:2]
             ds = self._downsample_factor
             n = len(paths)
@@ -1563,20 +1594,83 @@ class MontarisApp(QMainWindow):
                 progress.setWindowModality(Qt.WindowModal)
             else:
                 progress = None
+
+            def _decode_and_compress(path, tw, th, do_scale, sx, sy):
+                """Read .roi file, rasterize mask, and RLE-compress immediately."""
+                roi_dict = read_imagej_roi(path)
+                if do_scale:
+                    roi_dict = scale_roi_dict(roi_dict, sx, sy)
+                mask = imagej_roi_to_mask(roi_dict, tw, th)
+                t, b = roi_dict['top'], roi_dict['bottom']
+                l, r = roi_dict['left'], roi_dict['right']
+                t = max(0, t); l = max(0, l)
+                b = min(th, b + 1); r = min(tw, r + 1)
+                bbox = (t, b, l, r) if b > t and r > l else None
+                rle_bytes, rle_shape = rle_encode(mask)
+                return rle_bytes, rle_shape, bbox
+
+            def _init_roi(name, rle_bytes, rle_shape, bbox):
+                """Create ROILayer pre-compressed to minimize peak memory."""
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = name
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
+                roi.color = ROI_COLORS[0]
+                roi.opacity = 128
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                if bbox is not None:
+                    roi._cached_bbox = bbox
+                    roi._bbox_valid = True
+                else:
+                    roi._cached_bbox = None
+                    roi._bbox_valid = False
+                return roi
+
+            need_scale = ds > 1
+            sx = 1.0 / ds if need_scale else 1.0
+            sy = 1.0 / ds if need_scale else 1.0
+            count = 0
+
             with busy_cursor("Importing ImageJ ROIs...", self, log_as="io.import_imagej"):
-                for i, path in enumerate(paths):
-                    if progress and progress.wasCanceled():
-                        break
-                    roi_dict = read_imagej_roi(path)
-                    if ds > 1:
-                        roi_dict = scale_roi_dict(roi_dict, 1.0 / ds, 1.0 / ds)
-                    mask = imagej_roi_to_mask(roi_dict, w, h)
-                    name = os.path.splitext(os.path.basename(path))[0]
-                    roi = ROILayer(name, w, h)
-                    roi.mask = mask
-                    self.layer_stack.insert_roi(insert_at + i, roi)
-                    if progress:
-                        progress.setValue(i + 1)
+                if n > 3:
+                    from montaris.core.workers import get_pool, worker_count
+                    pool = get_pool()
+                    batch_sz = worker_count()
+                    for batch_start in range(0, n, batch_sz):
+                        batch = paths[batch_start:batch_start + batch_sz]
+                        futures = [
+                            (os.path.splitext(os.path.basename(p))[0],
+                             pool.submit(_decode_and_compress, p, w, h, need_scale, sx, sy))
+                            for p in batch
+                        ]
+                        for i, (name, fut) in enumerate(futures):
+                            if progress and progress.wasCanceled():
+                                break
+                            rle_bytes, rle_shape, bbox = fut.result()
+                            roi = _init_roi(name, rle_bytes, rle_shape, bbox)
+                            self.layer_stack.insert_roi(insert_at + count, roi)
+                            count += 1
+                            if progress:
+                                progress.setValue(batch_start + i + 1)
+                                QApplication.processEvents()
+                else:
+                    for i, path in enumerate(paths):
+                        if progress and progress.wasCanceled():
+                            break
+                        rle_bytes, rle_shape, bbox = _decode_and_compress(
+                            path, w, h, need_scale, sx, sy)
+                        roi = _init_roi(
+                            os.path.splitext(os.path.basename(path))[0],
+                            rle_bytes, rle_shape, bbox)
+                        self.layer_stack.insert_roi(insert_at + count, roi)
+                        count += 1
+                        if progress:
+                            progress.setValue(i + 1)
                 if progress:
                     progress.setLabelText("Rendering ROIs…")
                     progress.setValue(n)
@@ -1584,7 +1678,8 @@ class MontarisApp(QMainWindow):
                 self.layer_panel.refresh()
             if progress:
                 progress.close()
-            self.toast.show(f"Imported {len(paths)} ImageJ ROI(s)", "success")
+            self.toast.show(f"Imported {count} ImageJ ROI(s)", "success")
+            QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import:\n{e}")
 
@@ -1912,36 +2007,65 @@ class MontarisApp(QMainWindow):
             else:
                 progress = None
 
-            def _decode_png_mask(p, tw, th):
+            def _decode_png_compressed(p, tw, th):
+                from montaris.core.rle import rle_encode
                 img = Image.open(p).convert('L')
                 arr = np.array(img)
                 if arr.shape != (th, tw):
                     arr = np.array(img.resize((tw, th), Image.NEAREST))
-                return (arr > 0).astype(np.uint8) * 255
+                mask = (arr > 0).astype(np.uint8) * 255
+                rle_bytes, rle_shape = rle_encode(mask)
+                return rle_bytes, rle_shape
 
+            def _init_roi(name, rle_bytes, rle_shape):
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = name
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
+                roi.color = ROI_COLORS[0]
+                roi.opacity = 128
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                roi._cached_bbox = None
+                roi._bbox_valid = False
+                return roi
+
+            count = 0
             with busy_cursor("Importing PNG masks...", self, log_as="io.import_png"):
                 if n > 3:
-                    from montaris.core.workers import get_pool
-                    futures = [(p, get_pool().submit(_decode_png_mask, p, w, h)) for p in paths]
-                    for i, (p, fut) in enumerate(futures):
-                        if progress and progress.wasCanceled():
-                            break
-                        mask = fut.result()
-                        name = os.path.splitext(os.path.basename(p))[0]
-                        roi = ROILayer(name, w, h)
-                        roi.mask = mask
-                        self.layer_stack.insert_roi(insert_at + i, roi)
-                        if progress:
-                            progress.setValue(i + 1)
+                    from montaris.core.workers import get_pool, worker_count
+                    pool = get_pool()
+                    batch_sz = worker_count()
+                    for batch_start in range(0, n, batch_sz):
+                        batch = paths[batch_start:batch_start + batch_sz]
+                        futures = [
+                            (os.path.splitext(os.path.basename(p))[0],
+                             pool.submit(_decode_png_compressed, p, w, h))
+                            for p in batch
+                        ]
+                        for i, (name, fut) in enumerate(futures):
+                            if progress and progress.wasCanceled():
+                                break
+                            rle_bytes, rle_shape = fut.result()
+                            roi = _init_roi(name, rle_bytes, rle_shape)
+                            self.layer_stack.insert_roi(insert_at + count, roi)
+                            count += 1
+                            if progress:
+                                progress.setValue(batch_start + i + 1)
+                                QApplication.processEvents()
                 else:
                     for i, path in enumerate(paths):
                         if progress and progress.wasCanceled():
                             break
-                        mask = _decode_png_mask(path, w, h)
+                        rle_bytes, rle_shape = _decode_png_compressed(path, w, h)
                         name = os.path.splitext(os.path.basename(path))[0]
-                        roi = ROILayer(name, w, h)
-                        roi.mask = mask
-                        self.layer_stack.insert_roi(insert_at + i, roi)
+                        roi = _init_roi(name, rle_bytes, rle_shape)
+                        self.layer_stack.insert_roi(insert_at + count, roi)
+                        count += 1
                         if progress:
                             progress.setValue(i + 1)
 

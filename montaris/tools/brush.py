@@ -45,7 +45,7 @@ class BrushTool(BaseTool):
     def on_move(self, pos, layer, canvas):
         if not self._painting or layer is None:
             return
-        h, w = layer.mask.shape
+        h, w = layer.shape
         r = self.size // 2
         lx, ly = int(self._last_pos.x()), int(self._last_pos.y())
         px, py = int(pos.x()), int(pos.y())
@@ -93,18 +93,24 @@ class BrushTool(BaseTool):
                 # Skip if other's bbox doesn't overlap stroke bbox
                 if ob[1] <= sy1 or ob[0] >= sy2 or ob[3] <= sx1 or ob[2] >= sx2:
                     continue
+                # Read-only check via crop (no full decompression)
+                check_crop = other.get_mask_crop((sy1, sy2, sx1, sx2))
+                overlap = painted & (check_crop > 0)
+                if not overlap.any():
+                    continue
+                # Only decompress if we actually need to modify
                 other_crop = other.mask[sy1:sy2, sx1:sx2]
-                overlap = painted & (other_crop > 0)
-                if overlap.any():
-                    snap_crop = other_crop.copy()  # Only crop, only if needed
-                    other_crop[overlap] = 0
-                    if not np.array_equal(snap_crop, other_crop):
-                        cmd = UndoCommand(
-                            other, (sy1, sy2, sx1, sx2),
-                            snap_crop, other_crop.copy(),
-                        )
-                        commands.append(cmd)
-                        affected_layers.append(other)
+                snap_crop = other_crop.copy()
+                other_crop[overlap] = 0
+                if not np.array_equal(snap_crop, other_crop):
+                    cmd = UndoCommand(
+                        other, (sy1, sy2, sx1, sx2),
+                        snap_crop, other_crop.copy(),
+                    )
+                    commands.append(cmd)
+                    affected_layers.append(other)
+                    # Compress back immediately to prevent memory accumulation
+                    other.compress()
 
         if commands:
             if len(commands) == 1:
@@ -136,7 +142,7 @@ class BrushTool(BaseTool):
     def _paint(self, pos, layer):
         cx, cy = int(pos.x()), int(pos.y())
         r = self.size // 2
-        h, w = layer.mask.shape
+        h, w = layer.shape
         circle = self._get_circle()
 
         y1 = max(0, cy - r)
