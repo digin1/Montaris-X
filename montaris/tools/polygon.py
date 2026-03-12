@@ -61,7 +61,7 @@ class PolygonTool(BaseTool):
             return
 
         layer = self._active_layer
-        h, w = layer.mask.shape
+        h, w = layer.shape
         vertices = np.array(self._vertices)
 
         # Known bbox from vertex extremes

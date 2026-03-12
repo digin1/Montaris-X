@@ -33,37 +33,49 @@ def save_roi_set(path, roi_layers, progress_callback=None, mask_transform=None):
 
 
 def load_roi_set(path):
-    data = np.load(str(path), allow_pickle=False)
-
-    metadata = []
-    if '_metadata' in data:
-        metadata = json.loads(str(data['_metadata']))
+    from montaris.core.rle import rle_encode
 
     roi_layers = []
-    mask_keys = sorted(
-        [k for k in data.files if k.startswith('mask_')],
-        key=lambda k: int(k.split('_')[1]),
-    )
+    with np.load(str(path), allow_pickle=False) as data:
+        metadata = []
+        if '_metadata' in data:
+            metadata = json.loads(str(data['_metadata']))
 
-    for i, key in enumerate(mask_keys):
-        mask = data[key]
-        h, w = mask.shape
+        mask_keys = sorted(
+            [k for k in data.files if k.startswith('mask_')],
+            key=lambda k: int(k.split('_')[1]),
+        )
 
-        if i < len(metadata):
-            meta = metadata[i]
-            name = meta.get('name', f'ROI {i + 1}')
-            color = tuple(meta.get('color', _generate_color(i)))
-            opacity = meta.get('opacity', 128)
-        else:
-            name = f'ROI {i + 1}'
-            color = _generate_color(i)
-            opacity = 128
+        for i, key in enumerate(mask_keys):
+            mask = data[key]
+            h, w = mask.shape
 
-        roi = ROILayer(name, w, h, color)
-        roi.mask = mask
-        roi.opacity = opacity
-        # Compress immediately to minimize peak memory
-        roi.compress()
-        roi_layers.append(roi)
+            if i < len(metadata):
+                meta = metadata[i]
+                name = meta.get('name', f'ROI {i + 1}')
+                color = tuple(meta.get('color', _generate_color(i)))
+                opacity = meta.get('opacity', 128)
+            else:
+                name = f'ROI {i + 1}'
+                color = _generate_color(i)
+                opacity = 128
+
+            # RLE-compress immediately and build ROI without full-mask allocation
+            rle_bytes, rle_shape = rle_encode(mask)
+            roi = ROILayer.__new__(ROILayer)
+            roi.name = name
+            roi._mask = None
+            roi._rle_data = rle_bytes
+            roi._mask_shape = rle_shape
+            roi.color = color
+            roi.opacity = opacity
+            roi.visible = True
+            roi.fill_mode = "solid"
+            roi._dirty_rect = None
+            roi.offset_x = 0
+            roi.offset_y = 0
+            roi._cached_bbox = None
+            roi._bbox_valid = False
+            roi_layers.append(roi)
 
     return roi_layers

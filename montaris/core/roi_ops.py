@@ -20,7 +20,7 @@ def fix_overlaps(roi_layers, priority="later_wins"):
         if hasattr(roi, 'flatten_offset'):
             roi.flatten_offset()
 
-    h, w = roi_layers[0].mask.shape
+    h, w = roi_layers[0].shape
 
     if priority == "later_wins":
         # Later layers overwrite earlier ones
@@ -53,7 +53,7 @@ def compute_overlap_map(roi_layers):
     if not roi_layers:
         return np.zeros((1, 1), dtype=np.int32)
 
-    h, w = roi_layers[0].mask.shape
+    h, w = roi_layers[0].shape
     overlap = np.zeros((h, w), dtype=np.int32)
     for roi in roi_layers:
         overlap += (roi.mask > 0).astype(np.int32)
@@ -68,7 +68,7 @@ def auto_fit_rois(roi_layers, image_w, image_h):
     """
     count = 0
     for roi in roi_layers:
-        h, w = roi.mask.shape
+        h, w = roi.shape
         if h != image_h or w != image_w:
             # Resize mask to match image dimensions
             from PIL import Image

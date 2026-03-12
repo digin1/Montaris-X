@@ -157,7 +157,7 @@ class TransformTool(BaseTool):
         if (len(self._target_layers) == 1
                 and getattr(layer, 'is_roi', False)):
             ix, iy = int(pos.x()), int(pos.y())
-            h, w = layer.mask.shape
+            h, w = layer.shape
             if 0 <= iy < h and 0 <= ix < w and layer.mask[iy, ix] > 0:
                 layer_bbox = layer.get_bbox()
                 comp = get_component_at(layer.mask, ix, iy, bbox=layer_bbox)
@@ -339,7 +339,7 @@ class TransformTool(BaseTool):
             # Component mode needs full-size mask — reconstruct from crop
             if session_rle is not None and session_rle[0] and session_bbox is not None:
                 crop = rle_decode(*session_rle)
-                session_snap = np.zeros(l.mask.shape, dtype=np.uint8)
+                session_snap = np.zeros(l.shape, dtype=np.uint8)
                 by1, by2, bx1, bx2 = session_bbox
                 session_snap[by1:by2, bx1:bx2] = crop
             else:
@@ -420,7 +420,7 @@ class TransformTool(BaseTool):
                 if snap_data is not None:
                     undo_snap = snap_data
                     undo_is_crop = (sb is not None
-                                    and snap_data.shape != l.mask.shape)
+                                    and snap_data.shape != l.shape)
                 elif session_crop is not None:
                     undo_snap = session_crop
                     undo_is_crop = True

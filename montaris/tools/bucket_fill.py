@@ -19,7 +19,7 @@ class BucketFillTool(BaseTool):
             return
 
         x, y = int(pos.x()), int(pos.y())
-        h, w = layer.mask.shape
+        h, w = layer.shape
 
         if x < 0 or x >= w or y < 0 or y >= h:
             return
