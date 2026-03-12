@@ -40,7 +40,7 @@ class MoveTool(BaseTool):
         """Called when the move tool is selected."""
         sel = canvas._selection.layers
         layers = sel if sel else ([layer] if layer is not None else [])
-        layers = [l for l in layers if hasattr(l, 'mask') and l.get_bbox() is not None]
+        layers = [l for l in layers if getattr(l, 'is_roi', False) and l.get_bbox() is not None]
         if layers:
             self._show_marching_ants_multi(layers, canvas)
         else:
@@ -53,7 +53,7 @@ class MoveTool(BaseTool):
         return [layer]
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
 
         from PySide6.QtWidgets import QApplication
@@ -64,7 +64,7 @@ class MoveTool(BaseTool):
         sel = canvas._selection.layers
         multi_layer = sel and layer in sel and len(sel) > 1
 
-        if not multi_layer and hasattr(layer, 'mask'):
+        if not multi_layer and getattr(layer, 'is_roi', False):
             # Convert canvas coords to mask coords for component detection
             mx = ix - layer.offset_x
             my = iy - layer.offset_y
@@ -234,7 +234,7 @@ class MoveTool(BaseTool):
 
         # Show marching ants
         visible = [l for l in self._target_layers
-                   if hasattr(l, 'mask') and l.get_bbox() is not None]
+                   if getattr(l, 'is_roi', False) and l.get_bbox() is not None]
         if visible:
             self._show_marching_ants_multi(visible, canvas)
 
@@ -336,7 +336,7 @@ class MoveTool(BaseTool):
         if self._multi_comp_mask is not None and moved_layer is not None:
             self._show_marching_ants_for_mask(self._multi_comp_mask, moved_layer, canvas)
         else:
-            visible = [l for l in affected if hasattr(l, 'mask') and l.get_bbox() is not None]
+            visible = [l for l in affected if getattr(l, 'is_roi', False) and l.get_bbox() is not None]
             if visible:
                 self._show_marching_ants_multi(visible, canvas)
 
@@ -655,10 +655,23 @@ class MoveAllTool(MoveTool):
     name = "Move All"
 
     def on_activate(self, layer, canvas):
-        """Select all ROIs so the layer panel highlights them."""
+        """Select all ROIs so the layer panel highlights them.
+
+        Uses silent selection to avoid the expensive signal cascade
+        during tool activation.  UI sync is deferred.
+        """
         all_rois = list(canvas.layer_stack.roi_layers)
-        if all_rois:
-            canvas._selection.select_all(canvas.layer_stack.roi_layers)
+        if not all_rois:
+            return
+        # Guard: skip if already synced
+        if canvas._selection._layers == all_rois:
+            return
+        from PySide6.QtCore import QTimer
+        canvas._selection.select_all_silent(canvas.layer_stack.roi_layers)
+        canvas._active_layer = all_rois[0]
+        # Deferred UI sync
+        QTimer.singleShot(0, lambda: canvas._selection.changed.emit(
+            canvas._selection._layers))
 
     def _get_target_layers(self, layer, canvas):
         return list(canvas.layer_stack.roi_layers)

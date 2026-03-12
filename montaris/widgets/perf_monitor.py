@@ -31,24 +31,49 @@ class PerfMonitor(QWidget):
         self.cpu_label = QLabel(f"CPU Cores: {cpu_count} (pool: {pool_size})")
         layout.addWidget(self.cpu_label)
 
+        self.accel_label = QLabel("Accel: off")
+        layout.addWidget(self.accel_label)
+
         layout.addStretch()
 
         self._frame_times = []
         self._render_times = []
         self._tile_cache_info = ""
+        self._peak_mem_mb = 0.0       # high-water mark (persists until reset)
+        self._interval_peak_mb = 0.0  # peak within current 1s interval
+
+        self._process = psutil.Process(os.getpid())
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._update_stats)
         self._timer.start(1000)
+
+    def _sample_mem(self):
+        """Sample current RSS and update peak trackers. Returns MB."""
+        try:
+            mb = self._process.memory_info().rss / (1024 * 1024)
+        except Exception:
+            return 0.0
+        if mb > self._interval_peak_mb:
+            self._interval_peak_mb = mb
+        if mb > self._peak_mem_mb:
+            self._peak_mem_mb = mb
+        return mb
 
     def record_frame(self):
         self._frame_times.append(time.time())
 
     def record_render_time(self, ms):
         self._render_times.append(ms)
+        # Sample memory at each render — catches spikes between timer ticks
+        self._sample_mem()
 
     def set_tile_cache_info(self, info):
         self._tile_cache_info = info
+
+    def reset_peak_memory(self):
+        """Reset the persistent high-water mark."""
+        self._peak_mem_mb = self._sample_mem()
 
     def _update_stats(self):
         now = time.time()
@@ -57,20 +82,48 @@ class PerfMonitor(QWidget):
         fps = len(self._frame_times)
         self.fps_label.setText(f"FPS: {fps}")
 
-        # Render: average of recent render times
+        # Render: last + avg
         if self._render_times:
+            last = self._render_times[-1]
             avg = sum(self._render_times) / len(self._render_times)
-            self.render_label.setText(f"Render: {avg:.1f} ms")
+            mx = max(self._render_times)
+            if len(self._render_times) == 1:
+                self.render_label.setText(f"Render: {last:.1f} ms")
+            else:
+                self.render_label.setText(
+                    f"Render: {last:.1f} ms (avg {avg:.1f}, max {mx:.1f})")
             self._render_times.clear()
         else:
             self.render_label.setText("Render: idle")
 
-        # Memory
-        try:
-            process = psutil.Process(os.getpid())
-            mem_mb = process.memory_info().rss / (1024 * 1024)
-            self.memory_label.setText(f"Memory: {mem_mb:.0f} MB")
-        except Exception:
-            self.memory_label.setText("Memory: N/A")
+        # Memory: current + interval peak + all-time peak
+        mem_mb = self._sample_mem()
+        interval_peak = self._interval_peak_mb
+        self.memory_label.setText(
+            f"Memory: {mem_mb:.0f} MB  "
+            f"(peak: {interval_peak:.0f}, HWM: {self._peak_mem_mb:.0f})")
+        # Reset interval peak for next tick
+        self._interval_peak_mb = mem_mb
 
         self.tile_cache_label.setText(f"Tile Cache: {self._tile_cache_info or '-'}")
+
+        # Acceleration status
+        try:
+            from montaris.core.accel import is_enabled, get_mode, HAS_CUDA
+            if is_enabled():
+                mode = get_mode()
+                if mode == "cuda" and HAS_CUDA:
+                    try:
+                        from numba import cuda
+                        dev_name = cuda.get_current_device().name
+                        self.accel_label.setText(f"Accel: CUDA ({dev_name})")
+                    except Exception:
+                        self.accel_label.setText("Accel: CUDA")
+                elif mode == "jit":
+                    self.accel_label.setText("Accel: Numba JIT")
+                else:
+                    self.accel_label.setText("Accel: off")
+            else:
+                self.accel_label.setText("Accel: off")
+        except ImportError:
+            self.accel_label.setText("Accel: off")

@@ -15,7 +15,7 @@ class BucketFillTool(BaseTool):
         self.tolerance = 0  # 0 = exact match, higher = more fill
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
 
         x, y = int(pos.x()), int(pos.y())

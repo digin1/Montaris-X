@@ -33,7 +33,15 @@ def rle_decode_crop(data: bytes, shape: tuple[int, int],
     """Decode RLE only within bbox (y1, y2, x1, x2). Returns crop array.
 
     Avoids allocating the full mask — only materialises pixels inside bbox.
+    Dispatches to Numba JIT kernel when acceleration is enabled.
     """
+    try:
+        from montaris.core.accel import rle_decode_crop as _accel_rle
+        return _accel_rle(data, shape, bbox)
+    except ImportError:
+        pass
+
+    # Numpy fallback
     y1, y2, x1, x2 = bbox
     crop_h, crop_w = y2 - y1, x2 - x1
     if not data or crop_h <= 0 or crop_w <= 0:
@@ -45,11 +53,9 @@ def rle_decode_crop(data: bytes, shape: tuple[int, int],
     values = pairs['v']
     lengths = pairs['n'].astype(np.int64)
 
-    # Cumulative end positions of each run
     ends = np.cumsum(lengths)
     starts = ends - lengths
 
-    # Filter to non-zero runs that overlap the bbox rows
     flat_y1 = np.int64(y1) * w
     flat_y2 = np.int64(y2) * w
     keep = (values > 0) & (ends > flat_y1) & (starts < flat_y2)

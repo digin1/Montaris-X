@@ -18,7 +18,7 @@ class StampTool(BaseTool):
         self._stroke_bbox = None
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._stamping = True
         self._last_pos = pos

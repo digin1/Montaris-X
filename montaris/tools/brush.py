@@ -20,7 +20,7 @@ class BrushTool(BaseTool):
         self._cached_circle_size = -1
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._painting = True
         self._last_pos = pos
@@ -34,7 +34,7 @@ class BrushTool(BaseTool):
         self._overlap_layers = []
         if self.app._auto_overlap:
             self._overlap_layers = [other for other in self.app.layer_stack.roi_layers
-                                    if other is not layer and hasattr(other, 'mask')]
+                                    if other is not layer and getattr(other, 'is_roi', False)]
 
         self._paint(pos, layer)
         if self._stroke_bbox is not None:

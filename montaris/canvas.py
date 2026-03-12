@@ -143,32 +143,6 @@ class ImageCanvas(QGraphicsView):
         self._progress_hide_timer.setSingleShot(True)
         self._progress_hide_timer.timeout.connect(self._progress_bar.hide)
 
-    def enable_opengl(self, enabled=True):
-        """Switch viewport between QOpenGLWidget (GPU) and default QWidget (CPU).
-
-        Returns True if OpenGL was successfully enabled, False on failure.
-        """
-        if enabled:
-            try:
-                from PySide6.QtOpenGLWidgets import QOpenGLWidget
-                gl = QOpenGLWidget()
-                self.setViewport(gl)
-                self._opengl_active = True
-            except (ImportError, Exception):
-                self._opengl_active = False
-                return False
-        else:
-            from PySide6.QtWidgets import QWidget
-            self.setViewport(QWidget())
-            self._opengl_active = False
-        # Re-apply mouse tracking after viewport swap
-        self.viewport().setMouseTracking(True)
-        return True
-
-    @property
-    def opengl_active(self):
-        return getattr(self, '_opengl_active', False)
-
     # ------------------------------------------------------------------
     # Tool / layer management
     # ------------------------------------------------------------------
@@ -188,18 +162,31 @@ class ImageCanvas(QGraphicsView):
         self.hide_brush_preview()
         self._hide_stamp_preview()
         self._update_cursor()
+        _t1 = time.perf_counter()
         # Flatten offsets when switching to paint/transform tools
         if tool is not None and getattr(tool, 'name', None) in self._PAINT_TOOLS:
             self._flatten_all_offsets()
+        _t2 = time.perf_counter()
         if tool is not None and hasattr(tool, 'on_activate'):
             tool.on_activate(self._active_layer, self)
+        _t3 = time.perf_counter()
         from montaris.core.event_logger import EventLogger
-        EventLogger.instance().log("tool", "set_tool",
+        _log = EventLogger.instance()
+        _log.log("tool", "set_tool",
             duration_ms=(time.perf_counter() - t0) * 1000,
-            tool=getattr(tool, 'name', 'None'))
+            tool=getattr(tool, 'name', 'None'),
+            flatten_ms=(_t2 - _t1) * 1000,
+            activate_ms=(_t3 - _t2) * 1000,
+            setup_ms=(_t1 - t0) * 1000)
+        _log.log_mem("set_tool.done", tool=getattr(tool, 'name', 'None'))
 
     def _flatten_all_offsets(self):
         """Bake any non-zero layer offsets into masks and clear undo stack."""
+        # Fast path: skip busy_cursor (and its processEvents overhead)
+        # when no ROIs have offsets — common case for fresh imports.
+        if not any(r.offset_x != 0 or r.offset_y != 0
+                   for r in self.layer_stack.roi_layers):
+            return
         with busy_cursor("Flattening layer offsets...", self.window()):
             any_offset = False
             partially_clipped = []
@@ -253,11 +240,13 @@ class ImageCanvas(QGraphicsView):
 
     def _on_selection_changed(self, layers):
         """Sync _active_layer to primary selection and update highlights."""
+        _t0 = time.perf_counter()
         primary = self._selection.primary
         old = self._active_layer
         if primary is not None:
             self._active_layer = primary
         self._update_selection_highlights()
+        _t1 = time.perf_counter()
         self._pulse_selection()
         # Notify tool of layer/selection change so it can refresh visuals
         tool = self._tool
@@ -270,6 +259,13 @@ class ImageCanvas(QGraphicsView):
             elif primary is not None:
                 # Same layer but selection changed: refresh
                 tool.on_activate(primary, self)
+        _t2 = time.perf_counter()
+        from montaris.core.event_logger import EventLogger
+        EventLogger.instance().log("tool", "_on_selection_changed",
+            duration_ms=(_t2 - _t0) * 1000,
+            highlights_ms=(_t1 - _t0) * 1000,
+            on_activate_ms=(_t2 - _t1) * 1000,
+            n_selected=len(layers))
 
     def _clean_stale_selection(self):
         """Remove layers from selection that are no longer in the layer stack."""
@@ -280,21 +276,31 @@ class ImageCanvas(QGraphicsView):
                 self._selection.remove(l)
 
     def _update_selection_highlights(self):
-        """Draw actual ROI boundary outline for selected layers."""
+        """Draw actual ROI boundary outline for selected layers.
+
+        Skips per-ROI edge highlights when many ROIs are selected
+        (e.g. Transform All) — the transform bbox outline is sufficient
+        and avoids O(n) edge detection passes.
+        """
         scene = self._scene
         for item in self._selection_highlight_items:
             scene.removeItem(item)
         self._selection_highlight_items.clear()
 
-        for layer in self._selection.layers:
-            if not hasattr(layer, 'mask'):
+        selected = self._selection.layers
+        # Skip expensive per-ROI edge highlights for bulk selections
+        if len(selected) > 10:
+            return
+
+        for layer in selected:
+            if not getattr(layer, 'is_roi', False):
                 continue
             bbox = layer.get_bbox()
             if bbox is None:
                 continue
             y1, y2, x1, x2 = bbox
             bh, bw = y2 - y1, x2 - x1
-            mask_crop = layer.mask[y1:y2, x1:x2]
+            mask_crop = layer.get_mask_crop((y1, y2, x1, x2))
             edge = _compute_edge(mask_crop)
             rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
             rgba[edge] = [255, 255, 0, 200]
@@ -594,49 +600,64 @@ class ImageCanvas(QGraphicsView):
             self._progress_bar.setValue(0)
             self._progress_bar.show()
 
-        # Parallel path: compute RGBA arrays in threads, apply on main thread
+        # Parallel path: compute RGBA arrays in threads, apply on main thread.
+        # Process in batches of pool_size to cap peak memory — each batch's
+        # crops/RGBAs are freed before the next batch is submitted.
         if nv > 3:
-            from montaris.core.workers import get_pool
+            from montaris.core.workers import get_pool, worker_count
             from montaris.core.busy import should_process_events
-            futures = []
+            pool = get_pool()
+            batch_size = worker_count() * 2
             _last_pe = time.monotonic()
-            for idx, roi, target_lod in visible_jobs:
-                if not roi.visible:
-                    futures.append((idx, roi, target_lod, None))
-                    continue
-                bbox = roi.get_bbox()
-                if bbox is None:
-                    futures.append((idx, roi, target_lod, None))
-                    continue
-                fill_mode = getattr(roi, 'fill_mode', 'solid')
-                eff_opacity = roi.opacity * gof
-                # Snapshot mask crop on main thread — workers must not
-                # read the shared roi.mask while the main thread may
-                # modify it (e.g. during processEvents).
-                y1, y2, x1, x2 = bbox
-                mask_crop = roi.get_mask_crop((y1, y2, x1, x2)).copy()
-                fut = get_pool().submit(
-                    _compute_roi_rgba_from_crop, mask_crop, roi.color,
-                    eff_opacity, fill_mode, target_lod,
-                    x1 + roi.offset_x, y1 + roi.offset_y,
-                )
-                futures.append((idx, roi, target_lod, fut))
-                _last_pe = should_process_events(_last_pe)
+            job_i = 0
 
-            for job_i, (idx, roi, target_lod, fut) in enumerate(futures):
-                rid = id(roi)
-                if fut is None:
-                    # Not visible or no bbox — hide item
-                    existing = self._roi_items.get(rid)
-                    if existing is not None:
-                        existing.setVisible(False)
-                else:
-                    result = fut.result()
-                    self._apply_roi_rgba_result(roi, idx, result)
-                self._roi_lod[rid] = target_lod
-                if show_progress:
-                    self._progress_bar.setValue(job_i + 1)
-                    _last_pe = should_process_events(_last_pe)
+            # Get perf monitor for memory sampling during render
+            _perf = getattr(self.parent(), 'perf_monitor', None) if self.parent() else None
+
+            for batch_start in range(0, nv, batch_size):
+                batch = visible_jobs[batch_start:batch_start + batch_size]
+                futures = []
+                for idx, roi, target_lod in batch:
+                    if not roi.visible:
+                        futures.append((idx, roi, target_lod, None))
+                        continue
+                    bbox = roi.get_bbox()
+                    if bbox is None:
+                        futures.append((idx, roi, target_lod, None))
+                        continue
+                    fill_mode = getattr(roi, 'fill_mode', 'solid')
+                    eff_opacity = roi.opacity * gof
+                    # Snapshot mask crop on main thread — workers must not
+                    # read the shared roi.mask while the main thread may
+                    # modify it (e.g. during processEvents).
+                    y1, y2, x1, x2 = bbox
+                    mask_crop = roi.get_mask_crop((y1, y2, x1, x2)).copy()
+                    fut = pool.submit(
+                        _compute_roi_rgba_from_crop, mask_crop, roi.color,
+                        eff_opacity, fill_mode, target_lod,
+                        x1 + roi.offset_x, y1 + roi.offset_y,
+                    )
+                    futures.append((idx, roi, target_lod, fut))
+
+                # Sample memory after submitting batch (catches peak allocation)
+                if _perf is not None:
+                    _perf._sample_mem()
+
+                # Collect batch results before submitting next batch
+                for idx, roi, target_lod, fut in futures:
+                    rid = id(roi)
+                    if fut is None:
+                        existing = self._roi_items.get(rid)
+                        if existing is not None:
+                            existing.setVisible(False)
+                    else:
+                        result = fut.result()
+                        self._apply_roi_rgba_result(roi, idx, result)
+                    self._roi_lod[rid] = target_lod
+                    job_i += 1
+                    if show_progress:
+                        self._progress_bar.setValue(job_i)
+                        _last_pe = should_process_events(_last_pe)
         else:
             # Sequential path for small counts
             for job_i, (idx, roi, target_lod) in enumerate(visible_jobs):
@@ -670,7 +691,7 @@ class ImageCanvas(QGraphicsView):
 
     def refresh_active_overlay(self, layer):
         """Re-render only the specified ROI layer's pixmap item."""
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         layer.invalidate_bbox()
         layer.clear_dirty()
@@ -690,7 +711,7 @@ class ImageCanvas(QGraphicsView):
 
     def refresh_active_overlay_partial(self, layer, dirty_bbox):
         """Throttled partial refresh: accumulate dirty region, render on timer."""
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._roi_stale.discard(id(layer))
 
@@ -1360,6 +1381,11 @@ def _apply_tint(array, tint_color):
 
 def _compute_edge(mask):
     """Return boolean edge array for mask > 0 pixels."""
+    try:
+        from montaris.core.accel import compute_edge
+        return compute_edge(mask)
+    except ImportError:
+        pass
     from scipy.ndimage import binary_erosion
     filled = mask > 0
     return filled ^ binary_erosion(filled)
@@ -1370,7 +1396,16 @@ def _compute_roi_rgba_from_crop(mask_crop, color, opacity, fill_mode, lod_level,
 
     Thread-safe: operates only on the owned mask_crop copy.
     Returns (rgba_array, width, height, disp_x, disp_y, scale_factor).
+    Dispatches to Numba JIT kernels when acceleration is enabled.
     """
+    try:
+        from montaris.core.accel import compute_roi_rgba
+        return compute_roi_rgba(mask_crop, color, opacity, fill_mode,
+                                lod_level, disp_x, disp_y)
+    except ImportError:
+        pass
+
+    # Numpy fallback
     bh, bw = mask_crop.shape
     r, g, b = color
     effective_opacity = int(opacity)

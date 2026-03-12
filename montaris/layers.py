@@ -3,6 +3,59 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
 from montaris.core.rle import rle_encode, rle_decode, rle_decode_crop
 
+
+def _rle_get_bbox(data, shape):
+    """Compute bounding box from RLE data without full decompression.
+
+    Returns (y1, y2, x1, x2) or None if all-zero.
+    """
+    if not data:
+        return None
+    h, w = shape
+    dt = np.dtype([('v', 'u1'), ('n', '<u4')])
+    pairs = np.frombuffer(data, dtype=dt)
+    values = pairs['v']
+    lengths = pairs['n'].astype(np.int64)
+
+    ends = np.cumsum(lengths)
+    starts = ends - lengths
+
+    # Keep only non-zero runs
+    nz = values > 0
+    if not nz.any():
+        return None
+    s_nz = starts[nz]
+    e_nz = ends[nz] - 1  # inclusive end
+
+    # Convert flat positions to row/col
+    first_pos = s_nz[0]
+    last_pos = e_nz[-1]
+    min_row = int(first_pos // w)
+    max_row = int(last_pos // w)
+
+    # For column bounds, check all non-zero runs
+    min_col = w
+    max_col = 0
+    for s, e in zip(s_nz, e_nz):
+        c1 = int(s % w)
+        c2 = int(e % w)
+        r1 = int(s // w)
+        r2 = int(e // w)
+        if r1 == r2:
+            # Run within a single row
+            min_col = min(min_col, c1)
+            max_col = max(max_col, c2)
+        else:
+            # Run spans multiple rows — full width coverage possible
+            min_col = 0
+            max_col = w - 1
+            break
+
+    if min_col > max_col:
+        return None
+    return (min_row, max_row + 1, min_col, max_col + 1)
+
+
 # --- Napari-compatible label colormap (LAB + low-discrepancy sequence) ---
 
 _LABMIN = np.array([0.0, -86.18302974, -107.85730021])
@@ -129,6 +182,8 @@ def generate_unique_roi_name(base, existing_layers):
 
 
 class ImageLayer:
+    is_roi = False
+
     def __init__(self, name, data):
         self.name = name
         self.data = data
@@ -149,6 +204,8 @@ class ImageLayer:
 
 
 class ROILayer:
+    is_roi = True
+
     def __init__(self, name, width, height, color=None):
         self.name = name
         self._mask = np.zeros((height, width), dtype=np.uint8)
@@ -205,11 +262,18 @@ class ROILayer:
         self._bbox_valid = False
 
     def get_bbox(self):
-        """Return bounding box of non-zero mask pixels (cached)."""
+        """Return bounding box of non-zero mask pixels (cached).
+
+        When compressed, computes bbox from RLE data without full
+        decompression to avoid memory spikes.
+        """
         if self._bbox_valid:
             return self._cached_bbox
-        from montaris.core.roi_transform import get_mask_bbox
-        self._cached_bbox = get_mask_bbox(self.mask)
+        if self._rle_data is not None:
+            self._cached_bbox = _rle_get_bbox(self._rle_data, self._mask_shape)
+        else:
+            from montaris.core.roi_transform import get_mask_bbox
+            self._cached_bbox = get_mask_bbox(self._mask)
         # Only cache non-None; empty masks recompute so direct mask
         # assignment (without invalidate_bbox) still works correctly.
         self._bbox_valid = self._cached_bbox is not None

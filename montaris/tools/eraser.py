@@ -18,7 +18,7 @@ class EraserTool(BaseTool):
         self._cached_circle_size = -1
 
     def on_press(self, pos, layer, canvas):
-        if layer is None or not hasattr(layer, 'mask'):
+        if layer is None or not getattr(layer, 'is_roi', False):
             return
         self._erasing = True
         self._last_pos = pos
