@@ -19,3 +19,5 @@ testimages/
 .pip-cache/
 builds/
 cache/
+test.tif
+test.zip
