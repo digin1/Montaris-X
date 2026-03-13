@@ -1,11 +1,11 @@
 import numpy as np
 from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPainter, QImage, QPixmap, QColor, QPen
 from montaris import theme as _theme
 
 
-MINIMAP_SIZE = 200
+MINIMAP_SIZE = 200  # default / minimum height
 
 
 class MiniMap(QWidget):
@@ -14,7 +14,8 @@ class MiniMap(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(MINIMAP_SIZE, MINIMAP_SIZE)
+        self.setFixedHeight(MINIMAP_SIZE)
+        self.setMinimumWidth(100)
         self._thumbnail = None
         self._viewport_rect = QRectF()
         self._scene_rect = QRectF()
@@ -25,18 +26,29 @@ class MiniMap(QWidget):
         """Set the thumbnail from image data (numpy array)."""
         if image_data is None:
             self._thumbnail = None
+            self._image_data = None
             self.update()
             return
 
+        self._image_data = image_data  # keep ref for resize rebuilds
+        self._rebuild_thumbnail()
+
+    def _rebuild_thumbnail(self):
+        """Build thumbnail pixmap sized to current widget dimensions."""
+        image_data = getattr(self, '_image_data', None)
+        if image_data is None:
+            return
         h, w = image_data.shape[:2]
+        map_w = max(self.width(), 100)
+        map_h = self.height()
         # Compute thumbnail size maintaining aspect ratio
         aspect = w / h
         if aspect > 1:
-            tw = MINIMAP_SIZE
-            th = int(MINIMAP_SIZE / aspect)
+            tw = map_w
+            th = int(map_w / aspect)
         else:
-            th = MINIMAP_SIZE
-            tw = int(MINIMAP_SIZE * aspect)
+            th = map_h
+            tw = int(map_h * aspect)
 
         # Create simple downsampled thumbnail
         step_y = max(1, h // th)
@@ -81,9 +93,20 @@ class MiniMap(QWidget):
         self._viewport_rect = viewport_rect
         self._scene_rect = scene_rect
         if scene_rect.width() > 0 and scene_rect.height() > 0:
-            self._scale_x = (self._thumbnail.width() if self._thumbnail else MINIMAP_SIZE) / scene_rect.width()
-            self._scale_y = (self._thumbnail.height() if self._thumbnail else MINIMAP_SIZE) / scene_rect.height()
+            tw = self._thumbnail.width() if self._thumbnail else self.width()
+            th = self._thumbnail.height() if self._thumbnail else self.height()
+            self._scale_x = tw / scene_rect.width()
+            self._scale_y = th / scene_rect.height()
         self.update()
+
+    def resizeEvent(self, event):
+        """Rebuild thumbnail when dock is resized (debounced)."""
+        super().resizeEvent(event)
+        if not hasattr(self, '_resize_timer'):
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._rebuild_thumbnail)
+        self._resize_timer.start(100)
 
     def paintEvent(self, event):
         painter = QPainter(self)
