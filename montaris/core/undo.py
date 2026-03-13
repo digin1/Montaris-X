@@ -41,6 +41,33 @@ class OffsetUndoCommand:
         return 64
 
 
+class FlattenUndoCommand:
+    """Undo command for offset flatten: restores pre-flatten mask + offset."""
+
+    def __init__(self, entries):
+        """entries: list of (roi_layer, old_crop, old_bbox, old_offset)"""
+        self._entries = entries
+        self.roi_layer = entries[0][0] if len(entries) == 1 else None
+
+    def undo(self):
+        for roi, old_crop, old_bbox, old_offset in self._entries:
+            roi.mask[:] = 0
+            if old_crop is not None and old_bbox is not None:
+                y1, y2, x1, x2 = old_bbox
+                roi.mask[y1:y2, x1:x2] = old_crop
+            roi.offset_x, roi.offset_y = old_offset
+            roi.invalidate_bbox()
+
+    def redo(self):
+        for roi, _, _, _ in self._entries:
+            roi.flatten_offset()
+            roi.invalidate_bbox()
+
+    @property
+    def byte_size(self):
+        return sum(c.nbytes for _, c, _, _ in self._entries if c is not None)
+
+
 def _cmd_byte_size(cmd):
     """Return the byte size of a command, or 0 if it doesn't report one."""
     if hasattr(cmd, 'byte_size'):

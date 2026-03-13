@@ -23,12 +23,16 @@ TIF_PATH = os.path.join(BASE, "test.tif")
 ZIP_PATH = os.path.join(BASE, "test.zip")
 
 
+class _FakeTransform:
+    def m11(self): return 1.0
+
 class FakeCanvas:
     def __init__(self):
         self._selection_highlight_items = []
     def refresh_active_overlay(self, layer): pass
     def refresh_active_overlay_partial(self, layer, bbox): pass
     def _update_selection_highlights(self): pass
+    def transform(self): return _FakeTransform()
     def scene(self): return self
     def addRect(self, *a, **kw): return _FI()
     def addEllipse(self, *a, **kw): return _FI()

@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt
 from montaris.core.adjustments import ImageAdjustments
+from montaris import theme as _theme
 
 
 class AdjustmentsPanel(QWidget):
@@ -69,20 +70,31 @@ class AdjustmentsPanel(QWidget):
 
         layout.addLayout(form)
 
+        # Apply slider styles
+        _ss = _theme.slider_style()
+        for s in (self.brightness_slider, self.contrast_slider,
+                  self.exposure_slider, self.gamma_slider):
+            s.setStyleSheet(_ss)
+
         # Buttons
+        _bs = _theme.layer_btn_style()
         btn_layout = QHBoxLayout()
         auto_btn = QPushButton("Smart Auto")
+        auto_btn.setStyleSheet(_bs)
         auto_btn.clicked.connect(self._on_auto)
         btn_layout.addWidget(auto_btn)
 
         boost_btn = QPushButton("Quick Boost")
+        boost_btn.setStyleSheet(_bs)
         boost_btn.clicked.connect(self._on_boost)
         btn_layout.addWidget(boost_btn)
 
         reset_btn = QPushButton("Reset")
+        reset_btn.setStyleSheet(_bs)
         reset_btn.clicked.connect(self._on_reset)
         btn_layout.addWidget(reset_btn)
 
+        self._adj_btns = [auto_btn, boost_btn, reset_btn]
         layout.addLayout(btn_layout)
         layout.addStretch()
 
@@ -152,6 +164,15 @@ class AdjustmentsPanel(QWidget):
         self._exposure_label.setText(f"{self._adjustments.exposure:.2f}")
         self._gamma_label.setText(f"{self._adjustments.gamma:.2f}")
         self._updating = False
+
+    def refresh_theme(self):
+        _ss = _theme.slider_style()
+        for s in (self.brightness_slider, self.contrast_slider,
+                  self.exposure_slider, self.gamma_slider):
+            s.setStyleSheet(_ss)
+        _bs = _theme.layer_btn_style()
+        for b in self._adj_btns:
+            b.setStyleSheet(_bs)
 
     @property
     def adjustments(self):

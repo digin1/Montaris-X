@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QFrame, QLabel, QHBoxLayout
 from PySide6.QtCore import Qt, QTimer, QObject, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor
+from montaris import theme as _theme
 
 
 _LEVEL_COLORS = {
@@ -19,11 +20,7 @@ class ToastNotification(QFrame):
         self.setFixedHeight(36)
 
         color = _LEVEL_COLORS.get(level, _LEVEL_COLORS["info"])
-        self.setStyleSheet(
-            f"QFrame {{ background: #2a2a2a; border: 2px solid {color};"
-            f" border-radius: 6px; }}"
-            f" QLabel {{ color: #dcdcdc; font-size: 12px; border: none; }}"
-        )
+        self.setStyleSheet(_theme.toast_style(color))
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)

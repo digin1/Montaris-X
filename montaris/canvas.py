@@ -7,9 +7,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import (
     QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush, QPainterPath,
+    QTransform,
 )
 from montaris.core.selection import SelectionModel
 from montaris.core.busy import busy_cursor, should_process_events
+from montaris import theme as _theme
 
 
 # ------------------------------------------------------------------
@@ -71,6 +73,7 @@ class ImageCanvas(QGraphicsView):
         self._image_item = None       # QGraphicsPixmapItem for the image
         self._roi_items = {}          # id(roi) -> _ROIOverlayItem (tight bbox)
         self._polygon_item = None
+        self._polygon_close_marker = None
         self._brush_preview = None
         self._stamp_preview = None
 
@@ -89,6 +92,7 @@ class ImageCanvas(QGraphicsView):
         self._is_panning = False
         self._last_pan_pos = None
         self._space_held = False
+        self._last_scene_pos = None  # track for brush cursor refresh
 
         # Multi-selection
         self._selection = SelectionModel(self)
@@ -101,16 +105,13 @@ class ImageCanvas(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setBackgroundBrush(QColor(40, 40, 40))
+        self.setBackgroundBrush(_theme.canvas_background())
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
         # HUD overlay (E.23)
         self._hud_label = QLabel(self)
-        self._hud_label.setStyleSheet(
-            "QLabel { color: #ddd; background: rgba(0,0,0,150);"
-            " padding: 2px 6px; font-size: 11px; }"
-        )
+        self._hud_label.setStyleSheet(_theme.hud_label_style())
         self._hud_label.move(6, 6)
         self._hud_label.setText("I: (-, -)  Z: 100%")
         self._hud_label.show()
@@ -143,6 +144,13 @@ class ImageCanvas(QGraphicsView):
         self._progress_hide_timer.setSingleShot(True)
         self._progress_hide_timer.timeout.connect(self._progress_bar.hide)
 
+        # Empty-state hint overlay
+        self._empty_hint = QLabel(self)
+        self._empty_hint.setText("Open an image to begin\nFile > Open Image(s)")
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setStyleSheet(_theme.empty_state_style())
+        self._empty_hint.show()
+
     # ------------------------------------------------------------------
     # Tool / layer management
     # ------------------------------------------------------------------
@@ -150,6 +158,12 @@ class ImageCanvas(QGraphicsView):
     _PAINT_TOOLS = {'Brush', 'Eraser', 'Polygon', 'Bucket Fill',
                      'Rectangle', 'Circle', 'Stamp',
                      'Transform (selected)', 'Transform All'}
+
+    def refresh_theme(self):
+        """Update canvas visuals after a theme switch."""
+        self.setBackgroundBrush(_theme.canvas_background())
+        self._hud_label.setStyleSheet(_theme.hud_label_style())
+        self._empty_hint.setStyleSheet(_theme.empty_state_style())
 
     def set_tool(self, tool):
         t0 = time.perf_counter()
@@ -181,12 +195,14 @@ class ImageCanvas(QGraphicsView):
         _log.log_mem("set_tool.done", tool=getattr(tool, 'name', 'None'))
 
     def _flatten_all_offsets(self):
-        """Bake any non-zero layer offsets into masks and clear undo stack."""
+        """Bake any non-zero layer offsets into masks, preserving undo history."""
         # Fast path: skip busy_cursor (and its processEvents overhead)
         # when no ROIs have offsets — common case for fresh imports.
         if not any(r.offset_x != 0 or r.offset_y != 0
                    for r in self.layer_stack.roi_layers):
             return
+        # Capture pre-flatten state for undo
+        pre_flatten = []
         with busy_cursor("Flattening layer offsets...", self.window()):
             any_offset = False
             partially_clipped = []
@@ -195,9 +211,15 @@ class ImageCanvas(QGraphicsView):
                 if roi.offset_x != 0 or roi.offset_y != 0:
                     if roi.has_oob_content():
                         partially_clipped.append(roi.name)
+                    # Snapshot before flatten
+                    bbox = roi.get_bbox()
+                    crop = (roi.mask[bbox[0]:bbox[1], bbox[2]:bbox[3]].copy()
+                            if bbox is not None else None)
+                    old_offset = (roi.offset_x, roi.offset_y)
                     result = roi.flatten_offset()
                     if result:
                         any_offset = True
+                        pre_flatten.append((roi, crop, bbox, old_offset))
                     # result=False means fully OOB — offset preserved
                 _last_pe = should_process_events(_last_pe)
         if partially_clipped:
@@ -210,11 +232,12 @@ class ImageCanvas(QGraphicsView):
                     f"OOB pixels clipped: {names}",
                     level="warning"
                 )
-        if any_offset:
-            # Offset undo commands are now stale — clear the stack
+        if any_offset and pre_flatten:
+            # Push undoable flatten instead of clearing the stack
+            from montaris.core.undo import FlattenUndoCommand
             win = self.window()
             if hasattr(win, 'undo_stack'):
-                win.undo_stack.clear()
+                win.undo_stack.push(FlattenUndoCommand(pre_flatten))
             self.refresh_overlays()
 
     def set_active_layer(self, layer):
@@ -229,6 +252,8 @@ class ImageCanvas(QGraphicsView):
             # Compress the old layer now that it's inactive
             if old is not None and hasattr(old, 'compress'):
                 old.compress()
+            # Ensure newly active ROI is at LOD 0 so dirty compositing aligns
+            self._ensure_active_lod0(layer)
             # Re-show bbox for new layer if tool supports it
             if tool is not None and hasattr(tool, 'on_activate'):
                 tool.on_activate(layer, self)
@@ -238,6 +263,27 @@ class ImageCanvas(QGraphicsView):
         EventLogger.instance().log("tool", "set_active_layer",
             duration_ms=(time.perf_counter() - t0) * 1000)
 
+    def _ensure_active_lod0(self, layer):
+        """Re-render a newly active ROI at LOD 0 if it's currently at a lower resolution.
+
+        When zoomed out, inactive ROIs are rendered at reduced LOD (e.g. LOD 3 = scale 8x).
+        Dirty-region compositing assumes item scale=1, so painting on a scaled item
+        causes visual misalignment. This ensures the active layer is always at full res.
+        """
+        if layer is None or not getattr(layer, 'is_roi', False):
+            return
+        rid = id(layer)
+        item = self._roi_items.get(rid)
+        if item is None:
+            return
+        if item.scale() > 1.0:
+            try:
+                index = self.layer_stack.roi_layers.index(layer)
+            except ValueError:
+                return
+            self._refresh_roi_item(layer, index, lod_level=0)
+            self._roi_lod[rid] = 0
+
     def _on_selection_changed(self, layers):
         """Sync _active_layer to primary selection and update highlights."""
         _t0 = time.perf_counter()
@@ -245,6 +291,9 @@ class ImageCanvas(QGraphicsView):
         old = self._active_layer
         if primary is not None:
             self._active_layer = primary
+            # Ensure newly active ROI is at LOD 0 so dirty compositing aligns
+            if primary is not old:
+                self._ensure_active_lod0(primary)
         self._update_selection_highlights()
         _t1 = time.perf_counter()
         self._pulse_selection()
@@ -317,23 +366,38 @@ class ImageCanvas(QGraphicsView):
             self._selection_highlight_items.append(item)
 
     def _pulse_selection(self):
-        """Brief opacity boost on selection change (G.23)."""
-        if not self._selection_highlight_items:
+        """Brief scale pop on selection change for visual emphasis."""
+        # Scale pop on the active ROI overlay item
+        pop_item = None
+        layer = self._active_layer
+        if layer is not None:
+            rid = id(layer)
+            pop_item = self._roi_items.get(rid)
+            if pop_item is not None:
+                bbox = layer.get_bbox()
+                if bbox is not None:
+                    y1, y2, x1, x2 = bbox
+                    cx = (x1 + x2) / 2 + layer.offset_x
+                    cy = (y1 + y2) / 2 + layer.offset_y
+                    t = QTransform()
+                    t.translate(cx, cy)
+                    t.scale(1.03, 1.03)
+                    t.translate(-cx, -cy)
+                    pop_item.setTransform(t)
+
+        if pop_item is None:
             return
-        # Flash brighter by replacing pixmaps temporarily
-        for item in self._selection_highlight_items:
-            item.setOpacity(1.0)
 
         def _restore():
-            for item in self._selection_highlight_items:
-                item.setOpacity(0.8)
+            if pop_item is not None:
+                pop_item.setTransform(QTransform())
 
         if self._pulse_timer is not None:
             self._pulse_timer.stop()
         self._pulse_timer = QTimer(self)
         self._pulse_timer.setSingleShot(True)
         self._pulse_timer.timeout.connect(_restore)
-        self._pulse_timer.start(200)
+        self._pulse_timer.start(150)
 
     # ------------------------------------------------------------------
     # Image display — single QGraphicsPixmapItem (no tile pyramid)
@@ -352,8 +416,10 @@ class ImageCanvas(QGraphicsView):
 
         img_layer = self.layer_stack.image_layer
         if img_layer is None:
+            self._empty_hint.setVisible(True)
             return
 
+        self._empty_hint.setVisible(False)
         data = self._get_display_uint8()
         if data is None:
             return
@@ -987,11 +1053,26 @@ class ImageCanvas(QGraphicsView):
             path.lineTo(QPointF(hover_point[0], hover_point[1]))
         self._polygon_item = self._scene.addPath(path, pen)
         self._polygon_item.setZValue(1000)
+        # Large close-marker at first vertex (appears after 2+ vertices)
+        if len(vertices) >= 2:
+            sx, sy = vertices[0]
+            scale = self.transform().m11() or 1.0
+            r = max(6, 12 / max(scale, 0.01))
+            marker_pen = QPen(QColor(255, 255, 0), 1.5)
+            marker_pen.setCosmetic(True)
+            self._polygon_close_marker = self._scene.addEllipse(
+                sx - r, sy - r, r * 2, r * 2,
+                marker_pen, QBrush(QColor(255, 255, 0, 100)),
+            )
+            self._polygon_close_marker.setZValue(1001)
 
     def clear_polygon_preview(self):
         if self._polygon_item:
             self._scene.removeItem(self._polygon_item)
             self._polygon_item = None
+        if self._polygon_close_marker:
+            self._scene.removeItem(self._polygon_close_marker)
+            self._polygon_close_marker = None
 
     # ------------------------------------------------------------------
     # Layout
@@ -1003,6 +1084,11 @@ class ImageCanvas(QGraphicsView):
         w = self.viewport().width()
         h = self.viewport().height()
         self._progress_bar.setGeometry(0, h - 4, w, 4)
+        # Center empty-state hint
+        hint_w, hint_h = 380, 140
+        self._empty_hint.setGeometry(
+            (w - hint_w) // 2, (h - hint_h) // 2, hint_w, hint_h
+        )
 
     # ------------------------------------------------------------------
     # Zoom helpers
@@ -1201,6 +1287,7 @@ class ImageCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         scene_pos = self.mapToScene(event.position().toPoint())
+        self._last_scene_pos = scene_pos
         ix, iy = int(scene_pos.x()), int(scene_pos.y())
         img = self.layer_stack.image_layer
         if img and 0 <= ix < img.data.shape[1] and 0 <= iy < img.data.shape[0]:
@@ -1274,7 +1361,8 @@ class ImageCanvas(QGraphicsView):
         self._hide_stamp_preview()
 
         if self._tool and hasattr(self._tool, 'size') and not self._is_panning:
-            radius = self._tool.size / 2
+            zoom = self.transform().m11() or 1.0
+            radius = self._tool.size / max(zoom, 0.01) / 2
             self.show_brush_preview(scene_pos.x(), scene_pos.y(), radius)
         else:
             self.hide_brush_preview()
@@ -1314,6 +1402,11 @@ class ImageCanvas(QGraphicsView):
         if main_win and hasattr(main_win, 'tool_panel'):
             slider = main_win.tool_panel.size_slider
             slider.setValue(max(1, min(2000, slider.value() + delta)))
+
+    def refresh_brush_cursor(self):
+        """Redraw the brush cursor at the last known mouse position."""
+        if self._last_scene_pos is not None:
+            self._update_brush_cursor(self._last_scene_pos)
 
 
 # ------------------------------------------------------------------

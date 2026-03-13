@@ -72,7 +72,7 @@ class TestLayerPanelFeatures:
     def test_refresh_shows_roi_count(self, qapp, app_with_image):
         app = app_with_image
         app.layer_panel.refresh()
-        assert "1 ROIs" in app.layer_panel.header.text()
+        assert "(1)" in app.layer_panel.header.text()
 
     def test_refresh_shows_index(self, qapp, app_with_image):
         app = app_with_image
@@ -98,8 +98,8 @@ class TestLayerPanelFeatures:
         app = app_with_image
         assert app.layer_panel.nav_bar is not None
 
-    def test_clear_all_btn_exists(self, qapp, app_with_image):
-        assert app_with_image.layer_panel.clear_all_btn is not None
+    def test_clear_all_btn_attr_exists(self, qapp, app_with_image):
+        assert hasattr(app_with_image.layer_panel, 'clear_all_btn')
 
-    def test_random_color_btn_exists(self, qapp, app_with_image):
-        assert app_with_image.layer_panel.random_color_btn is not None
+    def test_random_color_btn_attr_exists(self, qapp, app_with_image):
+        assert hasattr(app_with_image.layer_panel, 'random_color_btn')

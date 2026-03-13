@@ -7,10 +7,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileDialog,
     QStatusBar, QMessageBox, QProgressDialog, QDialog, QVBoxLayout, QTextEdit,
     QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget, QPushButton,
-    QComboBox, QInputDialog, QColorDialog,
+    QComboBox, QInputDialog, QColorDialog, QFrame,
 )
 from PySide6.QtCore import Qt, QSettings, QRectF, QTimer
-from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
 
 from montaris.canvas import ImageCanvas
 from montaris.layers import LayerStack, ImageLayer, ROILayer, ROI_COLORS, generate_unique_roi_name, MontageDocument
@@ -29,6 +29,22 @@ from montaris.widgets.toast import ToastManager
 from montaris.io.image_io import load_image, load_image_stack
 from montaris.io.roi_io import save_roi_set, load_roi_set
 from montaris.core.busy import busy_cursor, should_process_events
+from montaris import theme as _theme
+from montaris.widgets import AnimatedButton
+
+try:
+    import qtawesome as qta
+    _HAS_QTA = True
+except ImportError:
+    _HAS_QTA = False
+
+
+def _qta_icon(name):
+    """Return a QtAwesome icon with theme-appropriate color, or None."""
+    if _HAS_QTA:
+        color = '#dcdcdc' if _theme.is_dark() else '#333'
+        return qta.icon(name, color=color)
+    return None
 
 
 def apply_dark_theme(app):
@@ -48,6 +64,30 @@ def apply_dark_theme(app):
     palette.setColor(QPalette.Highlight, QColor(80, 140, 220))
     palette.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
     app.setPalette(palette)
+
+
+def apply_light_theme(app):
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(240, 240, 240))
+    palette.setColor(QPalette.WindowText, QColor(30, 30, 30))
+    palette.setColor(QPalette.Base, QColor(255, 255, 255))
+    palette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
+    palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 220))
+    palette.setColor(QPalette.ToolTipText, QColor(0, 0, 0))
+    palette.setColor(QPalette.Text, QColor(30, 30, 30))
+    palette.setColor(QPalette.Button, QColor(240, 240, 240))
+    palette.setColor(QPalette.ButtonText, QColor(30, 30, 30))
+    palette.setColor(QPalette.BrightText, QColor(255, 0, 0))
+    palette.setColor(QPalette.Link, QColor(42, 100, 200))
+    palette.setColor(QPalette.Highlight, QColor(42, 100, 200))
+    palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    app.setPalette(palette)
+
+
+def apply_system_theme(app):
+    app.setStyle("WindowsVista")
+    app.setPalette(app.style().standardPalette())
 
 
 def _sanitize_roi_filename(name):
@@ -146,6 +186,8 @@ class MontarisApp(QMainWindow):
         self._adjustments = ImageAdjustments()
         self._auto_overlap = False
         self._downsample_factor = 1
+        self._student_session = False
+        self._roi_import_path = None  # track where ROI ZIP was loaded from
         self._documents = []
         self._active_doc_index = -1
         self._composite_mode = False
@@ -188,41 +230,73 @@ class MontarisApp(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, layer_dock)
         self._layer_dock = layer_dock
 
-        # Tool panel
+        # Tool panel — header is inside ToolPanel, hide dock title bar
         self.tool_panel = ToolPanel(self, self)
         tool_dock = QDockWidget("Tools", self)
         tool_dock.setObjectName("ToolsDock")
+        tool_dock.setTitleBarWidget(QWidget())  # hide dock title
         tool_dock.setWidget(self.tool_panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, tool_dock)
         self._tool_dock = tool_dock
 
-        # Properties panel
-        self.properties_panel = PropertiesPanel(self, self)
-        props_dock = QDockWidget("Properties", self)
-        props_dock.setObjectName("PropertiesDock")
-        props_dock.setWidget(self.properties_panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, props_dock)
-        self._props_dock = props_dock
+        # Styled section title bar for right-side docks
+        self._themed_labels = []  # track for theme refresh
 
-        # Display panel (Phase 2)
+        def _section_title(text):
+            lbl = QLabel(f"  {text}")
+            lbl.setFixedHeight(26)
+            lbl.setStyleSheet(_theme.section_header_style())
+            self._themed_labels.append(lbl)
+            return lbl
+
+        # Combined right-side panel with collapsible sections
+        self.properties_panel = PropertiesPanel(self, self)
         self.display_panel = DisplayPanel(self)
-        display_dock = QDockWidget("Display", self)
-        display_dock.setObjectName("DisplayDock")
-        display_dock.setWidget(self.display_panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, display_dock)
+        self.adjustments_panel = AdjustmentsPanel(self)
+
         self.display_panel.mode_changed.connect(self._on_display_mode_changed)
         self.display_panel.channels_changed.connect(self._on_channels_changed)
         self.display_panel.composite_toggled.connect(self._on_composite_toggled)
-        self._display_dock = display_dock
-
-        # Adjustments panel (Phase 2)
-        self.adjustments_panel = AdjustmentsPanel(self)
-        adj_dock = QDockWidget("Adjustments", self)
-        adj_dock.setObjectName("AdjustmentsDock")
-        adj_dock.setWidget(self.adjustments_panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, adj_dock)
         self.adjustments_panel.adjustments_changed.connect(self._on_adjustments_changed)
-        self._adj_dock = adj_dock
+
+        self._collapsible_headers = []  # track for theme refresh
+        right_combined = QWidget()
+        right_lay = QVBoxLayout(right_combined)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(0)
+
+        for title, panel, collapsed in [
+            ("ROI Properties", self.properties_panel, False),
+            ("Display Settings", self.display_panel, True),
+            ("Image Adjustments", self.adjustments_panel, False),
+        ]:
+            header = QPushButton(f"\u25BC  {title}")
+            header.setFixedHeight(26)
+            header.setStyleSheet(_theme.collapsible_header_style())
+            panel.setVisible(not collapsed)
+            if collapsed:
+                header.setText(f"\u25B6  {title}")
+
+            def _make_toggle(h, p, t):
+                def toggle():
+                    vis = not p.isVisible()
+                    p.setVisible(vis)
+                    h.setText(f"\u25BC  {t}" if vis else f"\u25B6  {t}")
+                return toggle
+
+            header.clicked.connect(_make_toggle(header, panel, title))
+            self._collapsible_headers.append(header)
+            right_lay.addWidget(header)
+            right_lay.addWidget(panel)
+
+        right_lay.addStretch()
+
+        combined_dock = QDockWidget("Details", self)
+        combined_dock.setObjectName("DetailsDock")
+        combined_dock.setTitleBarWidget(_section_title("Details"))
+        combined_dock.setWidget(right_combined)
+        self.addDockWidget(Qt.RightDockWidgetArea, combined_dock)
+        self._details_dock = combined_dock
 
         # Minimap (Phase 6)
         self.minimap = MiniMap(self)
@@ -256,17 +330,24 @@ class MontarisApp(QMainWindow):
         self.canvas._selection.changed.connect(self._on_selection_count_changed)
 
         # Collapsed left toolbar (hidden by default)
-        self._left_toolbar = QToolBar("Tools", self)
+        self._left_toolbar = QToolBar("Toolbox", self)
         self._left_toolbar.setObjectName("LeftToolBar")
         self._left_toolbar.setOrientation(Qt.Vertical)
         self._left_toolbar.setMovable(False)
+        from PySide6.QtCore import QSize
+        self._left_toolbar.setIconSize(QSize(28, 28))
+        self._left_toolbar.setStyleSheet(
+            "QToolBar { spacing: 2px; padding: 2px; }"
+            "QToolButton { font-size: 18px; min-width: 36px; min-height: 32px; }"
+        )
         self.addToolBar(Qt.LeftToolBarArea, self._left_toolbar)
         self._left_toolbar.setVisible(False)
         self._left_collapsed = False
 
-        from montaris.widgets.tool_panel import TOOL_ICONS
-        expand_left_act = QAction("\u25b6", self)  # ▶
-        expand_left_act.setToolTip("Expand sidebar (Ctrl+[)")
+        from montaris.widgets.tool_panel import TOOL_ICONS, _QTA_ICONS, _tool_icon
+        _expand_ico = _qta_icon('fa6s.angles-right')
+        expand_left_act = QAction("Expand") if not _expand_ico else QAction(_expand_ico, "", self)
+        expand_left_act.setToolTip("Expand Toolbox (Ctrl+[)")
         expand_left_act.triggered.connect(self._toggle_left_sidebar)
         self._left_toolbar.addAction(expand_left_act)
         self._left_toolbar.addSeparator()
@@ -274,8 +355,12 @@ class MontarisApp(QMainWindow):
         self._left_tool_actions = {}
         from montaris.tools import TOOL_REGISTRY
         for name, (module, cls_name, shortcut, category) in TOOL_REGISTRY.items():
-            icon = TOOL_ICONS.get(name, shortcut)
-            act = QAction(f"{icon}", self)
+            qicon = _tool_icon(name)
+            if qicon:
+                act = QAction(qicon, "", self)
+            else:
+                icon = TOOL_ICONS.get(name, shortcut)
+                act = QAction(f"{icon}", self)
             act.setToolTip(f"{name} [{shortcut}]")
             act.setCheckable(True)
             act.triggered.connect(lambda checked, t=name: self.tool_panel._select_tool(t))
@@ -283,33 +368,40 @@ class MontarisApp(QMainWindow):
             self._left_tool_actions[name] = act
 
         # Collapsed right toolbar (hidden by default)
-        self._right_toolbar = QToolBar("Panels", self)
+        self._right_toolbar = QToolBar("Layers & Properties", self)
         self._right_toolbar.setObjectName("RightToolBar")
         self._right_toolbar.setOrientation(Qt.Vertical)
         self._right_toolbar.setMovable(False)
+        self._right_toolbar.setIconSize(QSize(28, 28))
+        self._right_toolbar.setStyleSheet(
+            "QToolBar { spacing: 2px; padding: 2px; }"
+            "QToolButton { font-size: 18px; min-width: 36px; min-height: 32px; }"
+        )
         self.addToolBar(Qt.RightToolBarArea, self._right_toolbar)
         self._right_toolbar.setVisible(False)
         self._right_collapsed = False
 
-        expand_right_act = QAction("\u25c0", self)  # ◀
-        expand_right_act.setToolTip("Expand sidebar (Ctrl+])")
+        _expand_left_ico = _qta_icon('fa6s.angles-left')
+        expand_right_act = QAction("Expand") if not _expand_left_ico else QAction(_expand_left_ico, "", self)
+        expand_right_act.setToolTip("Expand Layers & Properties (Ctrl+])")
         expand_right_act.triggered.connect(self._toggle_right_sidebar)
         self._right_toolbar.addAction(expand_right_act)
 
-        # Collapse button inside right sidebar (added to layer dock title)
-        self._right_collapse_btn = QPushButton("\u25b6")  # ▶
-        self._right_collapse_btn.setFixedSize(22, 22)
+        # Full-width clickable header bar for right sidebar
+        _collapse_right_ico = _qta_icon('fa6s.angles-right')
+        if _collapse_right_ico:
+            self._right_collapse_btn = QPushButton(_collapse_right_ico, " Layers && Properties")
+        else:
+            self._right_collapse_btn = QPushButton("Layers && Properties  \u25b6")
+        self._right_collapse_btn.setFixedHeight(26)
         self._right_collapse_btn.setToolTip("Collapse sidebar (Ctrl+])")
-        self._right_collapse_btn.setStyleSheet(
-            "QPushButton { border: none; font-size: 12px; padding: 2px; }"
-        )
+        self._right_collapse_btn.setStyleSheet(_theme.collapse_btn_style())
         self._right_collapse_btn.clicked.connect(self._toggle_right_sidebar)
-        collapse_widget = QWidget()
-        collapse_layout = QHBoxLayout(collapse_widget)
-        collapse_layout.setContentsMargins(0, 0, 0, 0)
-        collapse_layout.addWidget(self._right_collapse_btn)
-        collapse_layout.addStretch()
-        self._layer_dock.setTitleBarWidget(collapse_widget)
+        right_header = QWidget()
+        right_header_lay = QHBoxLayout(right_header)
+        right_header_lay.setContentsMargins(2, 2, 2, 0)
+        right_header_lay.addWidget(self._right_collapse_btn)
+        self._layer_dock.setTitleBarWidget(right_header)
 
         # Connections
         self.tool_panel.collapse_requested.connect(self._toggle_left_sidebar)
@@ -552,11 +644,49 @@ class MontarisApp(QMainWindow):
         view_menu.addSeparator()
 
         # Dock toggles
-        view_menu.addAction(self._display_dock.toggleViewAction())
-        view_menu.addAction(self._adj_dock.toggleViewAction())
+        view_menu.addAction(self._details_dock.toggleViewAction())
         view_menu.addAction(self._minimap_dock.toggleViewAction())
         view_menu.addAction(self._perf_dock.toggleViewAction())
         view_menu.addAction(self._debug_dock.toggleViewAction())
+
+        # Settings menu
+        settings_menu = menubar.addMenu("&Settings")
+
+        # Theme submenu
+        _theme_ico = _qta_icon('fa6s.palette')
+        theme_menu = settings_menu.addMenu("Theme")
+        if _theme_ico:
+            theme_menu.setIcon(_theme_ico)
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        _theme_icons = {"dark": 'fa6s.moon', "light": 'fa6s.sun', "system": 'fa6s.desktop'}
+        for key, label in [("dark", "Dark"), ("light", "Light"), ("system", "System")]:
+            ico = _qta_icon(_theme_icons[key])
+            act = QAction(ico, label, self) if ico else QAction(label, self)
+            act.setCheckable(True)
+            act.setData(key)
+            self._theme_group.addAction(act)
+            theme_menu.addAction(act)
+        self._theme_group.triggered.connect(self._on_theme_changed)
+
+        settings_menu.addSeparator()
+
+        _student_ico = _qta_icon('fa6s.user-graduate')
+        self._student_session_act = QAction("Student Session", self) if not _student_ico else QAction(_student_ico, "Student Session", self)
+        self._student_session_act.setCheckable(True)
+        self._student_session_act.setChecked(False)
+        self._student_session_act.setToolTip(
+            "Export ROIs to the same folder they were loaded from, prefixed with adj_")
+        self._student_session_act.toggled.connect(self._on_student_session_toggled)
+        settings_menu.addAction(self._student_session_act)
+
+        _savep_ico = _qta_icon('fa6s.floppy-disk')
+        self._save_progress_act = QAction(_savep_ico, "Save Progress", self) if _savep_ico else QAction("Save Progress", self)
+        self._save_progress_act.setCheckable(True)
+        self._save_progress_act.setChecked(False)
+        self._save_progress_act.setToolTip("Enable/disable session save progress")
+        self._save_progress_act.toggled.connect(self._on_save_progress_toggled)
+        settings_menu.addAction(self._save_progress_act)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -572,9 +702,14 @@ class MontarisApp(QMainWindow):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
         self.canvas.cursor_moved.connect(self._update_cursor_info)
+        # Student Session indicator
+        self._student_label = QLabel("")
+        self._student_label.setStyleSheet(_theme.student_label_style())
+        self._student_label.setVisible(False)
+        self.statusbar.addPermanentWidget(self._student_label)
         # Tool status widget (G.14)
         self._tool_status_label = QLabel("Tool: Hand")
-        self._tool_status_label.setStyleSheet("font-size: 11px; padding: 0 8px;")
+        self._tool_status_label.setStyleSheet(_theme.status_label_style())
         self.statusbar.addPermanentWidget(self._tool_status_label)
 
         # Move tool hint — shown in status bar only when Move is active
@@ -583,7 +718,7 @@ class MontarisApp(QMainWindow):
             "Drag a component to move independently | "
             "Ctrl+click to multi-select"
         )
-        self._move_hint.setStyleSheet("color: #888; font-size: 11px; padding: 0 8px;")
+        self._move_hint.setStyleSheet(_theme.hint_style())
         self._move_hint.setVisible(False)
         self.statusbar.addPermanentWidget(self._move_hint)
 
@@ -592,83 +727,147 @@ class MontarisApp(QMainWindow):
         toolbar = QToolBar("Main Toolbar", self)
         toolbar.setObjectName("MainToolbar")
         toolbar.setMovable(True)
+        toolbar.setStyleSheet(
+            "QToolBar { background: transparent; border: none; spacing: 0px; }"
+        )
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
-        # Undo / Redo buttons (shortcuts already in Edit menu)
-        undo_btn = QAction("⟲ Undo", self)
+        # Single container with items centred
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet("background: transparent;")
+        tb_lay = QHBoxLayout(tb_widget)
+        tb_lay.setContentsMargins(4, 4, 4, 4)
+        tb_lay.setSpacing(6)
+        tb_lay.addStretch(1)
+
+        # Toolbar button style
+        _tb_btn_style = _theme.toolbar_btn_style()
+        self._themed_tb_btns = []  # track for theme refresh
+        self._toolbar_groups = []  # track group frames for theme refresh
+        self._toolbar_seps = []   # track separators for theme refresh
+
+        # -- Group 1: Undo / Redo --
+        _undo_ico = _qta_icon('fa6s.rotate-left')
+        undo_btn = AnimatedButton(_undo_ico, " Undo") if _undo_ico else AnimatedButton("\u21A9  Undo")
         undo_btn.setToolTip("Undo (Ctrl+Z)")
-        undo_btn.triggered.connect(self.undo)
-        toolbar.addAction(undo_btn)
-
-        redo_btn = QAction("⟳ Redo", self)
+        undo_btn.setStyleSheet(_tb_btn_style)
+        undo_btn.clicked.connect(self.undo)
+        _redo_ico = _qta_icon('fa6s.rotate-right')
+        redo_btn = AnimatedButton(_redo_ico, " Redo") if _redo_ico else AnimatedButton("Redo  \u21AA")
         redo_btn.setToolTip("Redo (Ctrl+Shift+Z)")
-        redo_btn.triggered.connect(self.redo)
-        toolbar.addAction(redo_btn)
+        redo_btn.setStyleSheet(_tb_btn_style)
+        redo_btn.clicked.connect(self.redo)
+        self._themed_tb_btns.extend([undo_btn, redo_btn])
+        tb_lay.addWidget(undo_btn, 0, Qt.AlignVCenter)
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
+        tb_lay.addWidget(redo_btn, 0, Qt.AlignVCenter)
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
 
-        toolbar.addSeparator()
-
-        # Brush size in toolbar — synced with tool_panel
-        toolbar.addWidget(QLabel(" Brush Size: "))
-        tb_size_slider = QSlider(Qt.Horizontal)
-        tb_size_slider.setRange(1, 2000)
-        tb_size_slider.setValue(100)
-        tb_size_slider.setFixedWidth(120)
-        toolbar.addWidget(tb_size_slider)
-
-        tb_size_spin = QSpinBox()
-        tb_size_spin.setRange(1, 2000)
-        tb_size_spin.setValue(100)
-        toolbar.addWidget(tb_size_spin)
+        # -- Group 2: Brush size --
+        self._tb_size_slider = QSlider(Qt.Horizontal)
+        self._tb_size_slider.setRange(1, 2000)
+        self._tb_size_slider.setValue(100)
+        self._tb_size_slider.setFixedWidth(120)
+        self._tb_size_slider.setStyleSheet(_theme.slider_style())
+        self._tb_size_spin = QSpinBox()
+        self._tb_size_spin.setRange(1, 2000)
+        self._tb_size_spin.setValue(100)
+        self._tb_size_spin.setStyleSheet(_theme.spinbox_style())
+        tb_lay.addWidget(
+            self._toolbar_group(QLabel("Brush Size"), self._tb_size_slider, self._tb_size_spin),
+            0, Qt.AlignVCenter,
+        )
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
 
         # Bidirectional sync between toolbar and tool_panel
         tp_slider = self.tool_panel.size_slider
-        tb_size_slider.valueChanged.connect(tp_slider.setValue)
-        tp_slider.valueChanged.connect(tb_size_slider.setValue)
-        tb_size_spin.valueChanged.connect(tb_size_slider.setValue)
-        tb_size_slider.valueChanged.connect(tb_size_spin.setValue)
+        self._tb_size_slider.valueChanged.connect(tp_slider.setValue)
+        tp_slider.valueChanged.connect(self._tb_size_slider.setValue)
+        self._tb_size_spin.valueChanged.connect(self._tb_size_slider.setValue)
+        self._tb_size_slider.valueChanged.connect(self._tb_size_spin.setValue)
 
-        toolbar.addSeparator()
-
-        # Global opacity in toolbar
-        toolbar.addWidget(QLabel(" Opacity (Global): "))
+        # -- Group 3: Global opacity --
         self._global_opacity_slider = QSlider(Qt.Horizontal)
         self._global_opacity_slider.setRange(0, 100)
         self._global_opacity_slider.setValue(100)
         self._global_opacity_slider.setFixedWidth(120)
-        toolbar.addWidget(self._global_opacity_slider)
-
+        self._global_opacity_slider.setStyleSheet(_theme.slider_style())
         self._global_opacity_spin = QSpinBox()
         self._global_opacity_spin.setRange(0, 100)
         self._global_opacity_spin.setValue(100)
         self._global_opacity_spin.setSuffix("%")
-        toolbar.addWidget(self._global_opacity_spin)
+        self._global_opacity_spin.setStyleSheet(_theme.spinbox_style())
+        tb_lay.addWidget(
+            self._toolbar_group(QLabel("Global Opacity"), self._global_opacity_slider, self._global_opacity_spin),
+            0, Qt.AlignVCenter,
+        )
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
 
         self._global_opacity_slider.valueChanged.connect(self._global_opacity_spin.setValue)
         self._global_opacity_spin.valueChanged.connect(self._global_opacity_slider.setValue)
         self._global_opacity_slider.valueChanged.connect(self._on_global_opacity_changed)
 
-        toolbar.addSeparator()
-
-        # Document switcher (A.11)
-        toolbar.addWidget(QLabel(" Montage: "))
+        # -- Group 4: Document switcher --
         self._doc_combo = QComboBox()
-        self._doc_combo.setMinimumWidth(150)
+        self._doc_combo.setFixedWidth(150)
+        self._doc_combo.setStyleSheet(_theme.combobox_style())
         self._doc_combo.currentIndexChanged.connect(self._switch_to_document)
-        toolbar.addWidget(self._doc_combo)
 
-        self._tint_btn = QPushButton("Tint")
+        self._tint_btn = AnimatedButton("Tint")
         self._tint_btn.setFixedWidth(50)
+        self._tint_btn.setStyleSheet(_tb_btn_style)
         self._tint_btn.setToolTip("Set display tint color for current channel (right-click to clear)")
         self._tint_btn.clicked.connect(self._pick_tint_color)
         self._tint_btn.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tint_btn.customContextMenuRequested.connect(self._clear_tint_color)
-        toolbar.addWidget(self._tint_btn)
+        self._themed_tb_btns.append(self._tint_btn)
+        tb_lay.addWidget(
+            self._toolbar_group(QLabel("Montage"), self._doc_combo, self._tint_btn),
+            0, Qt.AlignVCenter,
+        )
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
 
-        toolbar.addSeparator()
-        save_progress_btn = QAction("Save Progress", self)
-        save_progress_btn.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        save_progress_btn.triggered.connect(self.save_session_progress)
-        toolbar.addAction(save_progress_btn)
+        # -- Group 5: Save Progress --
+        _save_ico = _qta_icon('fa6s.floppy-disk')
+        self._save_progress_btn = AnimatedButton(_save_ico, " Save Progress") if _save_ico else AnimatedButton("\u2B07  Save Progress")
+        self._save_progress_btn.setToolTip("Ctrl+Shift+S")
+        self._save_progress_btn.setStyleSheet(_tb_btn_style)
+        self._save_progress_btn.clicked.connect(self.save_session_progress)
+        self._themed_tb_btns.append(self._save_progress_btn)
+        self._save_progress_btn.setVisible(False)
+        self._save_progress_shortcut = QAction(self)
+        self._save_progress_shortcut.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self._save_progress_shortcut.triggered.connect(self.save_session_progress)
+        self._save_progress_shortcut.setEnabled(False)
+        self.addAction(self._save_progress_shortcut)
+        tb_lay.addWidget(self._save_progress_btn, 0, Qt.AlignVCenter)
+        tb_lay.addStretch(1)
+
+        toolbar.addWidget(tb_widget)
+
+    def _toolbar_group(self, *widgets):
+        """Wrap widgets in a styled QFrame for visual grouping."""
+        frame = QFrame()
+        frame.setStyleSheet(_theme.toolbar_group_style())
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+        for w in widgets:
+            lay.addWidget(w)
+        self._toolbar_groups.append(frame)
+        return frame
+
+    def _toolbar_sep(self):
+        """Create a vertical pipe separator for the toolbar."""
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedWidth(2)
+        sep.setFixedHeight(24)
+        sep.setStyleSheet(
+            f"color: {'#555' if _theme.is_dark() else '#bbb'};"
+        )
+        self._toolbar_seps.append(sep)
+        return sep
 
     def _update_cursor_info(self, x, y, value):
         roi_info = ""
@@ -694,10 +893,7 @@ class MontarisApp(QMainWindow):
 
     def _toggle_right_sidebar(self):
         self._right_collapsed = not getattr(self, '_right_collapsed', False)
-        right_docks = [
-            self._layer_dock, self._props_dock,
-            self._display_dock, self._adj_dock,
-        ]
+        right_docks = [self._layer_dock, self._details_dock]
         if self._right_collapsed:
             for d in right_docks:
                 d.setVisible(False)
@@ -758,7 +954,7 @@ class MontarisApp(QMainWindow):
         roi_info = f"  |  {layer.name}" if layer and hasattr(layer, 'name') else ""
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
 
-    _NON_DRAWING_TOOLS = {'Hand', 'Select', 'Transform (selected)', 'Transform All',
+    _NON_DRAWING_TOOLS = {'Hand', 'Select ROI', 'Transform (selected)', 'Transform All',
                           'Move (selected)', 'Move All'}
 
     def _on_roi_added(self):
@@ -793,8 +989,8 @@ class MontarisApp(QMainWindow):
         self.properties_panel.set_layer(None)
 
     def _on_all_cleared(self):
-        self.canvas._selection.clear()
-        self.canvas.set_active_layer(None)
+        self.canvas._active_layer = None
+        self.canvas._selection._layers.clear()
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()
         self.properties_panel.set_layer(None)
@@ -901,6 +1097,85 @@ class MontarisApp(QMainWindow):
 
     def _toggle_auto_overlap(self, checked):
         self._auto_overlap = checked
+
+    def _on_theme_changed(self, action):
+        key = action.data()
+        app = QApplication.instance()
+        if key == "dark":
+            apply_dark_theme(app)
+        elif key == "light":
+            apply_light_theme(app)
+        elif key == "system":
+            apply_system_theme(app)
+        self._refresh_themed_styles()
+
+    def _refresh_themed_styles(self):
+        """Re-apply all hardcoded CSS after a theme switch."""
+        for lbl in self._themed_labels:
+            lbl.setStyleSheet(_theme.section_header_style())
+        for btn in self._themed_tb_btns:
+            btn.setStyleSheet(_theme.toolbar_btn_style())
+        _grp_ss = _theme.toolbar_group_style()
+        for grp in self._toolbar_groups:
+            grp.setStyleSheet(_grp_ss)
+        _sep_c = '#555' if _theme.is_dark() else '#bbb'
+        for sep in self._toolbar_seps:
+            sep.setStyleSheet(f"color: {_sep_c};")
+        self._right_collapse_btn.setStyleSheet(_theme.collapse_btn_style())
+        self._move_hint.setStyleSheet(_theme.hint_style())
+        # Refresh icon colors across the app
+        if _HAS_QTA:
+            from montaris.widgets.tool_panel import _QTA_ICONS
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            # Collapsed sidebar tool actions
+            for name, act in self._left_tool_actions.items():
+                if name in _QTA_ICONS:
+                    act.setIcon(qta.icon(_QTA_ICONS[name], color=color))
+            # Collapse / expand header buttons
+            self._right_collapse_btn.setIcon(qta.icon('fa6s.angles-right', color=color))
+        # Refresh child panels and canvas
+        if hasattr(self, 'canvas'):
+            self.canvas.refresh_theme()
+        if hasattr(self, 'tool_panel'):
+            self.tool_panel.refresh_theme()
+        if hasattr(self, 'layer_panel'):
+            self.layer_panel.refresh_theme()
+        if hasattr(self, 'adjustments_panel'):
+            self.adjustments_panel.refresh_theme()
+        if hasattr(self, 'properties_panel'):
+            self.properties_panel.refresh_theme()
+        if hasattr(self, 'display_panel'):
+            self.display_panel.refresh_theme()
+        # Refresh toolbar sliders/spinboxes/combos
+        _slider_ss = _theme.slider_style()
+        _spin_ss = _theme.spinbox_style()
+        self._tb_size_slider.setStyleSheet(_slider_ss)
+        self._tb_size_spin.setStyleSheet(_spin_ss)
+        self._global_opacity_slider.setStyleSheet(_slider_ss)
+        self._global_opacity_spin.setStyleSheet(_spin_ss)
+        self._doc_combo.setStyleSheet(_theme.combobox_style())
+        _ch_ss = _theme.collapsible_header_style()
+        for h in self._collapsible_headers:
+            h.setStyleSheet(_ch_ss)
+        # Refresh status bar labels
+        self._student_label.setStyleSheet(_theme.student_label_style())
+        self._tool_status_label.setStyleSheet(_theme.status_label_style())
+        # Refresh peripheral widgets
+        if hasattr(self, 'perf_monitor'):
+            self.perf_monitor.refresh_theme()
+        if hasattr(self, 'debug_console'):
+            self.debug_console.refresh_theme()
+        if hasattr(self, 'minimap'):
+            self.minimap.refresh_theme()
+
+    def _on_student_session_toggled(self, checked):
+        self._student_session = checked
+        self._student_label.setVisible(checked)
+        self._student_label.setText("Student Session" if checked else "")
+        if checked:
+            self.toast.show("Student Session ON — exports save to import folder with adj_ prefix", "success")
+        else:
+            self.toast.show("Student Session OFF", "info")
 
     def _select_all_rois(self):
         visible = [r for r in self.layer_stack.roi_layers if r.visible]
@@ -1441,8 +1716,14 @@ class MontarisApp(QMainWindow):
         self.toast.show(msg, "success")
         QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
 
+    def _on_save_progress_toggled(self, checked):
+        self._save_progress_btn.setVisible(checked)
+        self._save_progress_shortcut.setEnabled(checked)
+
     def _auto_save_initial_session(self):
         """Auto-save session after ROI import (called once per image load)."""
+        if not self._save_progress_act.isChecked():
+            return
         if not self.layer_stack.roi_layers:
             return
         if getattr(self, '_initial_session_saved', False):
@@ -2092,6 +2373,7 @@ class MontarisApp(QMainWindow):
             if not path:
                 return
             self._update_last_dir(path)
+        self._roi_import_path = path  # remember source for Student Session export
         action = self._ask_replace_or_keep()
         if action is None:
             return
@@ -2277,12 +2559,18 @@ class MontarisApp(QMainWindow):
         if resolution is None:
             return
         upscale = resolution == "original"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export All ROIs as ZIP", os.path.join(self._last_dir(), "rois.zip"),
-            "ZIP Archive (*.zip);;All Files (*)",
-        )
-        if not path:
-            return
+        # Student Session: auto-save to import directory with adj_ prefix
+        if self._student_session and self._roi_import_path:
+            import_dir = os.path.dirname(self._roi_import_path)
+            import_name = os.path.basename(self._roi_import_path)
+            path = os.path.join(import_dir, f"adj_{import_name}")
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export All ROIs as ZIP", os.path.join(self._last_dir(), "rois.zip"),
+                "ZIP Archive (*.zip);;All Files (*)",
+            )
+            if not path:
+                return
         try:
             import zipfile
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi_bytes
@@ -2453,7 +2741,7 @@ class MontarisApp(QMainWindow):
                 f"background-color: rgb({r},{g},{b}); color: {text_color};"
             )
         else:
-            self._tint_btn.setStyleSheet("")
+            self._tint_btn.setStyleSheet(_theme.toolbar_btn_style())
 
     def _auto_fit_rois(self):
         if self.layer_stack.image_layer is None:
@@ -2508,35 +2796,42 @@ class MontarisApp(QMainWindow):
 
     def clear_active_roi(self):
         """Remove selected ROI(s), or the active ROI if none selected."""
-        selected = self.canvas._selection.layers
-        if not selected:
-            layer = self.canvas._active_layer
-            if layer and getattr(layer, 'is_roi', False) and layer in self.layer_stack.roi_layers:
-                selected = [layer]
-        if not selected:
-            return
-        # Get indices to remove (reverse order to avoid shifting)
-        indices = []
-        for layer in selected:
-            if layer in self.layer_stack.roi_layers:
-                indices.append(self.layer_stack.roi_layers.index(layer))
-        if not indices:
-            return
-        first_idx = min(indices)
-        self.canvas._active_layer = None
-        self.canvas._selection.clear()
-        # Batch remove without emitting signals per removal
-        for idx in sorted(indices, reverse=True):
-            if 0 <= idx < len(self.layer_stack.roi_layers):
-                self.layer_stack.roi_layers.pop(idx)
-        self.layer_stack.changed.emit()
-        # Select adjacent ROI if available
-        if self.layer_stack.roi_layers:
-            new_idx = min(first_idx, len(self.layer_stack.roi_layers) - 1)
-            self.canvas.set_active_layer(self.layer_stack.roi_layers[new_idx])
-        self.canvas.refresh_overlays()
-        self.layer_panel.refresh()
-        self.properties_panel.set_layer(self.canvas._active_layer)
+        try:
+            selected = self.canvas._selection.layers
+            if not selected:
+                layer = self.canvas._active_layer
+                if layer and getattr(layer, 'is_roi', False) and layer in self.layer_stack.roi_layers:
+                    selected = [layer]
+            if not selected:
+                return
+            # Get indices to remove (reverse order to avoid shifting)
+            indices = []
+            for layer in selected:
+                if layer in self.layer_stack.roi_layers:
+                    indices.append(self.layer_stack.roi_layers.index(layer))
+            if not indices:
+                return
+            first_idx = min(indices)
+            # Block signals during batch removal to prevent cascading updates
+            # on stale layer references
+            self.canvas._active_layer = None
+            self.canvas._selection._layers.clear()  # silent clear, no signal
+            # Batch remove
+            for idx in sorted(indices, reverse=True):
+                if 0 <= idx < len(self.layer_stack.roi_layers):
+                    self.layer_stack.roi_layers.pop(idx)
+            # Now emit signals after state is consistent
+            self.layer_stack.changed.emit()
+            # Select adjacent ROI if available
+            if self.layer_stack.roi_layers:
+                new_idx = min(first_idx, len(self.layer_stack.roi_layers) - 1)
+                self.canvas.set_active_layer(self.layer_stack.roi_layers[new_idx])
+            self.canvas.refresh_overlays()
+            self.layer_panel.refresh()
+            self.properties_panel.set_layer(self.canvas._active_layer)
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     def undo(self):
         # If polygon tool is mid-drawing, undo last vertex instead
@@ -2555,6 +2850,7 @@ class MontarisApp(QMainWindow):
             EventLogger.instance().log("undo", "undo", bytes=getattr(cmd, 'byte_size', 0))
             self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
+            self.layer_panel.refresh()
 
     def redo(self):
         cmd = self.undo_stack.redo()
@@ -2563,6 +2859,7 @@ class MontarisApp(QMainWindow):
             EventLogger.instance().log("undo", "redo", bytes=getattr(cmd, 'byte_size', 0))
             self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
+            self.layer_panel.refresh()
 
     def _refresh_affected_layers(self, cmd):
         """Refresh only the layers affected by an undo/redo command."""
@@ -2638,8 +2935,7 @@ class MontarisApp(QMainWindow):
 
         self._right_toolbar.setVisible(False)
         self._right_collapsed = False
-        for d in [self._layer_dock, self._props_dock,
-                  self._display_dock, self._adj_dock]:
+        for d in [self._layer_dock, self._details_dock]:
             d.setVisible(True)
 
         # Restore JIT acceleration setting
@@ -2651,15 +2947,31 @@ class MontarisApp(QMainWindow):
         except ImportError:
             self._accel_act.setChecked(False)
 
+        # Restore Settings menu preferences
+        self._student_session_act.setChecked(
+            self.settings.value("student_session", False, type=bool))
+        self._save_progress_act.setChecked(
+            self.settings.value("save_progress", False, type=bool))
+
+        # Restore theme selection (check radio button; theme itself applied at startup)
+        saved_theme = self.settings.value("theme", "dark")
+        for act in self._theme_group.actions():
+            if act.data() == saved_theme:
+                act.setChecked(True)
+                break
+
     def _apply_dock_widths(self):
         """Set compact right sidebar width after layout is ready."""
-        right_docks = [self._layer_dock, self._props_dock,
-                       self._display_dock, self._adj_dock]
+        right_docks = [self._layer_dock, self._details_dock]
         self.resizeDocks(right_docks, [220] * len(right_docks), Qt.Horizontal)
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
+        self.settings.setValue("student_session", self._student_session_act.isChecked())
+        self.settings.setValue("save_progress", self._save_progress_act.isChecked())
+        checked_theme = self._theme_group.checkedAction()
+        self.settings.setValue("theme", checked_theme.data() if checked_theme else "dark")
         from montaris.core.workers import shutdown_pool
         shutdown_pool()
         super().closeEvent(event)
@@ -2768,7 +3080,14 @@ def main():
     if os.path.exists(_logo):
         app.setWindowIcon(QIcon(_logo))
 
-    apply_dark_theme(app)
+    _settings = QSettings("Montaris", "Montaris-X")
+    _theme = _settings.value("theme", "dark")
+    if _theme == "light":
+        apply_light_theme(app)
+    elif _theme == "system":
+        apply_system_theme(app)
+    else:
+        apply_dark_theme(app)
     window = MontarisApp()
     window.show()
 

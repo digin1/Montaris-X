@@ -71,16 +71,29 @@ class SelectionModel(QObject):
 
     @staticmethod
     def hit_test(x, y, roi_layers):
-        """Search roi_layers in reverse z-order, return first whose mask[y,x] > 0."""
+        """Search roi_layers in reverse z-order, return first whose mask[y,x] > 0.
+
+        Uses cached bbox for fast rejection and avoids full decompression
+        of compressed (RLE) masks by reading only the needed pixel.
+        """
         ix, iy = int(x), int(y)
         for layer in reversed(roi_layers):
-            if not getattr(layer, 'is_roi', False):
+            if not getattr(layer, 'is_roi', False) or not layer.visible:
                 continue
-            mask = layer.mask
-            # Convert canvas coords to mask coords by subtracting offset
             mx = ix - getattr(layer, 'offset_x', 0)
             my = iy - getattr(layer, 'offset_y', 0)
-            if 0 <= my < mask.shape[0] and 0 <= mx < mask.shape[1]:
-                if mask[my, mx] > 0:
+            # Fast bbox rejection — avoids decompression entirely
+            bbox = layer.get_bbox()
+            if bbox is not None:
+                y1, y2, x1, x2 = bbox
+                if not (y1 <= my < y2 and x1 <= mx < x2):
+                    continue
+                # Point is inside bbox — check the actual pixel
+                # Use get_mask_crop for a 1x1 region (cheap even for compressed)
+                pixel = layer.get_mask_crop((my, my + 1, mx, mx + 1))
+                if pixel[0, 0] > 0:
                     return layer
+            else:
+                # No bbox (empty mask) — skip
+                continue
         return None

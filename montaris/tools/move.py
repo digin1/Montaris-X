@@ -467,21 +467,10 @@ class MoveTool(BaseTool):
         return float(idx), float(idy)
 
     def _clamp_layer_delta(self, dx, dy):
-        """Clamp dx/dy so all target layers' bboxes stay within mask bounds."""
-        idx = int(round(dx))
-        idy = int(round(dy))
-        for l in self._target_layers:
-            bbox = l.get_bbox()
-            if bbox is None:
-                continue
-            y1, y2, x1, x2 = bbox
-            h, w = l.shape
-            lid = id(l)
-            old_ox, old_oy = self._old_offsets.get(lid, (0, 0))
-            # Display position = bbox + old_offset + delta
-            idy = max(-y1 - old_oy, min(idy, h - y2 - old_oy))
-            idx = max(-x1 - old_ox, min(idx, w - x2 - old_ox))
-        return float(idx), float(idy)
+        """Round dx/dy to integer pixels. No boundary clamping — ROIs may
+        extend beyond the image; out-of-bounds portions are clipped on
+        flatten (same behaviour as the Transform tool)."""
+        return float(int(round(dx))), float(int(round(dy)))
 
     # ------------------------------------------------------------------
     # Auto-scroll

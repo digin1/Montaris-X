@@ -51,6 +51,11 @@ PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
 
 
+class _FakeTransform:
+    def m11(self):
+        return 1.0
+
+
 class FakeCanvas:
     """Minimal canvas stub for tool press/move/release without GUI rendering."""
 
@@ -65,6 +70,9 @@ class FakeCanvas:
 
     def _update_selection_highlights(self):
         pass
+
+    def transform(self):
+        return _FakeTransform()
 
     def scene(self):
         return self
