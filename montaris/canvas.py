@@ -3,7 +3,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QGraphicsEllipseItem, QGraphicsItem, QLabel, QWidget,
-    QHBoxLayout, QPushButton,
+    QHBoxLayout, QVBoxLayout, QPushButton,
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer, QTimeLine
 from PySide6.QtGui import (
@@ -152,8 +152,13 @@ class ImageCanvas(QGraphicsView):
         self._empty_hint.setStyleSheet(_theme.empty_state_style())
         self._empty_hint.show()
 
-        # Floating zoom controls (bottom-right)
-        self._zoom_bar = self._build_zoom_bar()
+        # Floating control bars (one per corner)
+        self._floating_btns = []  # all floating buttons for theme refresh
+        self._editing_locked = False
+        self._zoom_bar = self._build_zoom_bar()       # bottom-right
+        self._view_bar = self._build_view_bar()        # top-left (below HUD)
+        self._edit_bar = self._build_edit_bar()        # top-right
+        self._roi_bar = self._build_roi_bar()          # bottom-left
 
     # ------------------------------------------------------------------
     # Tool / layer management
@@ -168,9 +173,12 @@ class ImageCanvas(QGraphicsView):
         self.setBackgroundBrush(_theme.canvas_background())
         self._hud_label.setStyleSheet(_theme.hud_label_style())
         self._empty_hint.setStyleSheet(_theme.empty_state_style())
-        # Zoom bar
+        # Floating bars
+        bar_style = _theme.zoom_bar_style()
         btn_style = _theme.zoom_bar_button_style()
-        for b in (self._zb_in, self._zb_out, self._zb_fit):
+        for bar in (self._zoom_bar, self._view_bar, self._edit_bar, self._roi_bar):
+            bar.setStyleSheet(bar_style)
+        for b in self._floating_btns:
             b.setStyleSheet(btn_style)
             if hasattr(b, '_qta_name'):
                 try:
@@ -180,7 +188,6 @@ class ImageCanvas(QGraphicsView):
                 except ImportError:
                     pass
         self._zb_pct.setStyleSheet(_theme.zoom_bar_pct_style())
-        self._zoom_bar.setStyleSheet(_theme.zoom_bar_style())
 
     def set_tool(self, tool):
         t0 = time.perf_counter()
@@ -1123,45 +1130,51 @@ class ImageCanvas(QGraphicsView):
         self._empty_hint.setGeometry(
             (w - hint_w) // 2, (h - hint_h) // 2, hint_w, hint_h
         )
-        # Pin zoom bar to bottom-right
-        self._position_zoom_bar()
+        # Position all floating bars
+        self._position_floating_bars()
 
     # ------------------------------------------------------------------
-    # Zoom helpers
+    # Floating control bars
     # ------------------------------------------------------------------
 
-    def _build_zoom_bar(self):
-        """Create floating zoom control bar pinned to bottom-right."""
+    def _make_float_btn(self, lay, icon_name, fallback, tooltip, callback,
+                        checkable=False):
+        """Create a themed icon button and add it to *lay*."""
+        b = QPushButton()
+        try:
+            import qtawesome as qta
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            b.setIcon(qta.icon(icon_name, color=color))
+        except ImportError:
+            b.setText(fallback)
+        b.setFixedSize(26, 26)
+        b.setToolTip(tooltip)
+        b.setStyleSheet(_theme.zoom_bar_button_style())
+        b.clicked.connect(callback)
+        b._qta_name = icon_name
+        if checkable:
+            b.setCheckable(True)
+        lay.addWidget(b)
+        self._floating_btns.append(b)
+        return b
+
+    def _make_float_bar(self):
+        """Return a new transparent floating bar widget."""
         bar = QWidget(self)
         bar.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        bar.setStyleSheet(_theme.zoom_bar_style())
+        return bar
+
+    # -- Bottom-right: Zoom ------------------------------------------------
+
+    def _build_zoom_bar(self):
+        bar = self._make_float_bar()
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(4, 2, 4, 2)
         lay.setSpacing(2)
 
-        btn_style = _theme.zoom_bar_button_style()
-
-        try:
-            import qtawesome as qta
-            _has_qta = True
-        except ImportError:
-            _has_qta = False
-
-        def _btn(icon_name, fallback, tooltip, callback):
-            b = QPushButton()
-            if _has_qta:
-                color = '#dcdcdc' if _theme.is_dark() else '#333'
-                b.setIcon(qta.icon(icon_name, color=color))
-            else:
-                b.setText(fallback)
-            b.setFixedSize(26, 26)
-            b.setToolTip(tooltip)
-            b.setStyleSheet(btn_style)
-            b.clicked.connect(callback)
-            b._qta_name = icon_name
-            lay.addWidget(b)
-            return b
-
-        self._zb_out = _btn('fa6s.minus', '-', 'Zoom Out (Ctrl+-)', self.zoom_out)
+        self._zb_out = self._make_float_btn(lay, 'fa6s.minus', '-',
+                                             'Zoom Out (Ctrl+-)', self.zoom_out)
         self._zb_pct = QPushButton('100%')
         self._zb_pct.setFixedHeight(26)
         self._zb_pct.setMinimumWidth(48)
@@ -1169,21 +1182,198 @@ class ImageCanvas(QGraphicsView):
         self._zb_pct.setStyleSheet(_theme.zoom_bar_pct_style())
         self._zb_pct.clicked.connect(self.reset_zoom)
         lay.addWidget(self._zb_pct)
-        self._zb_in = _btn('fa6s.plus', '+', 'Zoom In (Ctrl+=)', self.zoom_in)
-        self._zb_fit = _btn('fa6s.expand', '\u2922', 'Fit to Window (Ctrl+0)', self.fit_to_window)
-
-        bar.setStyleSheet(_theme.zoom_bar_style())
+        self._zb_in = self._make_float_btn(lay, 'fa6s.plus', '+',
+                                            'Zoom In (Ctrl+=)', self.zoom_in)
+        self._zb_fit = self._make_float_btn(lay, 'fa6s.expand', '\u2922',
+                                             'Fit to Window (Ctrl+0)',
+                                             self.fit_to_window)
         bar.adjustSize()
         bar.show()
         return bar
 
-    def _position_zoom_bar(self):
-        """Pin zoom bar to bottom-right of viewport."""
+    # -- Top-left: View (below HUD) ----------------------------------------
+
+    def _build_view_bar(self):
+        bar = self._make_float_bar()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(2)
+
+        self._make_float_btn(lay, 'fa6s.left-right', '\u2194',
+                             'Flip Horizontal (H)', self._cb_flip_h)
+        self._make_float_btn(lay, 'fa6s.rotate', '\u21BB',
+                             'Rotate 90\u00b0 CW (Ctrl+R)', self._cb_rotate_90)
+        bar.adjustSize()
+        bar.show()
+        return bar
+
+    # -- Top-right: Edit ----------------------------------------------------
+
+    def _build_edit_bar(self):
+        bar = self._make_float_bar()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(2)
+
+        self._make_float_btn(lay, 'fa6s.rotate-left', '\u21A9',
+                             'Undo (Ctrl+Z)', self._cb_undo)
+        self._make_float_btn(lay, 'fa6s.rotate-right', '\u21AA',
+                             'Redo (Ctrl+Shift+Z)', self._cb_redo)
+        self._lock_btn = self._make_float_btn(
+            lay, 'fa6s.lock-open', '\U0001F513',
+            'Lock / Unlock Editing', self._cb_toggle_lock, checkable=True)
+        bar.adjustSize()
+        bar.show()
+        return bar
+
+    # -- Bottom-left: ROI navigation ----------------------------------------
+
+    def _build_roi_bar(self):
+        bar = self._make_float_bar()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(2)
+
+        self._make_float_btn(lay, 'fa6s.chevron-left', '\u25C0',
+                             'Previous ROI', self._cb_prev_roi)
+        self._make_float_btn(lay, 'fa6s.chevron-right', '\u25B6',
+                             'Next ROI', self._cb_next_roi)
+        self._overlay_btn = self._make_float_btn(
+            lay, 'fa6s.eye', '\U0001F441',
+            'Toggle ROI Overlay', self._cb_toggle_overlay, checkable=True)
+        self._make_float_btn(lay, 'fa6s.camera', '\U0001F4F7',
+                             'Screenshot', self._cb_screenshot)
+        self._make_float_btn(lay, 'fa6s.maximize', '\u26F6',
+                             'Fullscreen (F11)', self._cb_fullscreen)
+        bar.adjustSize()
+        bar.show()
+        return bar
+
+    # -- Positioning --------------------------------------------------------
+
+    def _position_floating_bars(self):
+        """Pin each bar to its corner."""
         vw = self.viewport().width()
         vh = self.viewport().height()
-        bw = self._zoom_bar.sizeHint().width()
-        bh = self._zoom_bar.sizeHint().height()
-        self._zoom_bar.move(vw - bw - 10, vh - bh - 14)
+        margin = 10
+
+        # Bottom-right: zoom
+        bw, bh = self._zoom_bar.sizeHint().width(), self._zoom_bar.sizeHint().height()
+        self._zoom_bar.move(vw - bw - margin, vh - bh - 14)
+
+        # Top-left: view (below HUD)
+        hud_bottom = self._hud_label.y() + self._hud_label.sizeHint().height() + 4
+        self._view_bar.move(margin - 4, hud_bottom)
+
+        # Top-right: edit
+        ew = self._edit_bar.sizeHint().width()
+        self._edit_bar.move(vw - ew - margin, margin)
+
+        # Bottom-left: roi nav
+        rh = self._roi_bar.sizeHint().height()
+        self._roi_bar.move(margin - 4, vh - rh - 14)
+
+    # -- Callbacks (delegate to parent MontarisApp) -------------------------
+
+    def _app(self):
+        """Return parent MontarisApp instance."""
+        return self.parent()
+
+    def _cb_flip_h(self):
+        app = self._app()
+        if app and hasattr(app, 'flip_horizontal'):
+            app.flip_horizontal()
+
+    def _cb_rotate_90(self):
+        app = self._app()
+        if app and hasattr(app, 'rotate_90'):
+            app.rotate_90()
+
+    def _cb_undo(self):
+        app = self._app()
+        if app and hasattr(app, 'undo'):
+            app.undo()
+
+    def _cb_redo(self):
+        app = self._app()
+        if app and hasattr(app, 'redo'):
+            app.redo()
+
+    def _cb_toggle_lock(self):
+        self._editing_locked = self._lock_btn.isChecked()
+        try:
+            import qtawesome as qta
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            icon_name = 'fa6s.lock' if self._editing_locked else 'fa6s.lock-open'
+            self._lock_btn.setIcon(qta.icon(icon_name, color=color))
+            self._lock_btn._qta_name = icon_name
+        except ImportError:
+            self._lock_btn.setText('\U0001F512' if self._editing_locked else '\U0001F513')
+
+    def _cb_prev_roi(self):
+        self._step_roi(-1)
+
+    def _cb_next_roi(self):
+        self._step_roi(1)
+
+    def _step_roi(self, direction):
+        app = self._app()
+        if not app:
+            return
+        layers = self.layer_stack.roi_layers
+        if not layers:
+            return
+        cur = self._active_layer
+        if cur in layers:
+            idx = (layers.index(cur) + direction) % len(layers)
+        else:
+            idx = 0
+        app._on_layer_selected(layers[idx])
+        if hasattr(app, 'layer_panel'):
+            row = idx + (1 if self.layer_stack.image_layer else 0)
+            app.layer_panel.list_widget.setCurrentRow(row)
+
+    def _cb_toggle_overlay(self):
+        """Toggle visibility of all ROI overlay items."""
+        show = not self._overlay_btn.isChecked()
+        for item in self._roi_items.values():
+            item.setVisible(show)
+        # Update icon
+        try:
+            import qtawesome as qta
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            icon_name = 'fa6s.eye-slash' if not show else 'fa6s.eye'
+            self._overlay_btn.setIcon(qta.icon(icon_name, color=color))
+            self._overlay_btn._qta_name = icon_name
+        except ImportError:
+            pass
+
+    def _cb_screenshot(self):
+        """Save a screenshot of the current canvas view."""
+        app = self._app()
+        if not app:
+            return
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            app, "Save Screenshot", "",
+            "PNG (*.png);;JPEG (*.jpg);;All Files (*)",
+        )
+        if path:
+            pixmap = self.grab()
+            pixmap.save(path)
+            if hasattr(app, 'toast'):
+                app.toast.show(f"Screenshot saved", "success")
+
+    def _cb_fullscreen(self):
+        app = self._app()
+        if not app:
+            return
+        if app.isFullScreen():
+            app.showNormal()
+        else:
+            app.showFullScreen()
+
+    # -- Zoom helpers -------------------------------------------------------
 
     def _update_zoom_pct(self):
         """Sync zoom percentage label to current view transform."""
@@ -1373,6 +1563,10 @@ class ImageCanvas(QGraphicsView):
             return
 
         if self._tool and event.button() == Qt.LeftButton:
+            # Block drawing tools when editing is locked
+            if (self._editing_locked
+                    and getattr(self._tool, 'name', None) in self._PAINT_TOOLS):
+                return
             # Auto-create ROI layer if painting with no active layer
             if (self._active_layer is None
                     and getattr(self._tool, 'name', None) in self._PAINT_TOOLS
