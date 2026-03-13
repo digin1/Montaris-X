@@ -21,3 +21,5 @@ builds/
 cache/
 test.tif
 test.zip
+tests/*.png
+tests/screenshots/

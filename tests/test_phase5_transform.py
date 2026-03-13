@@ -70,11 +70,11 @@ class TestComponentBbox:
 
 class TestSelectTool:
     def test_registered(self):
-        assert 'Select' in TOOL_REGISTRY
+        assert 'Select ROI' in TOOL_REGISTRY
 
     def test_creation(self, qapp, app_with_image):
         tool = SelectTool(app_with_image)
-        assert tool.name == "Select"
+        assert tool.name == "Select ROI"
 
 
 class TestZoomInOut:

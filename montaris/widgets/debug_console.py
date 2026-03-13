@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
+from montaris import theme as _theme
 
 
 class QtLogHandler(logging.Handler):
@@ -28,23 +29,25 @@ class DebugConsole(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        header = QLabel("Debug Console")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
+        _styles = _theme.debug_console_style()
+
+        self._header = QLabel("Debug Console")
+        self._header.setStyleSheet(_styles["header"])
+        layout.addWidget(self._header)
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setFont(QFont("Monospace", 9))
-        self.log_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        self.log_output.setStyleSheet(_styles["log"])
         layout.addWidget(self.log_output)
 
-        export_btn = QPushButton("Export Diagnostics")
-        export_btn.clicked.connect(self._export_diagnostics)
-        layout.addWidget(export_btn)
+        self._export_btn = QPushButton("Export Diagnostics")
+        self._export_btn.setStyleSheet(_styles["button"])
+        self._export_btn.clicked.connect(self._export_diagnostics)
+        layout.addWidget(self._export_btn)
 
         self.eval_input = QLineEdit()
         self.eval_input.setPlaceholderText(">>> Enter Python expression...")
-        self.eval_input.setFont(QFont("Monospace", 9))
+        self.eval_input.setStyleSheet(_styles["input"])
         self.eval_input.returnPressed.connect(self._on_eval)
         layout.addWidget(self.eval_input)
 
@@ -80,6 +83,13 @@ class DebugConsole(QWidget):
 
     def log(self, message):
         self.log_output.append(message)
+
+    def refresh_theme(self):
+        _styles = _theme.debug_console_style()
+        self._header.setStyleSheet(_styles["header"])
+        self.log_output.setStyleSheet(_styles["log"])
+        self._export_btn.setStyleSheet(_styles["button"])
+        self.eval_input.setStyleSheet(_styles["input"])
 
     def closeEvent(self, event):
         logging.getLogger().removeHandler(self._handler)

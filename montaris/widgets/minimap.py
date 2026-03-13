@@ -2,6 +2,7 @@ import numpy as np
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QPainter, QImage, QPixmap, QColor, QPen
+from montaris import theme as _theme
 
 
 MINIMAP_SIZE = 200
@@ -86,7 +87,8 @@ class MiniMap(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(30, 30, 30))
+        bg, _ = _theme.minimap_colors()
+        painter.fillRect(self.rect(), bg)
 
         if self._thumbnail:
             # Center thumbnail
@@ -103,7 +105,8 @@ class MiniMap(QWidget):
                 rw = vr.width() * self._scale_x
                 rh = vr.height() * self._scale_y
 
-                pen = QPen(QColor(255, 255, 0), 2)
+                _, vp_color = _theme.minimap_colors()
+                pen = QPen(vp_color, 2)
                 painter.setPen(pen)
                 painter.drawRect(QRectF(rx, ry, rw, rh))
 
@@ -125,3 +128,6 @@ class MiniMap(QWidget):
         scene_x = self._scene_rect.x() + (pos.x() - x_off) / self._scale_x
         scene_y = self._scene_rect.y() + (pos.y() - y_off) / self._scale_y
         self.pan_requested.emit(scene_x, scene_y)
+
+    def refresh_theme(self):
+        self.update()

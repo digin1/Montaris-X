@@ -5,7 +5,7 @@ from montaris.core.selection import SelectionModel
 
 class SelectTool(BaseTool):
     """Click to select ROIs. No drawing — just selection."""
-    name = "Select"
+    name = "Select ROI"
 
     def on_press(self, pos, layer, canvas):
         hit = SelectionModel.hit_test(

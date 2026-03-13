@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QFormLayout, QComboBox,
 )
 from PySide6.QtCore import Qt
+from montaris import theme as _theme
 
 
 class PropertiesPanel(QWidget):
@@ -19,20 +20,16 @@ class PropertiesPanel(QWidget):
         self.name_label = QLabel("-")
         form.addRow("Name:", self.name_label)
 
-        self.type_label = QLabel("-")
-        form.addRow("Type:", self.type_label)
-
-        self.size_label = QLabel("-")
-        form.addRow("Size:", self.size_label)
-
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(0, 255)
         self.opacity_slider.setValue(128)
+        self.opacity_slider.setStyleSheet(_theme.slider_style())
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         form.addRow("Opacity (Selected ROIs):", self.opacity_slider)
 
         self.fill_mode_combo = QComboBox()
-        self.fill_mode_combo.addItems(["Solid", "Outline", "Both"])
+        self.fill_mode_combo.addItems(["Solid", "Outline", "Solid + Outline"])
+        self.fill_mode_combo.setStyleSheet(_theme.combobox_style())
         self.fill_mode_combo.currentTextChanged.connect(self._on_fill_mode_changed)
         form.addRow("Fill:", self.fill_mode_combo)
 
@@ -46,21 +43,17 @@ class PropertiesPanel(QWidget):
         self._layer = layer
         if layer is None:
             self.name_label.setText("-")
-            self.type_label.setText("-")
-            self.size_label.setText("-")
             self.pixel_count_label.setText("-")
             return
 
         self.name_label.setText(layer.name)
 
         if getattr(layer, 'is_roi', False):
-            self.type_label.setText("ROI")
-            h, w = layer.shape
-            self.size_label.setText(f"{w} x {h}")
             self.opacity_slider.setValue(layer.opacity)
             fill_mode = getattr(layer, 'fill_mode', 'solid')
+            _display = {'solid': 'Solid', 'outline': 'Outline', 'both': 'Solid + Outline'}
             self.fill_mode_combo.blockSignals(True)
-            self.fill_mode_combo.setCurrentText(fill_mode.capitalize())
+            self.fill_mode_combo.setCurrentText(_display.get(fill_mode, 'Solid'))
             self.fill_mode_combo.blockSignals(False)
             self.fill_mode_combo.setEnabled(True)
             bbox = layer.get_bbox()
@@ -71,12 +64,6 @@ class PropertiesPanel(QWidget):
                 px = int(np.count_nonzero(layer.get_mask_crop((y1, y2, x1, x2))))
             self.pixel_count_label.setText(f"{px:,}")
         else:
-            self.type_label.setText("Image")
-            shape = layer.data.shape
-            if len(shape) == 2:
-                self.size_label.setText(f"{shape[1]} x {shape[0]}")
-            else:
-                self.size_label.setText(f"{shape[1]} x {shape[0]} x {shape[2]}ch")
             self.fill_mode_combo.setEnabled(False)
             self.pixel_count_label.setText("-")
 
@@ -87,5 +74,10 @@ class PropertiesPanel(QWidget):
 
     def _on_fill_mode_changed(self, text):
         if self._layer and hasattr(self._layer, 'fill_mode'):
-            self._layer.fill_mode = text.lower()
+            _internal = {'Solid': 'solid', 'Outline': 'outline', 'Solid + Outline': 'both'}
+            self._layer.fill_mode = _internal.get(text, 'solid')
             self.app.canvas.refresh_overlays()
+
+    def refresh_theme(self):
+        self.opacity_slider.setStyleSheet(_theme.slider_style())
+        self.fill_mode_combo.setStyleSheet(_theme.combobox_style())

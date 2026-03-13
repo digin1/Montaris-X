@@ -86,6 +86,27 @@ class TransformTool(BaseTool):
             return None
         return (y1_min, y2_max, x1_min, x2_max)
 
+    def on_activate(self, layer, canvas):
+        """Show transform handles immediately when tool is selected."""
+        if layer is None or not getattr(layer, 'is_roi', False):
+            return
+        self._canvas = canvas
+        self._target_layers = self._get_target_layers(layer, canvas)
+        bbox = self._compute_union_bbox(self._target_layers)
+        if bbox is None:
+            self._clear_handles(canvas)
+            return
+        # Always clear component state so we return to whole-ROI mode
+        self._component_mask = None
+        self._component_bbox = None
+        # Only rebuild handles if bbox changed
+        if bbox != self._bbox:
+            self._rotation = 0.0
+            self._session_snapshots.clear()
+            self._session_bboxes.clear()
+            self._cumulative_matrix = None
+            self._show_handles(bbox, canvas)
+
     def on_press(self, pos, layer, canvas):
         if getattr(self, '_applying', False):
             return
@@ -144,16 +165,8 @@ class TransformTool(BaseTool):
             self._create_previews(canvas)
             return
 
-        # First click: show handles — component-aware (D.14)
-        self._rotation = 0.0
-        self._session_snapshots.clear()
-        self._session_bboxes.clear()
-        self._cumulative_matrix = None
+        # Click on painted pixel: detect component for component-aware transform
         self._target_layers = self._get_target_layers(layer, canvas)
-        self._component_mask = None
-        self._component_bbox = None
-
-        # If single layer and clicking on painted pixel, detect component
         if (len(self._target_layers) == 1
                 and getattr(layer, 'is_roi', False)):
             ix, iy = int(pos.x()), int(pos.y())
@@ -162,13 +175,16 @@ class TransformTool(BaseTool):
                 layer_bbox = layer.get_bbox()
                 comp = get_component_at(layer.mask, ix, iy, bbox=layer_bbox)
                 if comp is not None:
-                    # Count pixels within the bbox crop to avoid full-mask scans
                     by1, by2, bx1, bx2 = layer_bbox
                     crop = layer.mask[by1:by2, bx1:bx2]
                     comp_crop = comp[by1:by2, bx1:bx2]
                     total = np.count_nonzero(crop)
                     comp_px = np.count_nonzero(comp_crop)
                     if comp_px < total:
+                        self._rotation = 0.0
+                        self._session_snapshots.clear()
+                        self._session_bboxes.clear()
+                        self._cumulative_matrix = None
                         self._component_mask = comp
                         cys, cxs = np.where(comp_crop)
                         bbox = (cys.min() + by1, cys.max() + 1 + by1,
@@ -177,10 +193,17 @@ class TransformTool(BaseTool):
                         self._show_handles(bbox, canvas)
                         return
 
-        bbox = self._compute_union_bbox(self._target_layers)
-        if bbox is None:
-            return
-        self._show_handles(bbox, canvas)
+        # Fallback: if no handles shown yet, show whole-ROI handles
+        if self._bbox is None:
+            bbox = self._compute_union_bbox(self._target_layers)
+            if bbox is not None:
+                self._component_mask = None
+                self._component_bbox = None
+                self._rotation = 0.0
+                self._session_snapshots.clear()
+                self._session_bboxes.clear()
+                self._cumulative_matrix = None
+                self._show_handles(bbox, canvas)
 
     def on_move(self, pos, layer, canvas):
         if getattr(self, '_applying', False):
@@ -458,18 +481,27 @@ class TransformTool(BaseTool):
                 work.append((lid, l, snap_data, sb, session_rle, session_bbox))
 
             # Parallel transform: decode, affine, undo diff, and compress
-            # all run inside workers.  The pool's own concurrency limit
-            # (worker_count threads) caps peak memory automatically.
+            # all run inside workers.  Submit in batches of pool_size to
+            # cap peak memory — only one batch of masks is decompressed
+            # at a time, with gc.collect() between batches.
             if len(work) > 3:
-                from montaris.core.workers import get_pool
+                from montaris.core.workers import get_pool, worker_count
                 pool = get_pool()
+                batch_size = worker_count()
+
+                # Submit first batch only
+                first_batch = work[:batch_size]
                 futures = [(lid, pool.submit(
                     _transform_one, lid, l, sd, sb, sr, sbx))
-                    for lid, l, sd, sb, sr, sbx in work]
+                    for lid, l, sd, sb, sr, sbx in first_batch]
 
                 # Capture state needed for finalization before returning
                 self._async_state = {
                     'futures': futures,
+                    'pending_work': work[batch_size:],
+                    'batch_size': batch_size,
+                    'pool': pool,
+                    'transform_fn': _transform_one,
                     'bbox_pairs': bbox_pairs,
                     'commands': commands,
                     'affected': affected,
@@ -481,6 +513,7 @@ class TransformTool(BaseTool):
                     'stale_preview_items': self._preview_items[:],
                     'stale_temp_items': self._temp_scene_items[:],
                     'hidden_layers': self._hidden_layers[:],
+                    'total_work': len(work),
                 }
                 # Reset interaction state immediately so no re-entrancy
                 self._active_handle = None
@@ -510,23 +543,20 @@ class TransformTool(BaseTool):
                                _release_t0, canvas)
 
     def _poll_transform(self):
-        """Timer callback: check if all futures are done, show progress."""
+        """Timer callback: check if current batch is done, submit next batch."""
         state = self._async_state
         futures = state['futures']
-        total = len(futures)
+        total = state['total_work']
         n_done = sum(1 for _, f in futures if f.done())
+        n_progress = state.get('n_completed', 0) + n_done
 
         state['canvas'].flash_progress(
-            f"Applying transform\u2026 {n_done}/{total}")
+            f"Applying transform\u2026 {n_progress}/{total}")
 
-        if n_done < total:
+        if n_done < len(futures):
             return
 
-        # All workers finished — collect results
-        self._poll_timer.stop()
-        self._poll_timer.deleteLater()
-        self._poll_timer = None
-
+        # Current batch finished — collect results
         bbox_pairs = state['bbox_pairs']
         commands = state['commands']
         for lid, fut in futures:
@@ -535,6 +565,27 @@ class TransformTool(BaseTool):
                 bbox_pairs[lid] = bb_pair
             if cmd is not None:
                 commands.append(cmd)
+        state['n_completed'] = state.get('n_completed', 0) + len(futures)
+
+        # Submit next batch if work remains
+        pending = state['pending_work']
+        if pending:
+            import gc
+            gc.collect()
+            batch_size = state['batch_size']
+            next_batch = pending[:batch_size]
+            state['pending_work'] = pending[batch_size:]
+            fn = state['transform_fn']
+            pool = state['pool']
+            state['futures'] = [(lid, pool.submit(
+                fn, lid, l, sd, sb, sr, sbx))
+                for lid, l, sd, sb, sr, sbx in next_batch]
+            return
+
+        # All batches finished — finalize
+        self._poll_timer.stop()
+        self._poll_timer.deleteLater()
+        self._poll_timer = None
 
         canvas = state['canvas']
         self._finalize_release(
@@ -617,6 +668,7 @@ class TransformTool(BaseTool):
         # Defer expensive visual rebuild to next frame (render + highlights)
         is_batch = isinstance(self, TransformAllTool)
         _tool_name = self.name  # capture for closure
+        _tool_ref = self  # capture for handle refresh after rebuild
 
         def _deferred_rebuild():
             _rb_t0 = time.perf_counter()
@@ -695,6 +747,22 @@ class TransformTool(BaseTool):
                 if rid in canvas._roi_items:
                     canvas._roi_items[rid].setVisible(True)
             canvas._update_selection_highlights()
+            # After rebuild, snap handles to the new axis-aligned bbox
+            # so they match the rasterized content (Photoshop-like behavior)
+            if _tool_ref._target_layers and canvas._tool is _tool_ref:
+                new_bbox = _tool_ref._compute_union_bbox(_tool_ref._target_layers)
+                if new_bbox is not None:
+                    _tool_ref._rotation = 0.0
+                    # If leaving component mode, clear session state too
+                    # so next whole-ROI transform doesn't reuse stale
+                    # component snapshots/cumulative matrix
+                    if _tool_ref._component_mask is not None:
+                        _tool_ref._session_snapshots.clear()
+                        _tool_ref._session_bboxes.clear()
+                        _tool_ref._cumulative_matrix = None
+                    _tool_ref._component_mask = None
+                    _tool_ref._component_bbox = None
+                    _tool_ref._show_handles(new_bbox, canvas)
             _rb_log.log("transform", "deferred_rebuild",
                         duration_ms=(time.perf_counter() - _rb_t0) * 1000,
                         tool=_tool_name, n_affected=len(affected))

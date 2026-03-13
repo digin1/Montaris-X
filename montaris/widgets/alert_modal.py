@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Qt
+from montaris import theme as _theme
 
 
 class AlertModal(QDialog):
@@ -7,11 +8,7 @@ class AlertModal(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(300)
-        self.setStyleSheet(
-            "QDialog { background: #2a2a2a; }"
-            " QLabel { color: #dcdcdc; font-size: 13px; }"
-            " QPushButton { min-width: 80px; padding: 6px 16px; }"
-        )
+        self.setStyleSheet(_theme.alert_modal_style())
         self._clicked = None
 
         layout = QVBoxLayout(self)

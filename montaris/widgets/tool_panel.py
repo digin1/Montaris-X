@@ -5,11 +5,36 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QTimer
 from montaris.tools import TOOL_REGISTRY, get_tool_class
 from montaris.tools.polygon import PolygonTool
+from montaris import theme as _theme
+from montaris.widgets import AnimatedButton
 
-# Tool icons: emojis matching the web app (threejsroieditor)
+try:
+    import qtawesome as qta
+    _HAS_QTA = True
+except ImportError:
+    _HAS_QTA = False
+
+# QtAwesome icon names for each tool
+_QTA_ICONS = {
+    'Hand': 'fa6s.hand',
+    'Select ROI': 'fa6s.arrow-pointer',
+    'Brush': 'fa6s.paintbrush',
+    'Eraser': 'fa6s.eraser',
+    'Polygon': 'fa6s.draw-polygon',
+    'Bucket Fill': 'fa6s.fill-drip',
+    'Rectangle': 'fa6s.vector-square',
+    'Circle': 'fa6.circle',
+    'Stamp': 'fa6s.stamp',
+    'Transform (selected)': 'fa6s.crop-simple',
+    'Move (selected)': 'fa6s.arrows-up-down-left-right',
+    'Transform All': 'fa6s.maximize',
+    'Move All': 'fa6s.expand',
+}
+
+# Emoji fallback when QtAwesome is not installed
 TOOL_ICONS = {
     'Hand': '🖐️',
-    'Select': '🖱️',
+    'Select ROI': '🖱️',
     'Brush': '🖌️',
     'Eraser': '🧹',
     'Polygon': '⬟',
@@ -22,6 +47,14 @@ TOOL_ICONS = {
     'Transform All': '⛭',
     'Move All': '⊞',
 }
+
+
+def _tool_icon(name):
+    """Return a QIcon for the tool, or None if unavailable."""
+    if _HAS_QTA and name in _QTA_ICONS:
+        color = '#dcdcdc' if _theme.is_dark() else '#333'
+        return qta.icon(_QTA_ICONS[name], color=color)
+    return None
 
 
 class ToolPanel(QWidget):
@@ -41,15 +74,18 @@ class ToolPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # Collapse button at top
-        collapse_btn = QPushButton("\u25c0")  # ◀
-        collapse_btn.setFixedHeight(22)
+        # Full-width clickable header bar — matches section style
+        if _HAS_QTA:
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            collapse_btn = QPushButton(qta.icon('fa6s.angles-left', color=color), " Toolbox")
+        else:
+            collapse_btn = QPushButton("\u25c0  Toolbox")
+        collapse_btn.setFixedHeight(26)
         collapse_btn.setToolTip("Collapse sidebar (Ctrl+[)")
-        collapse_btn.setStyleSheet(
-            "QPushButton { border: none; font-size: 12px; padding: 2px; }"
-        )
+        collapse_btn.setStyleSheet(_theme.collapse_btn_style())
+        self._collapse_btn = collapse_btn
         collapse_btn.clicked.connect(self.collapse_requested.emit)
-        layout.addWidget(collapse_btn, alignment=Qt.AlignLeft)
+        layout.addWidget(collapse_btn)
 
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(False)
@@ -59,11 +95,15 @@ class ToolPanel(QWidget):
         for name, (module, cls_name, shortcut, category) in TOOL_REGISTRY.items():
             categories.setdefault(category, []).append((name, shortcut))
 
+        _section_style = _theme.section_header_style()
+        self._section_labels = []
+        self._action_btns = []
+
         for category, tools in categories.items():
-            cat_label = QLabel(category)
-            cat_label.setStyleSheet(
-                "font-weight: bold; font-size: 11px; margin-top: 6px;"
-            )
+            cat_label = QLabel(f"  {category}")
+            cat_label.setFixedHeight(26)
+            cat_label.setStyleSheet(_section_style)
+            self._section_labels.append(cat_label)
             layout.addWidget(cat_label)
             # Lay out buttons in rows of 2
             for i in range(0, len(tools), 2):
@@ -102,6 +142,7 @@ class ToolPanel(QWidget):
         self.tolerance_slider = QSlider(Qt.Horizontal)
         self.tolerance_slider.setRange(0, 255)
         self.tolerance_slider.setValue(0)
+        self.tolerance_slider.setStyleSheet(_theme.slider_style())
         self.tolerance_slider.valueChanged.connect(self._on_tolerance_changed)
         self.tolerance_slider.setVisible(False)
         tol_layout.addWidget(self.tolerance_slider)
@@ -109,6 +150,7 @@ class ToolPanel(QWidget):
         self.tolerance_spin = QSpinBox()
         self.tolerance_spin.setRange(0, 255)
         self.tolerance_spin.setValue(0)
+        self.tolerance_spin.setStyleSheet(_theme.spinbox_style())
         self.tolerance_spin.valueChanged.connect(self.tolerance_slider.setValue)
         self.tolerance_slider.valueChanged.connect(self.tolerance_spin.setValue)
         self.tolerance_spin.setVisible(False)
@@ -162,29 +204,28 @@ class ToolPanel(QWidget):
         layout.addWidget(self.deselect_btn)
 
         # --- File upload buttons ---
-        layout.addSpacing(10)
-        file_label = QLabel("File")
-        file_label.setStyleSheet(
-            "font-weight: bold; font-size: 11px; margin-top: 6px;"
-        )
+        file_label = QLabel("  Quick Actions")
+        file_label.setFixedHeight(26)
+        file_label.setStyleSheet(_section_style)
+        self._section_labels.append(file_label)
         layout.addWidget(file_label)
 
-        montage_btn = QPushButton("🖼️  Load Image(s)")
+        montage_btn = self._action_btn('fa6s.image', "Load Image(s)")
         montage_btn.setToolTip("Open montage or image file(s)")
         montage_btn.clicked.connect(lambda: QTimer.singleShot(0, self.open_montage_requested.emit))
         layout.addWidget(montage_btn)
 
-        roi_zip_btn = QPushButton("📦  Import ROI ZIP")
+        roi_zip_btn = self._action_btn('fa6s.file-import', "Import ROI ZIP")
         roi_zip_btn.setToolTip("Import ROIs from a ZIP file")
         roi_zip_btn.clicked.connect(lambda: QTimer.singleShot(0, self.import_roi_zip_requested.emit))
         layout.addWidget(roi_zip_btn)
 
-        instr_btn = QPushButton("📝  Load Instructions")
+        instr_btn = self._action_btn('fa6s.file-lines', "Load Instructions")
         instr_btn.setToolTip("Load instructions file (.json/.txt)")
         instr_btn.clicked.connect(lambda: QTimer.singleShot(0, self.load_instructions_requested.emit))
         layout.addWidget(instr_btn)
 
-        view_instr_btn = QPushButton("👁️  View Instructions")
+        view_instr_btn = self._action_btn('fa6s.eye', "View Instructions")
         view_instr_btn.setToolTip("View loaded instructions")
         view_instr_btn.clicked.connect(lambda: QTimer.singleShot(0, self.view_instructions_requested.emit))
         layout.addWidget(view_instr_btn)
@@ -192,10 +233,11 @@ class ToolPanel(QWidget):
         # --- Separator + Export ---
         separator = QLabel()
         separator.setFixedHeight(2)
-        separator.setStyleSheet("background: #555; margin: 6px 0;")
+        separator.setStyleSheet(_theme.separator_style())
+        self._separator = separator
         layout.addWidget(separator)
 
-        export_zip_btn = QPushButton("📦  Export ROIs ZIP")
+        export_zip_btn = self._action_btn('fa6s.file-export', "Export ROIs ZIP")
         export_zip_btn.setToolTip("Export all ROIs as a ZIP file")
         export_zip_btn.clicked.connect(lambda: QTimer.singleShot(0, self.export_roi_zip_requested.emit))
         layout.addWidget(export_zip_btn)
@@ -214,12 +256,51 @@ class ToolPanel(QWidget):
         """Activate the default tool. Call after signal connections are set up."""
         self._select_tool('Hand')
 
+    def _action_btn(self, qta_name, text):
+        """Create an AnimatedButton with a QtAwesome icon (or plain text fallback)."""
+        if _HAS_QTA:
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            icon = qta.icon(qta_name, color=color)
+            btn = AnimatedButton(icon, f" {text}")
+        else:
+            btn = AnimatedButton(text)
+        btn.setStyleSheet(_theme.action_button_style())
+        self._action_btns.append(btn)
+        return btn
+
+    def refresh_theme(self):
+        """Re-apply theme-dependent styles after a theme switch."""
+        self._collapse_btn.setStyleSheet(_theme.collapse_btn_style())
+        ss = _theme.section_header_style()
+        for lbl in self._section_labels:
+            lbl.setStyleSheet(ss)
+        self._separator.setStyleSheet(_theme.separator_style())
+        ts = _theme.tool_button_style()
+        for btn in self._tool_buttons.values():
+            btn.setStyleSheet(ts)
+        for btn in self._action_btns:
+            btn.setStyleSheet(_theme.action_button_style())
+        self.tolerance_slider.setStyleSheet(_theme.slider_style())
+        self.tolerance_spin.setStyleSheet(_theme.spinbox_style())
+        # Refresh icon colors
+        if _HAS_QTA:
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            self._collapse_btn.setIcon(qta.icon('fa6s.angles-left', color=color))
+            for name, btn in self._tool_buttons.items():
+                if name in _QTA_ICONS:
+                    btn.setIcon(qta.icon(_QTA_ICONS[name], color=color))
+
     def _add_tool_button(self, text, shortcut):
-        icon = TOOL_ICONS.get(text, '')
-        btn = QPushButton(f"{icon}  {text}" if icon else text)
+        qicon = _tool_icon(text)
+        if qicon:
+            btn = AnimatedButton(qicon, f" {text}")
+        else:
+            emoji = TOOL_ICONS.get(text, '')
+            btn = AnimatedButton(f"{emoji}  {text}" if emoji else text)
         btn.setCheckable(True)
         btn.setShortcut(shortcut)
         btn.setToolTip(f"{text} [{shortcut}]")
+        btn.setStyleSheet(_theme.tool_button_style())
         self.tool_group.addButton(btn)
         btn.clicked.connect(lambda checked, t=text: self._select_tool(t))
         return btn
@@ -270,6 +351,8 @@ class ToolPanel(QWidget):
     def _on_size_changed(self, value):
         if self._current_tool and hasattr(self._current_tool, 'size'):
             self._current_tool.size = value
+        if hasattr(self.app, 'canvas'):
+            self.app.canvas.refresh_brush_cursor()
 
     def _on_tolerance_changed(self, value):
         if self._current_tool and hasattr(self._current_tool, 'tolerance'):

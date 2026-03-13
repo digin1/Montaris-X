@@ -3,6 +3,7 @@ import psutil
 import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PySide6.QtCore import QTimer
+from montaris import theme as _theme
 
 
 class PerfMonitor(QWidget):
@@ -13,27 +14,37 @@ class PerfMonitor(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
+        _lbl_ss = _theme.perf_label_style()
+
         self.fps_label = QLabel("FPS: -")
+        self.fps_label.setStyleSheet(_lbl_ss)
         layout.addWidget(self.fps_label)
 
         self.render_label = QLabel("Render: - ms")
+        self.render_label.setStyleSheet(_lbl_ss)
         layout.addWidget(self.render_label)
 
         self.memory_label = QLabel("Memory: - MB")
+        self.memory_label.setStyleSheet(_lbl_ss)
         layout.addWidget(self.memory_label)
 
         self.tile_cache_label = QLabel("Tile Cache: -")
+        self.tile_cache_label.setStyleSheet(_lbl_ss)
         layout.addWidget(self.tile_cache_label)
 
         from montaris.core.workers import worker_count
         cpu_count = os.cpu_count() or 1
         pool_size = worker_count()
         self.cpu_label = QLabel(f"CPU Cores: {cpu_count} (pool: {pool_size})")
+        self.cpu_label.setStyleSheet(_lbl_ss)
         layout.addWidget(self.cpu_label)
 
         self.accel_label = QLabel("Accel: off")
+        self.accel_label.setStyleSheet(_lbl_ss)
         layout.addWidget(self.accel_label)
 
+        self._labels = [self.fps_label, self.render_label, self.memory_label,
+                        self.tile_cache_label, self.cpu_label, self.accel_label]
         layout.addStretch()
 
         self._frame_times = []
@@ -127,3 +138,8 @@ class PerfMonitor(QWidget):
                 self.accel_label.setText("Accel: off")
         except ImportError:
             self.accel_label.setText("Accel: off")
+
+    def refresh_theme(self):
+        ss = _theme.perf_label_style()
+        for lbl in self._labels:
+            lbl.setStyleSheet(ss)

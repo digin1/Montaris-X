@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
 
-CLOSE_DISTANCE = 10  # pixels (screen space) to snap-close polygon
+CLOSE_DISTANCE = 14  # pixels (screen space) — matches close marker radius
 
 
 class PolygonTool(BaseTool):
@@ -24,8 +24,8 @@ class PolygonTool(BaseTool):
         self._canvas = canvas
         px, py = int(pos.x()), int(pos.y())
 
-        # If 4+ vertices and clicking near the start point, close the polygon
-        if len(self._vertices) >= 4:
+        # If 3+ vertices and clicking near the start marker, close the polygon
+        if len(self._vertices) >= 3:
             sx, sy = self._vertices[0]
             scale = canvas.transform().m11() or 1.0
             screen_dist = math.hypot(px - sx, py - sy) * scale

@@ -6,9 +6,49 @@ from PySide6.QtWidgets import (
     QMessageBox, QSlider, QCheckBox, QDialog, QGridLayout,
 )
 from PySide6.QtCore import Signal, Qt, QItemSelectionModel
-from PySide6.QtGui import QColor, QIcon, QPixmap, QAction, QPainter
+from PySide6.QtGui import QColor, QIcon, QPixmap, QAction, QPainter, QFont, QPen
 
 from montaris.layers import ROILayer, ROI_COLORS, generate_unique_roi_name
+from montaris import theme as _theme
+from montaris.widgets import AnimatedButton
+
+try:
+    import qtawesome as qta
+    _HAS_QTA = True
+except ImportError:
+    _HAS_QTA = False
+
+
+def _qta_btn(icon_name, text, fixed_width=None):
+    """Create an AnimatedButton with a QtAwesome icon, or plain text fallback."""
+    if _HAS_QTA:
+        color = '#dcdcdc' if _theme.is_dark() else '#333'
+        btn = AnimatedButton(qta.icon(icon_name, color=color), f" {text}" if text else "")
+    else:
+        btn = AnimatedButton(text)
+    if fixed_width:
+        btn.setFixedWidth(fixed_width)
+    return btn
+
+
+class PlaceholderListWidget(QListWidget):
+    """QListWidget that shows placeholder text when empty."""
+
+    def __init__(self, placeholder="", parent=None):
+        super().__init__(parent)
+        self._placeholder = placeholder
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.count() == 0 and self._placeholder:
+            p = QPainter(self.viewport())
+            p.setPen(QPen(QColor(130, 130, 130)))
+            f = QFont()
+            f.setPointSize(9)
+            f.setItalic(True)
+            p.setFont(f)
+            p.drawText(self.viewport().rect(), Qt.AlignCenter, self._placeholder)
+            p.end()
 
 
 # ---------------------------------------------------------------------------
@@ -115,14 +155,16 @@ class LayerPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
 
-        # Header with ROI count (G.22)
-        self.header = QLabel("Layers")
-        self.header.setStyleSheet("font-weight: bold; font-size: 13px;")
+        # Header with ROI count (G.22) — styled to match section headers
+        self.header = QLabel("  ROI Layers")
+        self.header.setFixedHeight(26)
+        self.header.setStyleSheet(_theme.section_header_style())
         layout.addWidget(self.header)
 
         # Toggle all visibility (B.14)
         self.show_all_cb = QCheckBox("Show All")
         self.show_all_cb.setChecked(True)
+        self.show_all_cb.setStyleSheet(_theme.checkbox_style())
         self.show_all_cb.toggled.connect(self._toggle_all_visibility)
         layout.addWidget(self.show_all_cb)
 
@@ -131,7 +173,8 @@ class LayerPanel(QWidget):
         self.nav_bar.roi_clicked.connect(self._on_nav_bar_clicked)
         layout.addWidget(self.nav_bar)
 
-        self.list_widget = QListWidget()
+        self.list_widget = PlaceholderListWidget("No ROIs — draw or import to begin")
+        self.list_widget.setStyleSheet(_theme.list_widget_style())
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
         self.list_widget.setDefaultDropAction(Qt.MoveAction)
@@ -143,61 +186,60 @@ class LayerPanel(QWidget):
         self.list_widget.model().rowsMoved.connect(self._on_rows_moved)
         layout.addWidget(self.list_widget)
 
-        # Button row 1
+        # ROI action buttons (single row — Rename/Color/Random are in right-click menu)
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(4)
 
-        self.add_btn = QPushButton("+")
-        self.add_btn.setFixedWidth(30)
+        _lb_style = _theme.layer_btn_style()
+        self.add_btn = _qta_btn('fa6s.plus', "", fixed_width=36)
         self.add_btn.setToolTip("Add ROI layer")
+        self.add_btn.setStyleSheet(_lb_style)
         self.add_btn.clicked.connect(lambda: self.roi_added.emit())
         btn_layout.addWidget(self.add_btn)
 
-        self.remove_btn = QPushButton("-")
-        self.remove_btn.setFixedWidth(30)
+        self.remove_btn = _qta_btn('fa6s.minus', "", fixed_width=36)
         self.remove_btn.setToolTip("Remove selected ROI")
+        self.remove_btn.setStyleSheet(_lb_style)
         self.remove_btn.clicked.connect(self._remove_selected)
         btn_layout.addWidget(self.remove_btn)
 
-        # Clear All (B.7)
-        self.clear_all_btn = QPushButton("Clear All")
-        self.clear_all_btn.setToolTip("Remove all ROIs")
-        self.clear_all_btn.clicked.connect(self._clear_all)
-        btn_layout.addWidget(self.clear_all_btn)
-
-        self.dup_btn = QPushButton("Dup")
+        self.dup_btn = _qta_btn('fa6s.clone', "Dup")
         self.dup_btn.setToolTip("Duplicate selected ROI")
+        self.dup_btn.setStyleSheet(_lb_style)
         self.dup_btn.clicked.connect(self._duplicate_selected)
         btn_layout.addWidget(self.dup_btn)
 
-        self.merge_btn = QPushButton("Merge")
+        self.merge_btn = _qta_btn('fa6s.object-group', "Merge")
         self.merge_btn.setToolTip("Merge selected ROIs")
+        self.merge_btn.setStyleSheet(_lb_style)
         self.merge_btn.clicked.connect(self._merge_selected)
         btn_layout.addWidget(self.merge_btn)
 
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        # Button row 2
-        btn_layout2 = QHBoxLayout()
-
-        self.rename_btn = QPushButton("Rename")
-        self.rename_btn.clicked.connect(self._rename_selected)
-        btn_layout2.addWidget(self.rename_btn)
-
-        self.color_btn = QPushButton("Color")
-        self.color_btn.clicked.connect(self._change_color)
-        btn_layout2.addWidget(self.color_btn)
-
-        # Random color (B.11)
-        self.random_color_btn = QPushButton("Random")
-        self.random_color_btn.setToolTip("Random color")
-        self.random_color_btn.clicked.connect(self._random_color)
-        btn_layout2.addWidget(self.random_color_btn)
-
-        btn_layout2.addStretch()
-        layout.addLayout(btn_layout2)
+        # Keep references for context menu (buttons removed from UI)
+        self.clear_all_btn = None
+        self.rename_btn = None
+        self.color_btn = None
+        self.random_color_btn = None
 
         # Global opacity slider removed — now in main toolbar only
+
+    def refresh_theme(self):
+        """Re-apply theme-dependent styles after a theme switch."""
+        self.header.setStyleSheet(_theme.section_header_style())
+        lb = _theme.layer_btn_style()
+        for btn in (self.add_btn, self.remove_btn, self.dup_btn, self.merge_btn):
+            btn.setStyleSheet(lb)
+        self.show_all_cb.setStyleSheet(_theme.checkbox_style())
+        self.list_widget.setStyleSheet(_theme.list_widget_style())
+        if _HAS_QTA:
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            self.add_btn.setIcon(qta.icon('fa6s.plus', color=color))
+            self.remove_btn.setIcon(qta.icon('fa6s.minus', color=color))
+            self.dup_btn.setIcon(qta.icon('fa6s.clone', color=color))
+            self.merge_btn.setIcon(qta.icon('fa6s.object-group', color=color))
 
     def refresh(self):
         self._updating = True
@@ -206,7 +248,7 @@ class LayerPanel(QWidget):
         roi_layers = self.layer_stack.roi_layers
 
         # Header with count (G.22)
-        self.header.setText(f"Layers ({len(roi_layers)} ROIs)")
+        self.header.setText(f"  ROI Layers ({len(roi_layers)})")
 
         if self.layer_stack.image_layer:
             item = QListWidgetItem(self.layer_stack.image_layer.name)
@@ -475,9 +517,27 @@ class LayerPanel(QWidget):
 
         menu.addSeparator()
 
+        rename_action = QAction("Rename...", self)
+        rename_action.triggered.connect(self._rename_selected)
+        menu.addAction(rename_action)
+
+        color_action = QAction("Change Color...", self)
+        color_action.triggered.connect(self._change_color)
+        menu.addAction(color_action)
+
+        random_action = QAction("Random Color", self)
+        random_action.triggered.connect(self._random_color)
+        menu.addAction(random_action)
+
+        menu.addSeparator()
+
         delete_action = QAction("Delete", self)
         delete_action.triggered.connect(self._remove_selected)
         menu.addAction(delete_action)
+
+        clear_action = QAction("Clear All ROIs", self)
+        clear_action.triggered.connect(self._clear_all)
+        menu.addAction(clear_action)
 
         menu.exec(self.list_widget.mapToGlobal(pos))
 
@@ -501,16 +561,18 @@ class LayerPanel(QWidget):
         if reply != QMessageBox.Yes:
             return
         # Batch remove without per-item signal/refresh
-        for idx in sorted(indices, reverse=True):
-            removed = self.layer_stack.get_roi(idx)
-            if removed:
-                if 0 <= idx < len(self.layer_stack.roi_layers):
-                    self.layer_stack.roi_layers.pop(idx)
-        self.layer_stack.changed.emit()
         app = self.window()
+        # Silent-clear selection and active layer before removing to avoid
+        # signal cascades accessing deleted layer references
         if hasattr(app, 'canvas'):
-            app.canvas._selection.clear()
-            app.canvas.set_active_layer(None)
+            app.canvas._active_layer = None
+            app.canvas._selection._layers.clear()
+        for idx in sorted(indices, reverse=True):
+            if 0 <= idx < len(self.layer_stack.roi_layers):
+                self.layer_stack.roi_layers.pop(idx)
+        # Now emit signals after state is consistent
+        self.layer_stack.changed.emit()
+        if hasattr(app, 'canvas'):
             app.canvas.refresh_overlays()
         self.refresh()
         if hasattr(app, 'properties_panel'):

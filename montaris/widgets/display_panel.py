@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal
 from montaris.core.display_modes import DisplayMode
+from montaris import theme as _theme
 
 
 class DisplayPanel(QWidget):
@@ -21,6 +22,7 @@ class DisplayPanel(QWidget):
         # Composite toggle
         self.composite_cb = QCheckBox("Composite View")
         self.composite_cb.setToolTip("Merge all channels using their tint colors")
+        self.composite_cb.setStyleSheet(_theme.checkbox_style())
         self.composite_cb.toggled.connect(self._on_composite_toggled)
         layout.addWidget(self.composite_cb)
 
@@ -28,6 +30,7 @@ class DisplayPanel(QWidget):
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
+        self.mode_combo.setStyleSheet(_theme.combobox_style())
         for mode in DisplayMode:
             self.mode_combo.addItem(mode.value.replace("_", " ").title(), mode)
         # Default to False Color (uses tint colors)
@@ -39,6 +42,7 @@ class DisplayPanel(QWidget):
 
         # Channel toggles
         self.channels_group = QGroupBox("Channels")
+        self.channels_group.setStyleSheet(_theme.groupbox_style())
         self.channels_layout = QVBoxLayout(self.channels_group)
         layout.addWidget(self.channels_group)
 
@@ -54,6 +58,7 @@ class DisplayPanel(QWidget):
         for i, name in enumerate(channel_names):
             cb = QCheckBox(name)
             cb.setChecked(active_indices is None or i in active_indices)
+            cb.setStyleSheet(_theme.checkbox_style())
             cb.stateChanged.connect(self._on_channel_toggled)
             self.channels_layout.addWidget(cb)
             self._channel_checkboxes.append(cb)
@@ -74,3 +79,10 @@ class DisplayPanel(QWidget):
 
     def get_mode(self):
         return self.mode_combo.currentData()
+
+    def refresh_theme(self):
+        self.composite_cb.setStyleSheet(_theme.checkbox_style())
+        self.mode_combo.setStyleSheet(_theme.combobox_style())
+        self.channels_group.setStyleSheet(_theme.groupbox_style())
+        for cb in self._channel_checkboxes:
+            cb.setStyleSheet(_theme.checkbox_style())

@@ -14,6 +14,11 @@ from montaris.layers import ROILayer, ImageLayer
 from montaris.tools.brush import BrushTool
 
 
+class _FakeTransform:
+    def m11(self):
+        return 1.0
+
+
 class FakeCanvas:
     """Minimal canvas stub for tool tests without GUI rendering."""
     def __init__(self):
@@ -27,6 +32,9 @@ class FakeCanvas:
 
     def _update_selection_highlights(self):
         pass
+
+    def transform(self):
+        return _FakeTransform()
 
     def scene(self):
         return self
