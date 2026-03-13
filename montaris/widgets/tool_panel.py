@@ -71,6 +71,7 @@ class ToolPanel(QWidget):
         self.app = app
         self._tool_buttons = {}
 
+        self.setMaximumWidth(220)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
@@ -265,6 +266,7 @@ class ToolPanel(QWidget):
         else:
             btn = AnimatedButton(text)
         btn.setStyleSheet(_theme.action_button_style())
+        btn._qta_name = qta_name  # store for theme refresh
         self._action_btns.append(btn)
         return btn
 
@@ -289,14 +291,28 @@ class ToolPanel(QWidget):
             for name, btn in self._tool_buttons.items():
                 if name in _QTA_ICONS:
                     btn.setIcon(qta.icon(_QTA_ICONS[name], color=color))
+            for btn in self._action_btns:
+                if hasattr(btn, '_qta_name'):
+                    btn.setIcon(qta.icon(btn._qta_name, color=color))
+
+    # Shorter labels for narrow sidebar
+    _SHORT_LABELS = {
+        'Transform (selected)': 'Transform',
+        'Move (selected)': 'Move',
+        'Transform All': 'Transform All',
+        'Move All': 'Move All',
+        'Bucket Fill': 'Fill',
+        'Select ROI': 'Select',
+    }
 
     def _add_tool_button(self, text, shortcut):
+        label = self._SHORT_LABELS.get(text, text)
         qicon = _tool_icon(text)
         if qicon:
-            btn = AnimatedButton(qicon, f" {text}")
+            btn = AnimatedButton(qicon, f" {label}")
         else:
             emoji = TOOL_ICONS.get(text, '')
-            btn = AnimatedButton(f"{emoji}  {text}" if emoji else text)
+            btn = AnimatedButton(f"{emoji}  {label}" if emoji else label)
         btn.setCheckable(True)
         btn.setShortcut(shortcut)
         btn.setToolTip(f"{text} [{shortcut}]")
