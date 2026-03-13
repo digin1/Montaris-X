@@ -321,6 +321,9 @@ export default function Home() {
                 src="img/demo.gif"
                 alt="Montaris-X interface showing ROI drawing on a scientific image"
                 className="sciencePanel__image"
+                loading="lazy"
+                width="800"
+                height="500"
               />
 
               <div className="scienceMetricGrid">

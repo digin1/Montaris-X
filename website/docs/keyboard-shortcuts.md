@@ -71,8 +71,8 @@ Complete reference of all keyboard shortcuts in Montaris-X.
 
 ## Navigation
 
-| Action              | Control               |
-|---------------------|-----------------------|
-| Zoom in/out         | Scroll wheel          |
-| Pan                 | Middle-click drag     |
-| Toggle ROI selection| `Ctrl+Click`          |
+| Shortcut              | Action              |
+|-----------------------|---------------------|
+| Scroll wheel          | Zoom in/out         |
+| Middle-click drag     | Pan                 |
+| `Ctrl+Click`          | Toggle ROI selection|
