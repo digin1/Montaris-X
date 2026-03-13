@@ -91,6 +91,17 @@
   display: block;
 }
 
+/* Center table cells in docs markdown tables */
+.markdown table th,
+.markdown table td {
+  text-align: center;
+}
+
+.markdown table th:first-child,
+.markdown table td:first-child {
+  text-align: left;
+}
+
 /* Comparison table */
 .comparisonTable {
   overflow-x: auto;
