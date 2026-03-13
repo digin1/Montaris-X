@@ -936,6 +936,23 @@ class MontarisApp(QMainWindow):
         self._save_progress_shortcut.setEnabled(False)
         self.addAction(self._save_progress_shortcut)
         tb_lay.addWidget(self._save_progress_btn, 0, Qt.AlignVCenter)
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
+
+        # -- Group 6: Screenshot --
+        _screenshot_ico = _qta_icon('fa6s.camera')
+        screenshot_btn = AnimatedButton(_screenshot_ico, " Screenshot") if _screenshot_ico else AnimatedButton("\U0001F4F7 Screenshot")
+        screenshot_btn.setToolTip("Save full app screenshot (Ctrl+Shift+P)")
+        screenshot_btn.setStyleSheet(_tb_btn_style)
+        screenshot_btn.clicked.connect(self._take_app_screenshot)
+        self._icon_registry.append((screenshot_btn, 'fa6s.camera'))
+        self._themed_tb_btns.append(screenshot_btn)
+        tb_lay.addWidget(screenshot_btn, 0, Qt.AlignVCenter)
+
+        _screenshot_shortcut = QAction(self)
+        _screenshot_shortcut.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        _screenshot_shortcut.triggered.connect(self._take_app_screenshot)
+        self.addAction(_screenshot_shortcut)
+
         tb_lay.addStretch(1)
 
         toolbar.addWidget(tb_widget)
@@ -2879,6 +2896,20 @@ class MontarisApp(QMainWindow):
         from montaris.widgets.help_modal import HelpModal
         dlg = HelpModal(self)
         dlg.exec()
+
+    def _take_app_screenshot(self):
+        """Save a full-window screenshot for demonstration purposes."""
+        from datetime import datetime
+        default_name = f"montaris_screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Screenshot", os.path.join(self._last_dir(), default_name),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;All Files (*)",
+        )
+        if not path:
+            return
+        pixmap = self.grab()
+        pixmap.save(path)
+        self.toast.show("Screenshot saved", "success")
 
     def _export_diagnostics(self):
         import json
