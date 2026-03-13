@@ -35,8 +35,8 @@ def app():
     """Single app + image + ROIs for the whole module."""
     global _qapp, _window, _original_masks
 
-    assert IMAGE_PATH.exists(), f"Missing: {IMAGE_PATH}"
-    assert ZIP_PATH.exists(), f"Missing: {ZIP_PATH}"
+    if not IMAGE_PATH.exists() or not ZIP_PATH.exists():
+        pytest.skip("test.tif and test.zip required for this test")
 
     _qapp = QApplication.instance() or QApplication(sys.argv)
     _qapp.setApplicationName("Montaris-X-Test")
