@@ -946,7 +946,7 @@ class ImageCanvas(QGraphicsView):
     def show_brush_preview(self, cx, cy, radius):
         if self._brush_preview is None:
             self._brush_preview = QGraphicsEllipseItem()
-            pen = QPen(QColor(255, 255, 255, 180), 1)
+            pen = QPen(QColor(255, 255, 255, 180), 5)
             pen.setCosmetic(True)
             self._brush_preview.setPen(pen)
             self._brush_preview.setBrush(QBrush(Qt.NoBrush))
@@ -955,9 +955,9 @@ class ImageCanvas(QGraphicsView):
         # Match brush preview to active ROI color (C.6)
         if self._active_layer and hasattr(self._active_layer, 'color'):
             r, g, b = self._active_layer.color
-            pen = QPen(QColor(r, g, b, 200), 1)
+            pen = QPen(QColor(r, g, b, 200), 5)
         else:
-            pen = QPen(QColor(255, 255, 255, 180), 1)
+            pen = QPen(QColor(255, 255, 255, 180), 5)
         pen.setCosmetic(True)
         self._brush_preview.setPen(pen)
         self._brush_preview.setRect(cx - radius, cy - radius,

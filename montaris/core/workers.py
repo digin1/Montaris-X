@@ -16,7 +16,7 @@ def get_pool():
     """Return the shared ThreadPoolExecutor, creating it lazily."""
     global _pool, _pool_size
     if _pool is None:
-        _pool_size = max(2, min(os.cpu_count() or 2, 8))
+        _pool_size = max(2, min(os.cpu_count() or 2, 16))
         _pool = ThreadPoolExecutor(max_workers=_pool_size)
     return _pool
 
