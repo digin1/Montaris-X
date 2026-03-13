@@ -2,15 +2,24 @@ import numpy as np
 
 
 def rle_encode(mask: np.ndarray) -> tuple[bytes, tuple[int, int]]:
-    """Encode uint8 mask to RLE bytes. Returns (data, shape)."""
+    """Encode uint8 mask to RLE bytes. Returns (data, shape).
+
+    Uses bool comparison instead of int16 diff to avoid allocating a
+    136 MB intermediate for large masks (e.g. 6020×11816).
+    """
     flat = mask.ravel()
     shape = mask.shape
     if len(flat) == 0:
         return b'', shape
-    diffs = np.diff(flat.astype(np.int16))
-    change_idx = np.flatnonzero(diffs)
-    starts = np.concatenate(([0], change_idx + 1))
-    lengths = np.diff(np.concatenate((starts, [len(flat)])))
+    # Compare adjacent elements directly (bool, 1 byte/elem) instead of
+    # np.diff on int16 (2 bytes/elem + intermediate allocation).
+    change_idx = np.flatnonzero(flat[1:] != flat[:-1])
+    starts = np.empty(len(change_idx) + 1, dtype=np.int64)
+    starts[0] = 0
+    starts[1:] = change_idx + 1
+    lengths = np.empty(len(starts), dtype=np.uint32)
+    lengths[:-1] = starts[1:] - starts[:-1]
+    lengths[-1] = len(flat) - starts[-1]
     values = flat[starts]
     # Pack as value:uint8, length:uint32 pairs
     pairs = np.empty(len(values), dtype=[('v', 'u1'), ('n', '<u4')])

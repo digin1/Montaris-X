@@ -17,12 +17,37 @@ class CompoundUndoCommand:
         return None
 
     def undo(self):
+        # Process in batches to limit peak memory while minimizing
+        # decompress→compress round-trips.  Each batch holds at most
+        # _BATCH decompressed masks (~68 MB each) before compressing.
+        _BATCH = 8
+        batch = []
         for cmd in reversed(self.commands):
             cmd.undo()
+            layer = getattr(cmd, 'roi_layer', None)
+            if layer is not None and hasattr(layer, 'compress'):
+                batch.append(layer)
+            if len(batch) >= _BATCH:
+                for l in batch:
+                    l.compress()
+                batch.clear()
+        for l in batch:
+            l.compress()
 
     def redo(self):
+        _BATCH = 8
+        batch = []
         for cmd in self.commands:
             cmd.redo()
+            layer = getattr(cmd, 'roi_layer', None)
+            if layer is not None and hasattr(layer, 'compress'):
+                batch.append(layer)
+            if len(batch) >= _BATCH:
+                for l in batch:
+                    l.compress()
+                batch.clear()
+        for l in batch:
+            l.compress()
 
     @property
     def byte_size(self):
@@ -37,6 +62,7 @@ class SnapshotUndoCommand:
         Args:
             layer_snapshots: list of (roi_layer, old_mask_copy) tuples
         """
+        from montaris.core.rle import rle_encode
         self._entries = []
         for layer, old_mask in layer_snapshots:
             diff = old_mask != layer.mask
@@ -47,25 +73,29 @@ class SnapshotUndoCommand:
             x1, x2 = int(xs.min()), int(xs.max()) + 1
             bbox = (y1, y2, x1, x2)
             self._entries.append((layer, bbox,
-                                  old_mask[y1:y2, x1:x2].copy(),
-                                  layer.mask[y1:y2, x1:x2].copy()))
+                                  rle_encode(old_mask[y1:y2, x1:x2].copy()),
+                                  rle_encode(layer.mask[y1:y2, x1:x2].copy())))
 
     @property
     def roi_layer(self):
         return self._entries[0][0] if self._entries else None
 
     def undo(self):
-        for layer, bbox, old_crop, _ in self._entries:
+        from montaris.core.rle import rle_decode
+        for layer, bbox, old_rle, _ in self._entries:
             y1, y2, x1, x2 = bbox
-            layer.mask[y1:y2, x1:x2] = old_crop
+            layer.mask[y1:y2, x1:x2] = rle_decode(*old_rle)
             layer.invalidate_bbox()
+            layer.compress()
 
     def redo(self):
-        for layer, bbox, _, new_crop in self._entries:
+        from montaris.core.rle import rle_decode
+        for layer, bbox, _, new_rle in self._entries:
             y1, y2, x1, x2 = bbox
-            layer.mask[y1:y2, x1:x2] = new_crop
+            layer.mask[y1:y2, x1:x2] = rle_decode(*new_rle)
             layer.invalidate_bbox()
+            layer.compress()
 
     @property
     def byte_size(self):
-        return sum(e[2].nbytes + e[3].nbytes for e in self._entries)
+        return sum(len(e[2][0]) + len(e[3][0]) for e in self._entries)

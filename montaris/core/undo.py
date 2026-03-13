@@ -2,22 +2,36 @@ class UndoCommand:
     def __init__(self, roi_layer, bbox, old_data, new_data):
         self.roi_layer = roi_layer
         self.bbox = bbox  # (y1, y2, x1, x2)
-        self.old_data = old_data.copy()
-        self.new_data = new_data.copy()
+        # RLE-compress binary mask crops for ~10x memory savings
+        from montaris.core.rle import rle_encode
+        old_copy = old_data.copy()
+        new_copy = new_data.copy()
+        self._old_rle = rle_encode(old_copy)
+        self._new_rle = rle_encode(new_copy)
+        # Cache raw size for byte_size reporting
+        self._raw_bytes = old_copy.nbytes + new_copy.nbytes
+
+    def _decode_old(self):
+        from montaris.core.rle import rle_decode
+        return rle_decode(*self._old_rle)
+
+    def _decode_new(self):
+        from montaris.core.rle import rle_decode
+        return rle_decode(*self._new_rle)
 
     def undo(self):
         y1, y2, x1, x2 = self.bbox
-        self.roi_layer.mask[y1:y2, x1:x2] = self.old_data
+        self.roi_layer.mask[y1:y2, x1:x2] = self._decode_old()
         self.roi_layer.invalidate_bbox()
 
     def redo(self):
         y1, y2, x1, x2 = self.bbox
-        self.roi_layer.mask[y1:y2, x1:x2] = self.new_data
+        self.roi_layer.mask[y1:y2, x1:x2] = self._decode_new()
         self.roi_layer.invalidate_bbox()
 
     @property
     def byte_size(self):
-        return self.old_data.nbytes + self.new_data.nbytes
+        return len(self._old_rle[0]) + len(self._new_rle[0])
 
 
 class OffsetUndoCommand:

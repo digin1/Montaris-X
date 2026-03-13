@@ -200,6 +200,7 @@ class MontarisApp(QMainWindow):
 
         self.toast = ToastManager(self)
         self._setup_toolbar()
+        self.setAcceptDrops(True)
 
         # Alternative redo shortcut (Ctrl+Shift+Z)
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self, self.redo)
@@ -215,6 +216,47 @@ class MontarisApp(QMainWindow):
 
         # Activate default tool after all setup (signals, statusbar, toolbar)
         self.tool_panel.activate_default_tool()
+
+    # -- Drag-and-drop support ------------------------------------------
+    _DROP_IMAGE_EXTS = {'.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp'}
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        image_paths = []
+        zip_paths = []
+        for url in urls:
+            path = url.toLocalFile()
+            if not path:
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            if ext in self._DROP_IMAGE_EXTS:
+                image_paths.append(path)
+            elif ext == '.zip':
+                zip_paths.append(path)
+
+        # Load images first so ROI import has a canvas to attach to
+        if image_paths:
+            self.open_image(image_paths)
+
+        for zp in zip_paths:
+            self.import_roi_zip(zp)
+
+        if not image_paths and not zip_paths:
+            self.toast.show("Unsupported file type", "warning")
+
+    # ------------------------------------------------------------------
 
     def _setup_canvas(self):
         self.canvas = ImageCanvas(self.layer_stack, self)
@@ -1219,13 +1261,16 @@ class MontarisApp(QMainWindow):
             if d:
                 self.settings.setValue("last_dir", d)
 
-    def open_image(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Image(s)", self._last_dir(),
-            "Image Files (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
-        )
-        if not paths:
-            return
+    def open_image(self, paths=None):
+        if not isinstance(paths, (list, tuple)):
+            paths = None
+        if paths is None:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "Open Image(s)", self._last_dir(),
+                "Image Files (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
+            )
+            if not paths:
+                return
         self._initial_session_saved = False
         self._session_dir = None
         self._update_last_dir(paths)
