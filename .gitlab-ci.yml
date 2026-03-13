@@ -1,5 +1,6 @@
 stages:
   - test
+  - deploy
 
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
@@ -21,3 +22,20 @@ test:
     paths:
       - .ci-venv/
       - .pip-cache/
+
+pages:
+  stage: deploy
+  image: node:20
+  script:
+    - cd website
+    - npm ci
+    - npm run build
+    - mv build ../public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - website/**/*
+        - .gitlab-ci.yml
