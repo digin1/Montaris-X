@@ -263,10 +263,8 @@ sudo apt install libegl1 libxkbcommon0 libdbus-1-3
 
 ## Code Signing
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+Code signing via [SignPath.io](https://signpath.io) (certificate by [SignPath Foundation](https://signpath.org)) has been applied for and is pending approval.
 
-- **Committers and reviewers**: [Repository contributors](https://github.com/digin1/Montaris-X/graphs/contributors)
-- **Approvers**: [Repository owner](https://github.com/digin1)
 - **Privacy policy**: This program does not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
 ---
