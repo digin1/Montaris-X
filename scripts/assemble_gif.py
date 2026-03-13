@@ -1,7 +1,15 @@
-"""Assemble individual PNG frames into an optimized demo GIF."""
+"""Assemble individual PNG frames into an optimized demo GIF.
+
+Run from the repository root:
+    python scripts/assemble_gif.py
+"""
 import os
 import glob
 from PIL import Image
+
+# Ensure working directory is the repo root so relative paths work
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+os.chdir(REPO_ROOT)
 
 FRAME_DIR = os.path.join("docs", "frames")
 OUTPUT = os.path.join("docs", "demo.gif")

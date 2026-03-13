@@ -1,10 +1,19 @@
-"""Generate an animated GIF showcasing Montaris-X with a natural user workflow."""
+"""Generate an animated GIF showcasing Montaris-X with a natural user workflow.
+
+Run from the repository root:
+    python scripts/generate_demo_gif.py
+"""
 import sys
 import os
 import glob as globmod
 import time
 import math
 import numpy as np
+
+# Ensure working directory is the repo root so relative paths work
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+os.chdir(REPO_ROOT)
+sys.path.insert(0, REPO_ROOT)
 
 os.environ["QT_QPA_PLATFORM"] = "windows"
 
