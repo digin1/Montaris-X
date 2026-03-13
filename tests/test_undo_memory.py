@@ -3,40 +3,41 @@ import numpy as np
 
 from montaris.core.undo import UndoCommand, UndoStack, _cmd_byte_size
 from montaris.core.multi_undo import CompoundUndoCommand, SnapshotUndoCommand
+from montaris.core.rle import rle_decode
 from montaris.layers import ROILayer
 
 
 class TestMemoryBudgetEviction:
     def test_memory_budget_eviction(self):
         """Large commands get evicted when memory budget is exceeded."""
-        stack = UndoStack(max_size=100, memory_budget=1024)  # 1 KB budget
+        # RLE-compressed uniform arrays are tiny (~5 bytes each),
+        # so use a very small budget to trigger eviction.
+        stack = UndoStack(max_size=100, memory_budget=15)
         layer = ROILayer("test", 100, 100)
 
-        # Each command stores 2 × (20×20) uint8 crops = 800 bytes
         for i in range(5):
             old = np.zeros((20, 20), dtype=np.uint8)
             new = np.ones((20, 20), dtype=np.uint8) * 255
             layer.mask[0:20, 0:20] = new
             stack.push(UndoCommand(layer, (0, 20, 0, 20), old, new))
 
-        # Budget is 1024 bytes. Each cmd is 800 bytes.
-        # After 5 pushes, stack should evict until within budget.
-        # 1 cmd = 800 <= 1024, 2 cmds = 1600 > 1024 → only 1 should remain
+        # Each RLE cmd is ~10 bytes (5 old + 5 new). Budget=15 → only 1 fits.
         assert len(stack._stack) == 1
-        assert stack._total_bytes <= 1024
+        assert stack._total_bytes <= 15
 
     def test_memory_budget_keeps_one(self):
         """Even if a single command exceeds budget, stack keeps at least 1."""
-        stack = UndoStack(max_size=100, memory_budget=100)  # tiny budget
+        stack = UndoStack(max_size=100, memory_budget=1)  # tiny budget
         layer = ROILayer("test", 100, 100)
 
-        # This command is 2 × (50×50) = 5000 bytes, far exceeds budget
         old = np.zeros((50, 50), dtype=np.uint8)
         new = np.ones((50, 50), dtype=np.uint8) * 255
         stack.push(UndoCommand(layer, (0, 50, 0, 50), old, new))
 
         assert len(stack._stack) == 1
-        assert stack._total_bytes == 5000
+        # RLE byte_size is much smaller than raw, but still > 0
+        assert stack._total_bytes > 0
+        assert stack._total_bytes == stack._stack[0].byte_size
 
     def test_total_bytes_tracking(self):
         """_total_bytes accurately tracks push/clear operations."""
@@ -45,7 +46,8 @@ class TestMemoryBudgetEviction:
 
         old = np.zeros((5, 5), dtype=np.uint8)
         new = np.ones((5, 5), dtype=np.uint8) * 255
-        cmd_size = old.nbytes + new.nbytes  # 50 bytes
+        cmd = UndoCommand(layer, (0, 5, 0, 5), old, new)
+        cmd_size = cmd.byte_size  # actual RLE-compressed size
 
         stack.push(UndoCommand(layer, (0, 5, 0, 5), old, new))
         assert stack._total_bytes == cmd_size
@@ -63,7 +65,8 @@ class TestMemoryBudgetEviction:
 
         old = np.zeros((5, 5), dtype=np.uint8)
         new = np.ones((5, 5), dtype=np.uint8) * 255
-        cmd_size = old.nbytes + new.nbytes
+        cmd = UndoCommand(layer, (0, 5, 0, 5), old, new)
+        cmd_size = cmd.byte_size
 
         stack.push(UndoCommand(layer, (0, 5, 0, 5), old, new))
         stack.push(UndoCommand(layer, (0, 5, 0, 5), old, new))
@@ -81,7 +84,10 @@ class TestByteSize:
         old = np.zeros((5, 5), dtype=np.uint8)
         new = np.ones((5, 5), dtype=np.uint8)
         cmd = UndoCommand(layer, (0, 5, 0, 5), old, new)
-        assert cmd.byte_size == 50  # 25 + 25
+        # RLE-compressed: uniform arrays compress to 5 bytes each (1 val + 4 len)
+        assert cmd.byte_size == 10  # 5 + 5
+        # Much smaller than raw: 25 + 25 = 50
+        assert cmd.byte_size < old.nbytes + new.nbytes
 
     def test_compound_byte_size(self):
         layer = ROILayer("test", 10, 10)
@@ -106,12 +112,16 @@ class TestSnapshotUndoCropBased:
         cmd = SnapshotUndoCommand([(layer, old_mask)])
 
         assert len(cmd._entries) == 1
-        _, bbox, old_crop, new_crop = cmd._entries[0]
+        _, bbox, old_rle, new_rle = cmd._entries[0]
         assert bbox == (40, 60, 40, 60)
-        assert old_crop.shape == (20, 20)
-        assert new_crop.shape == (20, 20)
-        # Much smaller than full 100×100 mask
-        assert cmd.byte_size == 20 * 20 * 2  # old + new crops
+        # RLE tuples are (bytes, shape)
+        assert old_rle[1] == (20, 20)
+        assert new_rle[1] == (20, 20)
+        # Verify decode produces correct shapes
+        assert rle_decode(*old_rle).shape == (20, 20)
+        assert rle_decode(*new_rle).shape == (20, 20)
+        # RLE size much smaller than raw 20×20×2
+        assert cmd.byte_size < 20 * 20 * 2
 
     def test_snapshot_undo_redo_correctness(self):
         """Crop-based SnapshotUndoCommand correctly restores on undo/redo."""

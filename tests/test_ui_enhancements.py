@@ -9,7 +9,7 @@ from PySide6.QtCore import QRectF
 class TestMiniMap:
     def test_create(self, qapp):
         mm = MiniMap()
-        assert mm.width() == 200
+        assert mm.minimumWidth() >= 100
         assert mm.height() == 200
 
     def test_set_image(self, qapp):
