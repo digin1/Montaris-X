@@ -1,17 +1,25 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 
+const siteUrl = 'https://digindominic.me';
+const baseUrl = '/Montaris-X/';
+const canonicalUrl = `${siteUrl}${baseUrl}`;
+const siteDescription =
+  'Montaris-X is a free, cross-platform desktop ROI editor for microscopy, histology, and fluorescence imaging. Draw, refine, and export annotations locally.';
+const socialImage = `${canonicalUrl}img/montaris-x-social-card.png`;
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Montaris-X',
-  tagline: 'The ROI Editor Built for Science',
+  titleDelimiter: '|',
+  tagline: 'Scientific ROI editor for microscopy, histology, and fluorescence imaging',
   favicon: 'img/logo.png',
 
   future: {
     v4: true,
   },
 
-  url: 'https://digindominic.me',
-  baseUrl: '/Montaris-X/',
+  url: siteUrl,
+  baseUrl,
 
   organizationName: 'digin1',
   projectName: 'Montaris-X',
@@ -37,17 +45,59 @@ const config = {
       attributes: {type: 'application/ld+json'},
       innerHTML: JSON.stringify({
         '@context': 'https://schema.org',
-        '@type': 'SoftwareApplication',
-        name: 'Montaris-X',
-        applicationCategory: 'ScienceApplication',
-        operatingSystem: 'Windows, macOS, Linux',
-        offers: {price: '0', priceCurrency: 'USD'},
-        description:
-          'Cross-platform ROI editor for scientific microscopy images. Purpose-built for brain delineation, histology annotation, and fluorescence microscopy.',
-        url: 'https://digindominic.me/Montaris-X/',
-        downloadUrl: 'https://pypi.org/project/montaris-x/',
-        softwareVersion: '2.0.0',
-        license: 'https://opensource.org/licenses/MIT',
+        '@graph': [
+          {
+            '@type': 'WebSite',
+            '@id': `${canonicalUrl}#website`,
+            url: canonicalUrl,
+            name: 'Montaris-X',
+            description: siteDescription,
+            inLanguage: 'en',
+            publisher: {'@id': `${canonicalUrl}#organization`},
+          },
+          {
+            '@type': 'Organization',
+            '@id': `${canonicalUrl}#organization`,
+            name: 'Montaris-X Contributors',
+            url: canonicalUrl,
+            logo: {
+              '@type': 'ImageObject',
+              url: `${canonicalUrl}img/logo.png`,
+            },
+            sameAs: [
+              'https://github.com/digin1/Montaris-X',
+              'https://pypi.org/project/montaris-x/',
+            ],
+          },
+          {
+            '@type': 'SoftwareApplication',
+            '@id': `${canonicalUrl}#software`,
+            name: 'Montaris-X',
+            applicationCategory: 'ScienceApplication',
+            operatingSystem: 'Windows, macOS, Linux',
+            description: siteDescription,
+            url: canonicalUrl,
+            downloadUrl: 'https://pypi.org/project/montaris-x/',
+            softwareHelp: `${canonicalUrl}docs/getting-started/installation`,
+            screenshot: `${canonicalUrl}img/demo.gif`,
+            softwareVersion: '2.0.0',
+            license: 'https://opensource.org/licenses/MIT',
+            isAccessibleForFree: true,
+            offers: {
+              '@type': 'Offer',
+              price: '0',
+              priceCurrency: 'USD',
+            },
+            featureList: [
+              'ROI editing for microscopy and histology images',
+              'ImageJ .roi and ZIP import/export',
+              'Multi-channel image viewing',
+              'Component-aware ROI transforms',
+              'Offline desktop workflow',
+            ],
+            publisher: {'@id': `${canonicalUrl}#organization`},
+          },
+        ],
       }),
     },
   ],
@@ -77,23 +127,46 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
-      image: 'img/demo.gif',
+      image: 'img/montaris-x-social-card.png',
       metadata: [
         {
           name: 'keywords',
           content:
-            'roi editor, region of interest, brain delineation, neuroscience annotation, microscopy roi, imagej alternative, qupath alternative, napari alternative, scientific image annotation, histology annotation, fluorescence microscopy',
+            'scientific ROI editor, microscopy annotation software, histology ROI tool, fluorescence image annotation, imagej alternative, qupath alternative, napari alternative, scientific image annotation, brain delineation software',
         },
         {
           name: 'description',
-          content:
-            'Montaris-X is a free, cross-platform ROI editor for scientific microscopy images. Purpose-built for brain delineation, histology, and fluorescence imaging.',
+          content: siteDescription,
         },
+        {name: 'author', content: 'Montaris-X Contributors'},
+        {name: 'robots', content: 'index,follow,max-image-preview:large'},
+        {name: 'theme-color', content: '#0f7282'},
         {property: 'og:type', content: 'website'},
+        {property: 'og:site_name', content: 'Montaris-X'},
+        {
+          property: 'og:title',
+          content:
+            'Montaris-X | Scientific ROI Editor for Microscopy, Histology, and Fluorescence Imaging',
+        },
+        {property: 'og:description', content: siteDescription},
+        {property: 'og:image', content: socialImage},
+        {
+          property: 'og:image:alt',
+          content: 'Montaris-X scientific ROI editor social card',
+        },
+        {property: 'og:locale', content: 'en_US'},
         {name: 'twitter:card', content: 'summary_large_image'},
+        {
+          name: 'twitter:title',
+          content:
+            'Montaris-X | Scientific ROI Editor for Microscopy, Histology, and Fluorescence Imaging',
+        },
+        {name: 'twitter:description', content: siteDescription},
+        {name: 'twitter:image', content: socialImage},
       ],
       navbar: {
         title: 'Montaris-X',
+        hideOnScroll: true,
         logo: {
           alt: 'Montaris-X Logo',
           src: 'img/logo.png',
@@ -166,8 +239,8 @@ const config = {
         darkTheme: prismThemes.dracula,
       },
       colorMode: {
-        defaultMode: 'dark',
-        respectPrefersColorScheme: true,
+        defaultMode: 'light',
+        respectPrefersColorScheme: false,
       },
     }),
 };

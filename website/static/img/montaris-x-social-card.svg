@@ -1,0 +1,158 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1200"
+  height="630"
+  viewBox="0 0 1200 630"
+  fill="none"
+  role="img"
+  aria-labelledby="title desc">
+  <title id="title">Montaris-X social card</title>
+  <desc id="desc">
+    Scientific ROI editor for microscopy, histology, and fluorescence imaging.
+  </desc>
+  <defs>
+    <linearGradient id="bg" x1="84" y1="48" x2="1130" y2="594" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#071A2D" />
+      <stop offset="0.54" stop-color="#0F7282" />
+      <stop offset="1" stop-color="#1897A9" />
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(962 132) rotate(90) scale(242 294)">
+      <stop stop-color="#7FF0F3" stop-opacity="0.32" />
+      <stop offset="1" stop-color="#7FF0F3" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(184 540) rotate(90) scale(236 296)">
+      <stop stop-color="#B6E7FF" stop-opacity="0.18" />
+      <stop offset="1" stop-color="#B6E7FF" stop-opacity="0" />
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" stroke="white" stroke-opacity="0.12" />
+    </pattern>
+    <linearGradient id="panel" x1="786" y1="136" x2="1100" y2="394" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#10253C" />
+      <stop offset="1" stop-color="#0A1727" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" rx="36" fill="url(#bg)" />
+  <rect width="1200" height="630" rx="36" fill="url(#grid)" />
+  <circle cx="962" cy="132" r="242" fill="url(#glowA)" />
+  <circle cx="184" cy="540" r="236" fill="url(#glowB)" />
+
+  <g opacity="0.92">
+    <rect x="90" y="92" width="180" height="46" rx="23" fill="white" fill-opacity="0.12" />
+    <text
+      x="114"
+      y="122"
+      fill="#D5F8FA"
+      font-family="IBM Plex Sans, Aptos, Arial, sans-serif"
+      font-size="18"
+      font-weight="700"
+      letter-spacing="2.6">
+      ROI EDITOR
+    </text>
+  </g>
+
+  <text
+    x="90"
+    y="220"
+    fill="#F8FCFF"
+    font-family="Avenir Next, IBM Plex Sans, Arial, sans-serif"
+    font-size="76"
+    font-weight="700">
+    Montaris-X
+  </text>
+  <text
+    x="90"
+    y="304"
+    fill="#D6E8F4"
+    font-family="IBM Plex Sans, Aptos, Arial, sans-serif"
+    font-size="34"
+    font-weight="500">
+    Precision ROI editing for microscopy, histology,
+  </text>
+  <text
+    x="90"
+    y="350"
+    fill="#D6E8F4"
+    font-family="IBM Plex Sans, Aptos, Arial, sans-serif"
+    font-size="34"
+    font-weight="500">
+    and fluorescence imaging.
+  </text>
+
+  <g transform="translate(90 426)">
+    <rect width="154" height="48" rx="24" fill="white" fill-opacity="0.12" />
+    <text
+      x="28"
+      y="31"
+      fill="white"
+      font-family="IBM Plex Sans, Aptos, Arial, sans-serif"
+      font-size="21"
+      font-weight="700">
+      Local-first
+    </text>
+  </g>
+  <g transform="translate(262 426)">
+    <rect width="228" height="48" rx="24" fill="white" fill-opacity="0.12" />
+    <text
+      x="28"
+      y="31"
+      fill="white"
+      font-family="IBM Plex Sans, Aptos, Arial, sans-serif"
+      font-size="21"
+      font-weight="700">
+      ImageJ compatible
+    </text>
+  </g>
+  <g transform="translate(510 426)">
+    <rect width="236" height="48" rx="24" fill="white" fill-opacity="0.12" />
+    <text
+      x="28"
+      y="31"
+      fill="white"
+      font-family="IBM Plex Sans, Aptos, Arial, sans-serif"
+      font-size="21"
+      font-weight="700">
+      Multi-channel ready
+    </text>
+  </g>
+
+  <g transform="translate(752 116)">
+    <rect x="0" y="0" width="364" height="308" rx="30" fill="#FFFFFF" fill-opacity="0.08" />
+    <rect x="18" y="18" width="328" height="272" rx="24" fill="url(#panel)" />
+    <rect x="36" y="42" width="292" height="180" rx="18" fill="#10233B" />
+    <rect x="52" y="58" width="260" height="148" rx="14" fill="#09131F" />
+    <path
+      d="M92 159C111 129 138 111 168 111C203 111 222 137 248 137C270 137 285 126 296 111"
+      stroke="#5EEAD4"
+      stroke-width="10"
+      stroke-linecap="round" />
+    <path
+      d="M106 176L138 144L175 168L224 130L272 154"
+      stroke="#F8C55D"
+      stroke-width="9"
+      stroke-linecap="round"
+      stroke-linejoin="round" />
+    <path
+      d="M139 95C156 80 188 78 206 91L234 112C246 121 262 122 276 116L304 103"
+      stroke="#90B7FF"
+      stroke-width="8"
+      stroke-linecap="round"
+      stroke-linejoin="round" />
+    <circle cx="286" cy="150" r="18" fill="none" stroke="#E7EEF7" stroke-width="6" />
+    <rect x="52" y="238" width="118" height="26" rx="13" fill="#163B5A" />
+    <rect x="180" y="238" width="132" height="26" rx="13" fill="#114F60" />
+    <rect x="52" y="276" width="90" height="8" rx="4" fill="#2F4E72" />
+    <rect x="52" y="292" width="136" height="8" rx="4" fill="#2F4E72" />
+    <rect x="208" y="276" width="104" height="8" rx="4" fill="#285A66" />
+    <rect x="208" y="292" width="76" height="8" rx="4" fill="#285A66" />
+  </g>
+
+  <g opacity="0.72">
+    <path d="M742 506H1118" stroke="white" stroke-opacity="0.16" stroke-width="2" />
+    <path d="M742 540H1118" stroke="white" stroke-opacity="0.16" stroke-width="2" />
+    <path d="M742 574H960" stroke="white" stroke-opacity="0.16" stroke-width="2" />
+  </g>
+</svg>
