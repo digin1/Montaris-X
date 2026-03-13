@@ -166,6 +166,7 @@ def _save_session_from_snapshots(session_dir, snapshots, meta):
 class MontarisApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._icon_registry = []  # (widget, icon_name) for theme refresh
         self.setWindowTitle("Montaris-X")
         screen = QApplication.primaryScreen()
         if screen:
@@ -335,7 +336,7 @@ class MontarisApp(QMainWindow):
 
         combined_dock = QDockWidget("Details", self)
         combined_dock.setObjectName("DetailsDock")
-        combined_dock.setTitleBarWidget(_section_title("Details"))
+        combined_dock.setTitleBarWidget(QWidget())  # hide dock title — sections have own headers
         combined_dock.setWidget(right_combined)
         self.addDockWidget(Qt.RightDockWidgetArea, combined_dock)
         self._details_dock = combined_dock
@@ -428,6 +429,23 @@ class MontarisApp(QMainWindow):
         expand_right_act.setToolTip("Expand Layers & Properties (Ctrl+])")
         expand_right_act.triggered.connect(self._toggle_right_sidebar)
         self._right_toolbar.addAction(expand_right_act)
+        self._icon_registry.append((expand_right_act, 'fa6s.angles-left'))
+
+        self._right_toolbar.addSeparator()
+
+        # Quick-access actions for collapsed right sidebar (icon-only)
+        _rt_actions = [
+            ('fa6s.plus',        "Add ROI",             lambda: self.add_roi_layer()),
+            ('fa6s.trash-can',   "Delete Active ROI",   lambda: self.clear_active_roi()),
+            ('fa6s.eye',         "Toggle Visibility",   lambda: self._toggle_active_visibility()),
+            ('fa6s.layer-group', "Layers",              lambda: self._expand_right_to_layers()),
+            ('fa6s.sliders',     "ROI Properties",      lambda: self._expand_right_to_details()),
+        ]
+        for icon_name, tooltip, callback in _rt_actions:
+            act = self._icon_act(icon_name, "")
+            act.setToolTip(tooltip)
+            act.triggered.connect(callback)
+            self._right_toolbar.addAction(act)
 
         # Full-width clickable header bar for right sidebar
         _collapse_right_ico = _qta_icon('fa6s.angles-right')
@@ -460,30 +478,39 @@ class MontarisApp(QMainWindow):
         self.layer_panel.roi_removed.connect(self._on_roi_removed)
         self.layer_panel.all_cleared.connect(self._on_all_cleared)
 
+    def _icon_act(self, icon_name, text, parent=None):
+        """Create a QAction with a themed icon and register it for refresh."""
+        _ico = _qta_icon(icon_name)
+        act = QAction(text, parent or self) if not _ico else QAction(_ico, text, parent or self)
+        self._icon_registry.append((act, icon_name))
+        return act
+
     def _setup_menus(self):
         menubar = self.menuBar()
+        # Track (widget, icon_name) for theme-aware icon refresh.
+        self._icon_registry = []
 
         # File
         file_menu = menubar.addMenu("&File")
 
-        open_act = QAction("&Open Image(s)...", self)
+        open_act = self._icon_act('fa6s.folder-open', "&Open Image(s)...")
         open_act.setShortcut(QKeySequence.Open)
         open_act.triggered.connect(self.open_image)
         file_menu.addAction(open_act)
 
-        close_img_act = QAction("&Close Image(s)", self)
+        close_img_act = self._icon_act('fa6s.xmark', "&Close Image(s)")
         close_img_act.setShortcut(QKeySequence("Ctrl+W"))
         close_img_act.triggered.connect(self.close_image)
         file_menu.addAction(close_img_act)
 
         file_menu.addSeparator()
 
-        load_roi_act = QAction("Load &ROI Set (.npz)...", self)
+        load_roi_act = self._icon_act('fa6s.box-open', "Load &ROI Set (.npz)...")
         load_roi_act.setShortcut(QKeySequence("Ctrl+Shift+O"))
         load_roi_act.triggered.connect(self.load_rois)
         file_menu.addAction(load_roi_act)
 
-        save_roi_act = QAction("&Save ROI Set (.npz)...", self)
+        save_roi_act = self._icon_act('fa6s.floppy-disk', "&Save ROI Set (.npz)...")
         save_roi_act.setShortcut(QKeySequence.Save)
         save_roi_act.triggered.connect(self.save_rois)
         file_menu.addAction(save_roi_act)
@@ -492,65 +519,73 @@ class MontarisApp(QMainWindow):
 
         # Import submenu
         import_menu = file_menu.addMenu("Import")
+        _ico = _qta_icon('fa6s.file-import')
+        if _ico:
+            import_menu.setIcon(_ico)
+        self._icon_registry.append((import_menu, 'fa6s.file-import'))
 
-        import_ij_act = QAction("ROI from .roi File(s)...", self)
+        import_ij_act = self._icon_act('fa6s.file', "ROI from .roi File(s)...")
         import_ij_act.triggered.connect(self.import_imagej_roi)
         import_menu.addAction(import_ij_act)
 
-        import_png_act = QAction("ROI from PNG Mask(s)...", self)
+        import_png_act = self._icon_act('fa6s.file-image', "ROI from PNG Mask(s)...")
         import_png_act.triggered.connect(self.import_png_masks)
         import_menu.addAction(import_png_act)
 
-        import_zip_act = QAction("ROI from ZIP (.roi + .png)...", self)
+        import_zip_act = self._icon_act('fa6s.file-zipper', "ROI from ZIP (.roi + .png)...")
         import_zip_act.triggered.connect(self.import_roi_zip)
         import_menu.addAction(import_zip_act)
 
         # Export submenu
         export_menu = file_menu.addMenu("Export")
+        _ico = _qta_icon('fa6s.file-export')
+        if _ico:
+            export_menu.setIcon(_ico)
+        self._icon_registry.append((export_menu, 'fa6s.file-export'))
 
-        export_ij_single_act = QAction("Active ROI as .roi...", self)
+        export_ij_single_act = self._icon_act('fa6s.file-arrow-down', "Active ROI as .roi...")
         export_ij_single_act.triggered.connect(self.export_active_imagej_roi)
         export_menu.addAction(export_ij_single_act)
 
-        export_ij_act = QAction("All ROIs as .roi Files...", self)
+        export_ij_act = self._icon_act('fa6s.copy', "All ROIs as .roi Files...")
         export_ij_act.triggered.connect(self.export_imagej_rois)
         export_menu.addAction(export_ij_act)
 
-        export_act = QAction("All ROIs as PNG Mask(s)...", self)
+        export_act = self._icon_act('fa6s.image', "All ROIs as PNG Mask(s)...")
         export_act.setShortcut(QKeySequence("Ctrl+E"))
         export_act.triggered.connect(self.export_roi_png)
         export_menu.addAction(export_act)
 
         export_menu.addSeparator()
 
-        export_zip_act = QAction("All ROIs as ZIP (.roi)...", self)
+        export_zip_act = self._icon_act('fa6s.file-zipper', "All ROIs as ZIP (.roi)...")
         export_zip_act.triggered.connect(self.export_all_rois_zip)
         export_menu.addAction(export_zip_act)
 
-        batch_export_act = QAction("Batch Export (choose format)...", self)
+        batch_export_act = self._icon_act('fa6s.boxes-stacked', "Batch Export (choose format)...")
         batch_export_act.triggered.connect(self.batch_export_rois)
         export_menu.addAction(batch_export_act)
 
         file_menu.addSeparator()
 
         # Load instructions
-        load_instr_act = QAction("Load Instructions...", self)
+        load_instr_act = self._icon_act('fa6s.list-check', "Load Instructions...")
         load_instr_act.triggered.connect(self.load_instructions_file)
         file_menu.addAction(load_instr_act)
 
-        view_instr_act = QAction("View Instructions...", self)
+        view_instr_act = self._icon_act('fa6s.eye', "View Instructions...")
         view_instr_act.triggered.connect(self._view_instructions)
         file_menu.addAction(view_instr_act)
 
         file_menu.addSeparator()
 
-        restore_session_act = QAction("Restore from Session...", self)
+        restore_session_act = self._icon_act('fa6s.clock-rotate-left', "Restore from Session...")
         restore_session_act.triggered.connect(self.restore_from_session)
         file_menu.addAction(restore_session_act)
 
         file_menu.addSeparator()
 
-        quit_act = QAction("&Quit", self)
+        quit_act = self._icon_act('fa6s.right-from-bracket', "&Quit")
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
@@ -558,45 +593,45 @@ class MontarisApp(QMainWindow):
         # Edit
         edit_menu = menubar.addMenu("&Edit")
 
-        undo_act = QAction("&Undo", self)
+        undo_act = self._icon_act('fa6s.rotate-left', "&Undo")
         undo_act.setShortcut(QKeySequence.Undo)
         undo_act.triggered.connect(self.undo)
         edit_menu.addAction(undo_act)
 
-        redo_act = QAction("&Redo", self)
+        redo_act = self._icon_act('fa6s.rotate-right', "&Redo")
         redo_act.setShortcut(QKeySequence.Redo)
         redo_act.triggered.connect(self.redo)
         edit_menu.addAction(redo_act)
 
         # Per-ROI undo (Phase 4E)
-        layer_undo_act = QAction("Layer &Undo", self)
+        layer_undo_act = self._icon_act('fa6s.layer-group', "Layer &Undo")
         layer_undo_act.setShortcut(QKeySequence("Ctrl+Alt+Z"))
         layer_undo_act.triggered.connect(self.layer_undo)
         edit_menu.addAction(layer_undo_act)
 
-        layer_redo_act = QAction("Layer R&edo", self)
+        layer_redo_act = self._icon_act('fa6s.layer-group', "Layer R&edo")
         layer_redo_act.setShortcut(QKeySequence("Ctrl+Alt+Y"))
         layer_redo_act.triggered.connect(self.layer_redo)
         edit_menu.addAction(layer_redo_act)
 
         edit_menu.addSeparator()
 
-        clear_act = QAction("&Delete Active ROI", self)
+        clear_act = self._icon_act('fa6s.trash-can', "&Delete Active ROI")
         clear_act.setShortcut(QKeySequence.Delete)
         clear_act.triggered.connect(self.clear_active_roi)
         edit_menu.addAction(clear_act)
 
         # Fix overlaps (Phase 4D)
         edit_menu.addSeparator()
-        fix_overlaps_act = QAction("Fix &Overlaps (Later Wins)", self)
+        fix_overlaps_act = self._icon_act('fa6s.object-ungroup', "Fix &Overlaps (Later Wins)")
         fix_overlaps_act.triggered.connect(lambda: self.fix_overlaps("later_wins"))
         edit_menu.addAction(fix_overlaps_act)
 
-        fix_overlaps_early_act = QAction("Fix Overlaps (&Earlier Wins)", self)
+        fix_overlaps_early_act = self._icon_act('fa6s.object-ungroup', "Fix Overlaps (&Earlier Wins)")
         fix_overlaps_early_act.triggered.connect(lambda: self.fix_overlaps("earlier_wins"))
         edit_menu.addAction(fix_overlaps_early_act)
 
-        self._auto_overlap_act = QAction("Auto Overlap Fix", self)
+        self._auto_overlap_act = self._icon_act('fa6s.wand-magic-sparkles', "Auto Overlap Fix")
         self._auto_overlap_act.setCheckable(True)
         self._auto_overlap_act.setChecked(False)
         self._auto_overlap_act.toggled.connect(self._toggle_auto_overlap)
@@ -604,35 +639,35 @@ class MontarisApp(QMainWindow):
 
         edit_menu.addSeparator()
 
-        select_all_act = QAction("Select &All ROIs", self)
+        select_all_act = self._icon_act('fa6s.object-group', "Select &All ROIs")
         select_all_act.setShortcut(QKeySequence("Ctrl+A"))
         select_all_act.triggered.connect(self._select_all_rois)
         edit_menu.addAction(select_all_act)
 
         edit_menu.addSeparator()
-        auto_fit_act = QAction("Auto-&Fit OOB ROIs", self)
+        auto_fit_act = self._icon_act('fa6s.up-down-left-right', "Auto-&Fit OOB ROIs")
         auto_fit_act.triggered.connect(self._auto_fit_rois)
         edit_menu.addAction(auto_fit_act)
 
         # View
         view_menu = menubar.addMenu("&View")
 
-        fit_act = QAction("&Fit to Window", self)
+        fit_act = self._icon_act('fa6s.expand', "&Fit to Window")
         fit_act.setShortcut(QKeySequence("Ctrl+0"))
         fit_act.triggered.connect(self.canvas.fit_to_window)
         view_menu.addAction(fit_act)
 
-        reset_act = QAction("&Reset Zoom (1:1)", self)
+        reset_act = self._icon_act('fa6s.magnifying-glass', "&Reset Zoom (1:1)")
         reset_act.setShortcut(QKeySequence("Ctrl+1"))
         reset_act.triggered.connect(self.canvas.reset_zoom)
         view_menu.addAction(reset_act)
 
-        zoom_in_act = QAction("Zoom &In", self)
+        zoom_in_act = self._icon_act('fa6s.magnifying-glass-plus', "Zoom &In")
         zoom_in_act.setShortcut(QKeySequence("Ctrl+="))
         zoom_in_act.triggered.connect(self.canvas.zoom_in)
         view_menu.addAction(zoom_in_act)
 
-        zoom_out_act = QAction("Zoom &Out", self)
+        zoom_out_act = self._icon_act('fa6s.magnifying-glass-minus', "Zoom &Out")
         zoom_out_act.setShortcut(QKeySequence("Ctrl+-"))
         zoom_out_act.triggered.connect(self.canvas.zoom_out)
         view_menu.addAction(zoom_out_act)
@@ -640,12 +675,12 @@ class MontarisApp(QMainWindow):
         view_menu.addSeparator()
 
         # Flip/Rotate (Phase 2D)
-        flip_h_act = QAction("Flip &Horizontal", self)
+        flip_h_act = self._icon_act('fa6s.left-right', "Flip &Horizontal")
         flip_h_act.setShortcut(QKeySequence("H"))
         flip_h_act.triggered.connect(self.flip_horizontal)
         view_menu.addAction(flip_h_act)
 
-        rotate_act = QAction("Rotate &90 CW", self)
+        rotate_act = self._icon_act('fa6s.rotate', "Rotate &90 CW")
         rotate_act.setShortcut(QKeySequence("Ctrl+R"))
         rotate_act.triggered.connect(self.rotate_90)
         view_menu.addAction(rotate_act)
@@ -654,23 +689,23 @@ class MontarisApp(QMainWindow):
 
         # Flip/Rotate on load (E.21, E.22)
         view_menu.addSeparator()
-        self._flip_on_load_act = QAction("Flip on Load", self)
+        self._flip_on_load_act = self._icon_act('fa6s.left-right', "Flip on Load")
         self._flip_on_load_act.setCheckable(True)
         view_menu.addAction(self._flip_on_load_act)
 
-        self._rotate_on_load_act = QAction("Rotate on Load", self)
+        self._rotate_on_load_act = self._icon_act('fa6s.rotate', "Rotate on Load")
         self._rotate_on_load_act.setCheckable(True)
         view_menu.addAction(self._rotate_on_load_act)
 
         view_menu.addSeparator()
 
         # Sidebar toggles
-        collapse_left_act = QAction("Collapse &Left Sidebar", self)
+        collapse_left_act = self._icon_act('fa6s.angles-left', "Collapse &Left Sidebar")
         collapse_left_act.setShortcut(QKeySequence("Ctrl+["))
         collapse_left_act.triggered.connect(self._toggle_left_sidebar)
         view_menu.addAction(collapse_left_act)
 
-        collapse_right_act = QAction("Collapse &Right Sidebar", self)
+        collapse_right_act = self._icon_act('fa6s.angles-right', "Collapse &Right Sidebar")
         collapse_right_act.setShortcut(QKeySequence("Ctrl+]"))
         collapse_right_act.triggered.connect(self._toggle_right_sidebar)
         view_menu.addAction(collapse_right_act)
@@ -678,7 +713,7 @@ class MontarisApp(QMainWindow):
         view_menu.addSeparator()
 
         # JIT acceleration toggle
-        self._accel_act = QAction("&JIT Acceleration (Numba)", self)
+        self._accel_act = self._icon_act('fa6s.bolt', "&JIT Acceleration (Numba)")
         self._accel_act.setCheckable(True)
         self._accel_act.triggered.connect(self._toggle_accel)
         view_menu.addAction(self._accel_act)
@@ -686,25 +721,33 @@ class MontarisApp(QMainWindow):
         view_menu.addSeparator()
 
         # Dock toggles
-        view_menu.addAction(self._details_dock.toggleViewAction())
-        view_menu.addAction(self._minimap_dock.toggleViewAction())
-        view_menu.addAction(self._perf_dock.toggleViewAction())
-        view_menu.addAction(self._debug_dock.toggleViewAction())
+        for dock, icon_name in [
+            (self._details_dock, 'fa6s.sliders'),
+            (self._minimap_dock, 'fa6s.map'),
+            (self._perf_dock, 'fa6s.gauge-high'),
+            (self._debug_dock, 'fa6s.terminal'),
+        ]:
+            act = dock.toggleViewAction()
+            _ico = _qta_icon(icon_name)
+            if _ico:
+                act.setIcon(_ico)
+            self._icon_registry.append((act, icon_name))
+            view_menu.addAction(act)
 
         # Settings menu
         settings_menu = menubar.addMenu("&Settings")
 
         # Theme submenu
-        _theme_ico = _qta_icon('fa6s.palette')
         theme_menu = settings_menu.addMenu("Theme")
-        if _theme_ico:
-            theme_menu.setIcon(_theme_ico)
+        _ico = _qta_icon('fa6s.palette')
+        if _ico:
+            theme_menu.setIcon(_ico)
+        self._icon_registry.append((theme_menu, 'fa6s.palette'))
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
         _theme_icons = {"dark": 'fa6s.moon', "light": 'fa6s.sun', "system": 'fa6s.desktop'}
         for key, label in [("dark", "Dark"), ("light", "Light"), ("system", "System")]:
-            ico = _qta_icon(_theme_icons[key])
-            act = QAction(ico, label, self) if ico else QAction(label, self)
+            act = self._icon_act(_theme_icons[key], label)
             act.setCheckable(True)
             act.setData(key)
             self._theme_group.addAction(act)
@@ -713,8 +756,7 @@ class MontarisApp(QMainWindow):
 
         settings_menu.addSeparator()
 
-        _student_ico = _qta_icon('fa6s.user-graduate')
-        self._student_session_act = QAction("Student Session", self) if not _student_ico else QAction(_student_ico, "Student Session", self)
+        self._student_session_act = self._icon_act('fa6s.user-graduate', "Student Session")
         self._student_session_act.setCheckable(True)
         self._student_session_act.setChecked(False)
         self._student_session_act.setToolTip(
@@ -722,8 +764,7 @@ class MontarisApp(QMainWindow):
         self._student_session_act.toggled.connect(self._on_student_session_toggled)
         settings_menu.addAction(self._student_session_act)
 
-        _savep_ico = _qta_icon('fa6s.floppy-disk')
-        self._save_progress_act = QAction(_savep_ico, "Save Progress", self) if _savep_ico else QAction("Save Progress", self)
+        self._save_progress_act = self._icon_act('fa6s.floppy-disk', "Save Progress")
         self._save_progress_act.setCheckable(True)
         self._save_progress_act.setChecked(False)
         self._save_progress_act.setToolTip("Enable/disable session save progress")
@@ -732,11 +773,11 @@ class MontarisApp(QMainWindow):
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
-        guide_act = QAction("User &Guide", self)
+        guide_act = self._icon_act('fa6s.circle-question', "User &Guide")
         guide_act.setShortcut(QKeySequence("F1"))
         guide_act.triggered.connect(self._show_help)
         help_menu.addAction(guide_act)
-        diag_act = QAction("Export &Diagnostics...", self)
+        diag_act = self._icon_act('fa6s.stethoscope', "Export &Diagnostics...")
         diag_act.triggered.connect(self._export_diagnostics)
         help_menu.addAction(diag_act)
 
@@ -794,11 +835,13 @@ class MontarisApp(QMainWindow):
         undo_btn.setToolTip("Undo (Ctrl+Z)")
         undo_btn.setStyleSheet(_tb_btn_style)
         undo_btn.clicked.connect(self.undo)
+        self._icon_registry.append((undo_btn, 'fa6s.rotate-left'))
         _redo_ico = _qta_icon('fa6s.rotate-right')
         redo_btn = AnimatedButton(_redo_ico, " Redo") if _redo_ico else AnimatedButton("Redo  \u21AA")
         redo_btn.setToolTip("Redo (Ctrl+Shift+Z)")
         redo_btn.setStyleSheet(_tb_btn_style)
         redo_btn.clicked.connect(self.redo)
+        self._icon_registry.append((redo_btn, 'fa6s.rotate-right'))
         self._themed_tb_btns.extend([undo_btn, redo_btn])
         tb_lay.addWidget(undo_btn, 0, Qt.AlignVCenter)
         tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
@@ -875,6 +918,7 @@ class MontarisApp(QMainWindow):
         self._save_progress_btn.setToolTip("Ctrl+Shift+S")
         self._save_progress_btn.setStyleSheet(_tb_btn_style)
         self._save_progress_btn.clicked.connect(self.save_session_progress)
+        self._icon_registry.append((self._save_progress_btn, 'fa6s.floppy-disk'))
         self._themed_tb_btns.append(self._save_progress_btn)
         self._save_progress_btn.setVisible(False)
         self._save_progress_shortcut = QAction(self)
@@ -944,6 +988,25 @@ class MontarisApp(QMainWindow):
             self._right_toolbar.setVisible(False)
             for d in right_docks:
                 d.setVisible(True)
+
+    def _toggle_active_visibility(self):
+        """Toggle visibility of the active ROI layer."""
+        layer = self.canvas._active_layer
+        if layer:
+            layer.visible = not layer.visible
+            self.layer_panel.refresh()
+            self.canvas.update()
+
+    def _expand_right_to_layers(self):
+        """Expand right sidebar showing the layer panel."""
+        if self._right_collapsed:
+            self._toggle_right_sidebar()
+
+    def _expand_right_to_details(self):
+        """Expand right sidebar showing the details panel."""
+        if self._right_collapsed:
+            self._toggle_right_sidebar()
+        self._details_dock.setVisible(True)
 
     def _on_global_opacity_changed(self, value):
         """Update global opacity factor from toolbar slider."""
@@ -1175,6 +1238,9 @@ class MontarisApp(QMainWindow):
                     act.setIcon(qta.icon(_QTA_ICONS[name], color=color))
             # Collapse / expand header buttons
             self._right_collapse_btn.setIcon(qta.icon('fa6s.angles-right', color=color))
+            # Refresh all registered menu/toolbar icons
+            for widget, icon_name in self._icon_registry:
+                widget.setIcon(qta.icon(icon_name, color=color))
         # Refresh child panels and canvas
         if hasattr(self, 'canvas'):
             self.canvas.refresh_theme()

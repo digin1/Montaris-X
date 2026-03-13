@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QGraphicsEllipseItem, QGraphicsItem, QLabel,
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer, QTimeLine
 from PySide6.QtGui import (
     QPixmap, QImage, QColor, QPainter, QPen, QPolygonF, QBrush, QPainterPath,
     QTransform,
@@ -259,6 +259,8 @@ class ImageCanvas(QGraphicsView):
                 tool.on_activate(layer, self)
         else:
             self._active_layer = layer
+        # Always pulse for visual emphasis on selection
+        self._pulse_selection()
         from montaris.core.event_logger import EventLogger
         EventLogger.instance().log("tool", "set_active_layer",
             duration_ms=(time.perf_counter() - t0) * 1000)
@@ -366,38 +368,53 @@ class ImageCanvas(QGraphicsView):
             self._selection_highlight_items.append(item)
 
     def _pulse_selection(self):
-        """Brief scale pop on selection change for visual emphasis."""
-        # Scale pop on the active ROI overlay item
-        pop_item = None
-        layer = self._active_layer
-        if layer is not None:
-            rid = id(layer)
-            pop_item = self._roi_items.get(rid)
-            if pop_item is not None:
-                bbox = layer.get_bbox()
-                if bbox is not None:
-                    y1, y2, x1, x2 = bbox
-                    cx = (x1 + x2) / 2 + layer.offset_x
-                    cy = (y1 + y2) / 2 + layer.offset_y
-                    t = QTransform()
-                    t.translate(cx, cy)
-                    t.scale(1.03, 1.03)
-                    t.translate(-cx, -cy)
-                    pop_item.setTransform(t)
-
-        if pop_item is None:
-            return
-
-        def _restore():
-            if pop_item is not None:
-                pop_item.setTransform(QTransform())
-
+        """Animated grow-then-shrink pulse on selection for visual emphasis."""
+        # Stop any running pulse
         if self._pulse_timer is not None:
             self._pulse_timer.stop()
-        self._pulse_timer = QTimer(self)
-        self._pulse_timer.setSingleShot(True)
-        self._pulse_timer.timeout.connect(_restore)
-        self._pulse_timer.start(150)
+            self._pulse_timer = None
+
+        layer = self._active_layer
+        if layer is None:
+            return
+        rid = id(layer)
+        pop_item = self._roi_items.get(rid)
+        if pop_item is None:
+            return
+        rect = pop_item._rect
+        iw, ih = rect.width(), rect.height()
+        if iw <= 0 or ih <= 0:
+            return
+
+        # Compute max grow in item-local pixels (fixed 3 screen px per side)
+        item_scale = pop_item.scale() or 1.0
+        zoom = self.transform().m11()
+        scene_per_px = 1.0 / (zoom * item_scale) if zoom * item_scale else 1.0
+        max_grow = 3.0 * scene_per_px
+
+        cx, cy = iw / 2.0, ih / 2.0
+
+        # 200ms ease-out-in: ramp up first half, ramp down second half
+        timeline = QTimeLine(200, self)
+        timeline.setFrameRange(0, 100)
+
+        def _on_frame(frame):
+            # 0→50: grow, 50→100: shrink  (triangle envelope)
+            t_norm = frame / 100.0
+            frac = 1.0 - abs(2.0 * t_norm - 1.0)  # 0→1→0
+            grow = max_grow * frac
+            sx = (iw + 2 * grow) / iw
+            sy = (ih + 2 * grow) / ih
+            t = QTransform(sx, 0, 0, sy, cx * (1 - sx), cy * (1 - sy))
+            pop_item.setTransform(t)
+
+        def _on_finished():
+            pop_item.setTransform(QTransform())
+
+        timeline.frameChanged.connect(_on_frame)
+        timeline.finished.connect(_on_finished)
+        timeline.start()
+        self._pulse_timer = timeline
 
     # ------------------------------------------------------------------
     # Image display — single QGraphicsPixmapItem (no tile pyramid)
