@@ -27,6 +27,12 @@ test = [
 [project.scripts]
 montaris = "montaris.app:main"
 
+[tool.setuptools.packages.find]
+include = ["montaris*"]
+
+[tool.setuptools.package-data]
+montaris = ["assets/*"]
+
 [tool.setuptools.dynamic]
 version = {attr = "montaris.__version__"}
 
