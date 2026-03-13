@@ -2,7 +2,8 @@ import time
 import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QGraphicsItem, QLabel,
+    QGraphicsEllipseItem, QGraphicsItem, QLabel, QWidget,
+    QHBoxLayout, QPushButton,
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer, QTimeLine
 from PySide6.QtGui import (
@@ -151,6 +152,9 @@ class ImageCanvas(QGraphicsView):
         self._empty_hint.setStyleSheet(_theme.empty_state_style())
         self._empty_hint.show()
 
+        # Floating zoom controls (bottom-right)
+        self._zoom_bar = self._build_zoom_bar()
+
     # ------------------------------------------------------------------
     # Tool / layer management
     # ------------------------------------------------------------------
@@ -164,6 +168,19 @@ class ImageCanvas(QGraphicsView):
         self.setBackgroundBrush(_theme.canvas_background())
         self._hud_label.setStyleSheet(_theme.hud_label_style())
         self._empty_hint.setStyleSheet(_theme.empty_state_style())
+        # Zoom bar
+        btn_style = _theme.zoom_bar_button_style()
+        for b in (self._zb_in, self._zb_out, self._zb_fit):
+            b.setStyleSheet(btn_style)
+            if hasattr(b, '_qta_name'):
+                try:
+                    import qtawesome as qta
+                    color = '#dcdcdc' if _theme.is_dark() else '#333'
+                    b.setIcon(qta.icon(b._qta_name, color=color))
+                except ImportError:
+                    pass
+        self._zb_pct.setStyleSheet(_theme.zoom_bar_pct_style())
+        self._zoom_bar.setStyleSheet(_theme.zoom_bar_style())
 
     def set_tool(self, tool):
         t0 = time.perf_counter()
@@ -1106,25 +1123,91 @@ class ImageCanvas(QGraphicsView):
         self._empty_hint.setGeometry(
             (w - hint_w) // 2, (h - hint_h) // 2, hint_w, hint_h
         )
+        # Pin zoom bar to bottom-right
+        self._position_zoom_bar()
 
     # ------------------------------------------------------------------
     # Zoom helpers
     # ------------------------------------------------------------------
 
+    def _build_zoom_bar(self):
+        """Create floating zoom control bar pinned to bottom-right."""
+        bar = QWidget(self)
+        bar.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(2)
+
+        btn_style = _theme.zoom_bar_button_style()
+
+        try:
+            import qtawesome as qta
+            _has_qta = True
+        except ImportError:
+            _has_qta = False
+
+        def _btn(icon_name, fallback, tooltip, callback):
+            b = QPushButton()
+            if _has_qta:
+                color = '#dcdcdc' if _theme.is_dark() else '#333'
+                b.setIcon(qta.icon(icon_name, color=color))
+            else:
+                b.setText(fallback)
+            b.setFixedSize(26, 26)
+            b.setToolTip(tooltip)
+            b.setStyleSheet(btn_style)
+            b.clicked.connect(callback)
+            b._qta_name = icon_name
+            lay.addWidget(b)
+            return b
+
+        self._zb_out = _btn('fa6s.minus', '-', 'Zoom Out (Ctrl+-)', self.zoom_out)
+        self._zb_pct = QPushButton('100%')
+        self._zb_pct.setFixedHeight(26)
+        self._zb_pct.setMinimumWidth(48)
+        self._zb_pct.setToolTip('Reset Zoom 1:1 (Ctrl+1)')
+        self._zb_pct.setStyleSheet(_theme.zoom_bar_pct_style())
+        self._zb_pct.clicked.connect(self.reset_zoom)
+        lay.addWidget(self._zb_pct)
+        self._zb_in = _btn('fa6s.plus', '+', 'Zoom In (Ctrl+=)', self.zoom_in)
+        self._zb_fit = _btn('fa6s.expand', '\u2922', 'Fit to Window (Ctrl+0)', self.fit_to_window)
+
+        bar.setStyleSheet(_theme.zoom_bar_style())
+        bar.adjustSize()
+        bar.show()
+        return bar
+
+    def _position_zoom_bar(self):
+        """Pin zoom bar to bottom-right of viewport."""
+        vw = self.viewport().width()
+        vh = self.viewport().height()
+        bw = self._zoom_bar.sizeHint().width()
+        bh = self._zoom_bar.sizeHint().height()
+        self._zoom_bar.move(vw - bw - 10, vh - bh - 14)
+
+    def _update_zoom_pct(self):
+        """Sync zoom percentage label to current view transform."""
+        zoom = self.transform().m11()
+        self._zb_pct.setText(f'{zoom:.0%}')
+
     def fit_to_window(self):
         if self._image_item:
             self.fitInView(self._image_item, Qt.KeepAspectRatio)
+        self._update_zoom_pct()
 
     def reset_zoom(self):
         self.resetTransform()
+        self._update_zoom_pct()
 
     def zoom_in(self):
         self.scale(1.25, 1.25)
         self.viewport_changed.emit()
+        self._update_zoom_pct()
 
     def zoom_out(self):
         self.scale(1 / 1.25, 1 / 1.25)
         self.viewport_changed.emit()
+        self._update_zoom_pct()
 
     # ------------------------------------------------------------------
     # LOD / viewport culling
@@ -1231,6 +1314,7 @@ class ImageCanvas(QGraphicsView):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
         self.viewport_changed.emit()
+        self._update_zoom_pct()
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
