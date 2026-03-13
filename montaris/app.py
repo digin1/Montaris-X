@@ -685,7 +685,7 @@ class MontarisApp(QMainWindow):
 
         # Flip/Rotate (Phase 2D)
         flip_h_act = self._icon_act('fa6s.left-right', "Flip &Horizontal")
-        flip_h_act.setShortcut(QKeySequence("H"))
+        flip_h_act.setShortcut(QKeySequence("Ctrl+H"))
         flip_h_act.triggered.connect(self.flip_horizontal)
         view_menu.addAction(flip_h_act)
 
@@ -997,17 +997,18 @@ class MontarisApp(QMainWindow):
 
     def _toggle_left_sidebar(self):
         self._left_collapsed = not getattr(self, '_left_collapsed', False)
-        left_docks = [self._tool_dock, self._minimap_dock]
+        left_docks = [self._tool_dock, self._minimap_dock, self._perf_dock]
         if self._left_collapsed:
-            # Hide docks, show icon toolbar
+            # Remember which docks were visible before collapsing
+            self._left_dock_vis = {d: d.isVisible() for d in left_docks}
             for d in left_docks:
                 d.setVisible(False)
             self._left_toolbar.setVisible(True)
         else:
-            # Show docks, hide icon toolbar
             self._left_toolbar.setVisible(False)
+            saved = getattr(self, '_left_dock_vis', {})
             for d in left_docks:
-                d.setVisible(True)
+                d.setVisible(saved.get(d, True))
 
     def _toggle_right_sidebar(self):
         self._right_collapsed = not getattr(self, '_right_collapsed', False)

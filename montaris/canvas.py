@@ -1200,7 +1200,7 @@ class ImageCanvas(QGraphicsView):
         lay.setSpacing(2)
 
         self._make_float_btn(lay, 'fa6s.left-right', '\u2194',
-                             'Flip Horizontal (H)', self._cb_flip_h)
+                             'Flip Horizontal (Ctrl+H)', self._cb_flip_h)
         self._make_float_btn(lay, 'fa6s.rotate', '\u21BB',
                              'Rotate 90\u00b0 CW (Ctrl+R)', self._cb_rotate_90)
         bar.adjustSize()
