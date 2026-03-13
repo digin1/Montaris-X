@@ -55,16 +55,16 @@ function FeatureCard({icon, title, description}) {
 function ComparisonTable() {
   const rows = [
     ['Purpose-built for ROI delineation', 'Yes', 'No', 'No', 'No'],
-    ['Native desktop performance', 'Yes', 'Yes', 'Yes', 'Partial'],
+    ['Native desktop performance', 'Yes', 'Yes', 'Yes', 'Yes'],
     ['16/32-bit TIFF support', 'Yes', 'Yes', 'Yes', 'Yes'],
     ['Multi-channel composites', 'Yes', 'Yes', 'Yes', 'Yes'],
     ['Component-aware transform', 'Yes', 'No', 'No', 'No'],
-    ['ImageJ .roi import/export', 'Yes', 'Native', 'No', 'No'],
+    ['ImageJ .roi import/export', 'Yes', 'Native', 'Yes', 'Plugin'],
     ['Brush + Polygon + Stamp tools', 'Yes', 'Partial', 'Partial', 'Partial'],
     ['Session auto-save & recovery', 'Yes', 'No', 'No', 'No'],
-    ['No Java runtime required', 'Yes', 'No', 'No', 'Yes'],
+    ['No Java runtime required', 'Yes', 'No', 'Bundled', 'Yes'],
     ['Cross-platform (Win/Mac/Linux)', 'Yes', 'Yes', 'Yes', 'Yes'],
-    ['Free & open source', 'MIT', 'Public domain', 'GPL', 'BSD'],
+    ['Free & open source', 'MIT', 'Public domain / GPL', 'GPL', 'BSD'],
   ];
 
   return (
