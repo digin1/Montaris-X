@@ -25,6 +25,8 @@ test:
 
 pages:
   stage: deploy
+  tags:
+    - shared
   image: node:20
   script:
     - cd website
