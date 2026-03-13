@@ -264,20 +264,6 @@ export default function Home() {
       <header className="scienceHero">
         <div className="container scienceHero__layout">
           <div className="scienceHero__content">
-            <div className="scienceBrand">
-              <img
-                src="img/logo.png"
-                alt=""
-                width="48"
-                height="48"
-                className="scienceBrand__logo"
-              />
-              <div>
-                <span className="scienceBrand__name">Montaris-X</span>
-                <span className="scienceBrand__context">ROI editor for research teams</span>
-              </div>
-            </div>
-
             <span className="scienceEyebrow">Scientific ROI annotation software</span>
             <Heading as="h1" className="scienceHero__title">
               Precision ROI editing for microscopy, histology, and fluorescence imaging.
