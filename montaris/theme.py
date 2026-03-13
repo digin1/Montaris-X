@@ -240,15 +240,38 @@ def combobox_style():
     )
 
 
+def _checkmark_path():
+    """Return path to a white checkmark PNG, creating it once on first call."""
+    import tempfile, os
+    path = os.path.join(tempfile.gettempdir(), "montaris_checkmark.png")
+    if not os.path.exists(path):
+        from PySide6.QtGui import QImage, QPainter, QPen, QColor
+        from PySide6.QtCore import Qt, QPoint
+        img = QImage(16, 16, QImage.Format_ARGB32)
+        img.fill(QColor(0, 0, 0, 0))
+        p = QPainter(img)
+        pen = QPen(QColor(255, 255, 255), 2.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.drawLine(QPoint(3, 8), QPoint(6, 11))
+        p.drawLine(QPoint(6, 11), QPoint(12, 4))
+        p.end()
+        img.save(path)
+    return path.replace("\\", "/")
+
+
 def checkbox_style():
     """CSS for QCheckBox controls."""
+    tick = _checkmark_path()
     if is_dark():
         return (
             "QCheckBox { spacing: 6px; color: #ccc; }"
             "QCheckBox::indicator { width: 16px; height: 16px;"
             " border-radius: 3px; border: 1px solid #555; background: #2a2a2a; }"
             "QCheckBox::indicator:checked { background: #2a5a8a;"
-            " border-color: #5a9ad5; }"
+            f" border-color: #5a9ad5; image: url({tick}); }}"
             "QCheckBox::indicator:hover { border-color: #5a8abf; }"
         )
     return (
@@ -256,7 +279,7 @@ def checkbox_style():
         "QCheckBox::indicator { width: 16px; height: 16px;"
         " border-radius: 3px; border: 1px solid #aaa; background: #fff; }"
         "QCheckBox::indicator:checked { background: #4a8abf;"
-        " border-color: #3a7aaf; }"
+        f" border-color: #3a7aaf; image: url({tick}); }}"
         "QCheckBox::indicator:hover { border-color: #4a8abf; }"
     )
 
@@ -417,3 +440,46 @@ def student_label_style():
                 " color: #4ec9b0; padding: 0 8px; }")
     return ("QLabel { font-size: 11px; font-weight: bold;"
             " color: #1a8a6a; padding: 0 8px; }")
+
+
+def zoom_bar_style():
+    """CSS for the floating zoom bar container."""
+    if is_dark():
+        return ("QWidget { background: rgba(30,30,30,200);"
+                " border-radius: 6px; }")
+    return ("QWidget { background: rgba(245,245,245,210);"
+            " border-radius: 6px; }")
+
+
+def zoom_bar_button_style():
+    """CSS for zoom bar icon buttons."""
+    if is_dark():
+        return (
+            "QPushButton { background: transparent; border: none;"
+            " border-radius: 4px; padding: 2px; }"
+            "QPushButton:hover { background: rgba(255,255,255,30); }"
+            "QPushButton:pressed { background: rgba(255,255,255,50); }"
+        )
+    return (
+        "QPushButton { background: transparent; border: none;"
+        " border-radius: 4px; padding: 2px; }"
+        "QPushButton:hover { background: rgba(0,0,0,15); }"
+        "QPushButton:pressed { background: rgba(0,0,0,30); }"
+    )
+
+
+def zoom_bar_pct_style():
+    """CSS for the zoom percentage label button."""
+    if is_dark():
+        return (
+            "QPushButton { background: transparent; border: none;"
+            " color: #bbb; font-size: 11px; font-weight: bold;"
+            " padding: 2px 4px; }"
+            "QPushButton:hover { color: #fff; }"
+        )
+    return (
+        "QPushButton { background: transparent; border: none;"
+        " color: #555; font-size: 11px; font-weight: bold;"
+        " padding: 2px 4px; }"
+        "QPushButton:hover { color: #111; }"
+    )

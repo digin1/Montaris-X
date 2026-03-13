@@ -435,13 +435,22 @@ class MontarisApp(QMainWindow):
 
         # Quick-access actions for collapsed right sidebar (icon-only)
         _rt_actions = [
-            ('fa6s.plus',        "Add ROI",             lambda: self.add_roi_layer()),
-            ('fa6s.trash-can',   "Delete Active ROI",   lambda: self.clear_active_roi()),
-            ('fa6s.eye',         "Toggle Visibility",   lambda: self._toggle_active_visibility()),
-            ('fa6s.layer-group', "Layers",              lambda: self._expand_right_to_layers()),
-            ('fa6s.sliders',     "ROI Properties",      lambda: self._expand_right_to_details()),
+            ('fa6s.plus',                  "Add ROI",             lambda: self.add_roi_layer()),
+            ('fa6s.trash-can',             "Delete Active ROI",   lambda: self.clear_active_roi()),
+            ('fa6s.eye',                   "Toggle Visibility",   lambda: self._toggle_active_visibility()),
+            ('fa6s.layer-group',           "Layers",              lambda: self._expand_right_to_layers()),
+            ('fa6s.sliders',               "ROI Properties",      lambda: self._expand_right_to_details()),
+            None,  # separator
+            ('fa6s.magnifying-glass-plus', "Zoom In (Ctrl+=)",    lambda: self.canvas.zoom_in()),
+            ('fa6s.magnifying-glass-minus',"Zoom Out (Ctrl+-)",   lambda: self.canvas.zoom_out()),
+            ('fa6s.expand',                "Fit to Window (Ctrl+0)", lambda: self.canvas.fit_to_window()),
+            ('fa6s.magnifying-glass',      "Reset Zoom 1:1 (Ctrl+1)", lambda: self.canvas.reset_zoom()),
         ]
-        for icon_name, tooltip, callback in _rt_actions:
+        for entry in _rt_actions:
+            if entry is None:
+                self._right_toolbar.addSeparator()
+                continue
+            icon_name, tooltip, callback = entry
             act = self._icon_act(icon_name, "")
             act.setToolTip(tooltip)
             act.triggered.connect(callback)
