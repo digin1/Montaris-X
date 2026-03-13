@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QDockWidget, QFileDialog,
     QStatusBar, QMessageBox, QProgressDialog, QDialog, QVBoxLayout, QTextEdit,
     QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget, QPushButton,
-    QComboBox, QInputDialog, QColorDialog, QFrame,
+    QComboBox, QInputDialog, QColorDialog, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QSettings, QRectF, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
@@ -790,6 +790,23 @@ class MontarisApp(QMainWindow):
         diag_act.triggered.connect(self._export_diagnostics)
         help_menu.addAction(diag_act)
 
+        # Screenshot button pinned to the right end of the menu bar
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        menubar.setCornerWidget(spacer, Qt.TopLeftCorner)  # push button right
+
+        _ss_ico = _qta_icon('fa6s.camera')
+        ss_btn = QPushButton(_ss_ico, " Screenshot") if _ss_ico else QPushButton("\U0001F4F7 Screenshot")
+        ss_btn.setToolTip("Save full app screenshot (Ctrl+Shift+P)")
+        ss_btn.setFlat(True)
+        ss_btn.setStyleSheet(
+            "QPushButton { padding: 2px 10px; font-size: 12px; }"
+            "QPushButton:hover { background: rgba(255,255,255,20); border-radius: 3px; }"
+        )
+        ss_btn.clicked.connect(self._take_app_screenshot)
+        self._icon_registry.append((ss_btn, 'fa6s.camera'))
+        menubar.setCornerWidget(ss_btn, Qt.TopRightCorner)
+
     def _setup_statusbar(self):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
@@ -936,18 +953,7 @@ class MontarisApp(QMainWindow):
         self._save_progress_shortcut.setEnabled(False)
         self.addAction(self._save_progress_shortcut)
         tb_lay.addWidget(self._save_progress_btn, 0, Qt.AlignVCenter)
-        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
-
-        # -- Group 6: Screenshot --
-        _screenshot_ico = _qta_icon('fa6s.camera')
-        screenshot_btn = AnimatedButton(_screenshot_ico, " Screenshot") if _screenshot_ico else AnimatedButton("\U0001F4F7 Screenshot")
-        screenshot_btn.setToolTip("Save full app screenshot (Ctrl+Shift+P)")
-        screenshot_btn.setStyleSheet(_tb_btn_style)
-        screenshot_btn.clicked.connect(self._take_app_screenshot)
-        self._icon_registry.append((screenshot_btn, 'fa6s.camera'))
-        self._themed_tb_btns.append(screenshot_btn)
-        tb_lay.addWidget(screenshot_btn, 0, Qt.AlignVCenter)
-
+        # Screenshot shortcut (button is in menu bar corner)
         _screenshot_shortcut = QAction(self)
         _screenshot_shortcut.setShortcut(QKeySequence("Ctrl+Shift+P"))
         _screenshot_shortcut.triggered.connect(self._take_app_screenshot)
