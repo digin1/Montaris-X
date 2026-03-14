@@ -29,14 +29,15 @@ pages:
     - shared
   image: node:20
   script:
-    - cd website
-    - sed -i "s|const siteUrl = .*|const siteUrl = 'https://git-pages.ecdf.ed.ac.uk';|" docusaurus.config.js
-    - sed -i "s|const baseUrl = .*|const baseUrl = '/ddominic/montaris-x/';|" docusaurus.config.js
-    - sed -i "s|https://github.com/digin1/Montaris-X|https://git.ecdf.ed.ac.uk/ddominic/montaris-x|g" docusaurus.config.js
-    - sed -i "s|label: 'GitHub'|label: 'GitLab'|g" docusaurus.config.js
-    - npm ci
-    - npm run build
-    - mv build ../public
+    - |
+      cd website
+      sed -i "s|const siteUrl = .*|const siteUrl = 'https://git-pages.ecdf.ed.ac.uk';|" docusaurus.config.js
+      sed -i "s|const baseUrl = .*|const baseUrl = '/ddominic/montaris-x/';|" docusaurus.config.js
+      sed -i "s|https://github.com/digin1/Montaris-X|https://git.ecdf.ed.ac.uk/ddominic/montaris-x|g" docusaurus.config.js
+      sed -i "s|label: 'GitHub'|label: 'GitLab'|g" docusaurus.config.js
+      npm ci
+      npm run build
+      mv build ../public
   artifacts:
     paths:
       - public
