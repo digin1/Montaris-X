@@ -197,14 +197,14 @@ a {
 .button--inverse {
   border-color: #ffffff;
   background: #ffffff;
-  color: var(--mx-ink);
+  color: #0c1420;
 }
 
 .button--inverse:hover,
 .button--inverse:focus {
   border-color: #e8edf2;
   background: #e8edf2;
-  color: var(--mx-ink);
+  color: #0c1420;
 }
 
 .button--ghostLight {
