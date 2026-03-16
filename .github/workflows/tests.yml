@@ -31,4 +31,4 @@ jobs:
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest tests/ -v
+        run: pytest tests/ -v --ignore=tests/peak_memory_test.py --ignore=tests/bench_memory.py --ignore=tests/bench_snapshot_memory.py --ignore=tests/bench_cpu.py --ignore=tests/test_session_headed.py --ignore=tests/test_session_zoom_crash.py

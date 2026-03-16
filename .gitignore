@@ -24,3 +24,8 @@ test.zip
 tests/*.png
 tests/screenshots/
 docs/frames/
+
+# Docusaurus
+website/node_modules/
+website/build/
+website/.docusaurus/

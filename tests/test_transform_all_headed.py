@@ -168,6 +168,11 @@ def _do_transform(app, handle_type, dx, dy, shift=False):
     t0 = time.perf_counter()
     tool.on_release(end, layer, canvas)
     _pe()
+    # Wait for async transform to finish (>3 ROIs uses timer polling)
+    deadline = time.perf_counter() + 60
+    while getattr(tool, '_applying', False) and time.perf_counter() < deadline:
+        _pe()
+        time.sleep(0.05)
     ms = (time.perf_counter() - t0) * 1000
     return tool, ms
 
