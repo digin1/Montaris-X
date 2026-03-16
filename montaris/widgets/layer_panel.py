@@ -186,40 +186,77 @@ class LayerPanel(QWidget):
         self.list_widget.model().rowsMoved.connect(self._on_rows_moved)
         layout.addWidget(self.list_widget)
 
-        # ROI action buttons (single row — Rename/Color/Random are in right-click menu)
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(4)
-
+        # ROI action buttons — row 1: Add / Delete
         _lb_style = _theme.layer_btn_style()
-        self.add_btn = _qta_btn('fa6s.plus', "", fixed_width=36)
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+
+        self.add_btn = _qta_btn('fa6s.plus', "Add ROI", fixed_width=None)
         self.add_btn.setToolTip("Add ROI layer")
         self.add_btn.setStyleSheet(_lb_style)
         self.add_btn.clicked.connect(lambda: self.roi_added.emit())
-        btn_layout.addWidget(self.add_btn)
+        row1.addWidget(self.add_btn)
 
-        self.remove_btn = _qta_btn('fa6s.minus', "", fixed_width=36)
+        self.remove_btn = _qta_btn('fa6s.minus', "Delete", fixed_width=None)
         self.remove_btn.setToolTip("Remove selected ROI")
         self.remove_btn.setStyleSheet(_lb_style)
         self.remove_btn.clicked.connect(self._remove_selected)
-        btn_layout.addWidget(self.remove_btn)
+        row1.addWidget(self.remove_btn)
 
-        self.dup_btn = _qta_btn('fa6s.clone', "Dup")
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        # ROI action buttons — row 2: Duplicate / Merge / Delete All
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+
+        self.dup_btn = _qta_btn('fa6s.clone', "Duplicate")
         self.dup_btn.setToolTip("Duplicate selected ROI")
         self.dup_btn.setStyleSheet(_lb_style)
         self.dup_btn.clicked.connect(self._duplicate_selected)
-        btn_layout.addWidget(self.dup_btn)
+        row2.addWidget(self.dup_btn)
 
         self.merge_btn = _qta_btn('fa6s.object-group', "Merge")
         self.merge_btn.setToolTip("Merge selected ROIs")
         self.merge_btn.setStyleSheet(_lb_style)
         self.merge_btn.clicked.connect(self._merge_selected)
-        btn_layout.addWidget(self.merge_btn)
+        row2.addWidget(self.merge_btn)
 
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
+        self.clear_all_btn = _qta_btn('fa6s.trash-can', "Delete All")
+        self.clear_all_btn.setToolTip("Remove all ROIs")
+        self.clear_all_btn.setStyleSheet(_lb_style)
+        self.clear_all_btn.clicked.connect(self._clear_all)
+        row2.addWidget(self.clear_all_btn)
 
-        # Keep references for context menu (buttons removed from UI)
-        self.clear_all_btn = None
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        # ROI action buttons — row 3: Previous / Next / Toggle Overlay
+        row3 = QHBoxLayout()
+        row3.setSpacing(4)
+
+        self.prev_roi_btn = _qta_btn('fa6s.chevron-left', "Previous")
+        self.prev_roi_btn.setToolTip("Previous ROI")
+        self.prev_roi_btn.setStyleSheet(_lb_style)
+        self.prev_roi_btn.clicked.connect(lambda: self._step_roi(-1))
+        row3.addWidget(self.prev_roi_btn)
+
+        self.next_roi_btn = _qta_btn('fa6s.chevron-right', "Next")
+        self.next_roi_btn.setToolTip("Next ROI")
+        self.next_roi_btn.setStyleSheet(_lb_style)
+        self.next_roi_btn.clicked.connect(lambda: self._step_roi(1))
+        row3.addWidget(self.next_roi_btn)
+
+        self.overlay_btn = _qta_btn('fa6s.eye', "Overlay")
+        self.overlay_btn.setToolTip("Toggle ROI Overlay")
+        self.overlay_btn.setStyleSheet(_lb_style)
+        self.overlay_btn.setCheckable(True)
+        self.overlay_btn.clicked.connect(self._toggle_overlay)
+        row3.addWidget(self.overlay_btn)
+
+        row3.addStretch()
+        layout.addLayout(row3)
+
         self.rename_btn = None
         self.color_btn = None
         self.random_color_btn = None
@@ -230,7 +267,9 @@ class LayerPanel(QWidget):
         """Re-apply theme-dependent styles after a theme switch."""
         self.header.setStyleSheet(_theme.section_header_style())
         lb = _theme.layer_btn_style()
-        for btn in (self.add_btn, self.remove_btn, self.dup_btn, self.merge_btn):
+        for btn in (self.add_btn, self.remove_btn, self.dup_btn, self.merge_btn,
+                    self.clear_all_btn, self.prev_roi_btn, self.next_roi_btn,
+                    self.overlay_btn):
             btn.setStyleSheet(lb)
         self.show_all_cb.setStyleSheet(_theme.checkbox_style())
         self.list_widget.setStyleSheet(_theme.list_widget_style())
@@ -240,6 +279,11 @@ class LayerPanel(QWidget):
             self.remove_btn.setIcon(qta.icon('fa6s.minus', color=color))
             self.dup_btn.setIcon(qta.icon('fa6s.clone', color=color))
             self.merge_btn.setIcon(qta.icon('fa6s.object-group', color=color))
+            self.clear_all_btn.setIcon(qta.icon('fa6s.trash-can', color=color))
+            self.prev_roi_btn.setIcon(qta.icon('fa6s.chevron-left', color=color))
+            self.next_roi_btn.setIcon(qta.icon('fa6s.chevron-right', color=color))
+            icon_name = getattr(self.overlay_btn, '_qta_name', 'fa6s.eye')
+            self.overlay_btn.setIcon(qta.icon(icon_name, color=color))
 
     def refresh(self):
         self._updating = True
@@ -272,7 +316,7 @@ class LayerPanel(QWidget):
                 y1, y2, x1, x2 = bbox
                 px_count = int(np.count_nonzero(roi.get_mask_crop((y1, y2, x1, x2))))
             px_counts.append(px_count)
-            display_name = f"{i + 1}. {roi.name}"
+            display_name = f"({i + 1}) {roi.name}"
             item = QListWidgetItem(display_name)
             item.setIcon(icon)
             item.setData(Qt.UserRole, ("roi", i))
@@ -790,6 +834,37 @@ class LayerPanel(QWidget):
                     )
                     self.refresh()
                     self.visibility_changed.emit()
+
+    def _step_roi(self, direction):
+        """Navigate to previous/next ROI."""
+        app = self.window()
+        if not hasattr(app, 'canvas'):
+            return
+        layers = self.layer_stack.roi_layers
+        if not layers:
+            return
+        cur = app.canvas._active_layer
+        if cur in layers:
+            idx = (layers.index(cur) + direction) % len(layers)
+        else:
+            idx = 0
+        app._on_layer_selected(layers[idx])
+        row = idx + (1 if self.layer_stack.image_layer else 0)
+        self.list_widget.setCurrentRow(row)
+
+    def _toggle_overlay(self):
+        """Toggle visibility of all ROI overlay items on the canvas."""
+        app = self.window()
+        if not hasattr(app, 'canvas'):
+            return
+        show = not self.overlay_btn.isChecked()
+        for item in app.canvas._roi_items.values():
+            item.setVisible(show)
+        # Update button icon
+        if _HAS_QTA:
+            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            icon_name = 'fa6s.eye-slash' if not show else 'fa6s.eye'
+            self.overlay_btn.setIcon(qta.icon(icon_name, color=color))
 
     def _toggle_all_visibility(self, checked):
         """Toggle all ROI visibility (B.14)."""

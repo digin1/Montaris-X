@@ -65,6 +65,7 @@ class ToolPanel(QWidget):
     export_roi_zip_requested = Signal()
     load_instructions_requested = Signal()
     view_instructions_requested = Signal()
+    fit_to_window_requested = Signal()
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -78,7 +79,7 @@ class ToolPanel(QWidget):
         # Full-width clickable header bar — matches section style
         if _HAS_QTA:
             color = '#dcdcdc' if _theme.is_dark() else '#333'
-            collapse_btn = QPushButton(qta.icon('fa6s.angles-left', color=color), " Toolbox")
+            collapse_btn = QPushButton(qta.icon('fa6s.down-left-and-up-right-to-center', color=color), " Toolbox")
         else:
             collapse_btn = QPushButton("\u25c0  Toolbox")
         collapse_btn.setFixedHeight(26)
@@ -243,6 +244,16 @@ class ToolPanel(QWidget):
         export_zip_btn.clicked.connect(lambda: QTimer.singleShot(0, self.export_roi_zip_requested.emit))
         layout.addWidget(export_zip_btn)
 
+        sep2 = QLabel()
+        sep2.setFixedHeight(2)
+        sep2.setStyleSheet(_theme.separator_style())
+        layout.addWidget(sep2)
+
+        fit_btn = self._action_btn('fa6s.expand', "Fit to Window")
+        fit_btn.setToolTip("Fit image to window (Ctrl+0)")
+        fit_btn.clicked.connect(lambda: QTimer.singleShot(0, self.fit_to_window_requested.emit))
+        layout.addWidget(fit_btn)
+
         layout.addStretch()
 
         self._current_tool = None
@@ -287,7 +298,7 @@ class ToolPanel(QWidget):
         # Refresh icon colors
         if _HAS_QTA:
             color = '#dcdcdc' if _theme.is_dark() else '#333'
-            self._collapse_btn.setIcon(qta.icon('fa6s.angles-left', color=color))
+            self._collapse_btn.setIcon(qta.icon('fa6s.down-left-and-up-right-to-center', color=color))
             for name, btn in self._tool_buttons.items():
                 if name in _QTA_ICONS:
                     btn.setIcon(qta.icon(_QTA_ICONS[name], color=color))

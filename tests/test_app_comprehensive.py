@@ -587,9 +587,12 @@ class TestViewInstructions:
     def test_with_instructions_shows_dialog(self, app):
         app._last_instructions_text = "Test instruction content"
         from PySide6.QtWidgets import QDialog
-        with patch.object(QDialog, "exec", return_value=0) as mock_exec:
+        with patch.object(QDialog, "show") as mock_show:
             app._view_instructions()
-            mock_exec.assert_called_once()
+            mock_show.assert_called_once()
+            dlg = app._instructions_dlg
+            assert not dlg.isModal()
+            dlg.close()
 
 
 # ═══════════════════════════════════════════════════════════════════

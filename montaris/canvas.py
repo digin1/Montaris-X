@@ -30,6 +30,7 @@ class _ROIOverlayItem(QGraphicsItem):
         super().__init__()
         self._image = None
         self._rect = QRectF()
+        self._clip_rect = None  # image bounds in scene coords for OOB clipping
         self.setAcceptedMouseButtons(Qt.NoButton)
 
     def setImage(self, image):
@@ -40,6 +41,10 @@ class _ROIOverlayItem(QGraphicsItem):
         self._image = image
         self.update()
 
+    def setClipRect(self, scene_rect):
+        """Set the image boundary rect (in scene coords) for clipping."""
+        self._clip_rect = scene_rect
+
     def image(self):
         return self._image  # same object, no copy
 
@@ -48,6 +53,10 @@ class _ROIOverlayItem(QGraphicsItem):
 
     def paint(self, painter, option, widget=None):
         if self._image:
+            if self._clip_rect is not None:
+                # Convert scene clip rect to item-local coords
+                local_clip = self.mapRectFromScene(self._clip_rect).toAlignedRect()
+                painter.setClipRect(local_clip)
             exposed = option.exposedRect.toAlignedRect() & self._image.rect()
             if not exposed.isEmpty():
                 painter.drawImage(exposed, self._image, exposed)
@@ -183,7 +192,7 @@ class ImageCanvas(QGraphicsView):
             if hasattr(b, '_qta_name'):
                 try:
                     import qtawesome as qta
-                    color = '#dcdcdc' if _theme.is_dark() else '#333'
+                    color = '#ffffff' if _theme.is_dark() else '#111'
                     b.setIcon(qta.icon(b._qta_name, color=color))
                 except ImportError:
                     pass
@@ -257,11 +266,21 @@ class ImageCanvas(QGraphicsView):
                     level="warning"
                 )
         if any_offset and pre_flatten:
-            # Push undoable flatten instead of clearing the stack
-            from montaris.core.undo import FlattenUndoCommand
+            from montaris.core.undo import FlattenUndoCommand, _cmd_byte_size
+            from montaris.core.multi_undo import CompoundUndoCommand
+            flatten_cmd = FlattenUndoCommand(pre_flatten)
             win = self.window()
             if hasattr(win, 'undo_stack'):
-                win.undo_stack.push(FlattenUndoCommand(pre_flatten))
+                stack = win.undo_stack
+                # Merge with previous command so undo reverses both in one step
+                if stack._index >= 0:
+                    prev = stack._stack[stack._index]
+                    stack._total_bytes -= _cmd_byte_size(prev)
+                    merged = CompoundUndoCommand([prev, flatten_cmd])
+                    stack._stack[stack._index] = merged
+                    stack._total_bytes += _cmd_byte_size(merged)
+                else:
+                    stack.push(flatten_cmd)
             self.refresh_overlays()
 
     def set_active_layer(self, layer):
@@ -610,6 +629,14 @@ class ImageCanvas(QGraphicsView):
         m = min(w, h) // 4
         self._scene.setSceneRect(QRectF(-m, -m, w + 2 * m, h + 2 * m))
 
+    def _image_clip_rect(self):
+        """Return QRectF of image bounds for clipping ROI overlays."""
+        img = self.layer_stack.image_layer
+        if img is not None:
+            h, w = img.data.shape[:2]
+            return QRectF(0, 0, w, h)
+        return None
+
     # ------------------------------------------------------------------
     # ROI overlay display — per-ROI _ROIOverlayItem (tight bbox)
     # ------------------------------------------------------------------
@@ -907,6 +934,7 @@ class ImageCanvas(QGraphicsView):
             item.setImage(dirty_img)
             item.setPos(dx1, dy1)
             item.setZValue(1 + index * 0.001)
+            item.setClipRect(self._image_clip_rect())
             self._scene.addItem(item)
             self._roi_items[rid] = item
             return
@@ -1000,16 +1028,19 @@ class ImageCanvas(QGraphicsView):
 
         disp_x = x1 + roi.offset_x
         disp_y = y1 + roi.offset_y
+        clip = self._image_clip_rect()
         if existing is not None:
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
             existing.setZValue(1 + index * 0.001)
+            existing.setClipRect(clip)
             existing.setVisible(True)
         else:
             item = _ROIOverlayItem()
             item.setImage(qimg.copy())
             item.setPos(disp_x, disp_y)
             item.setZValue(1 + index * 0.001)
+            item.setClipRect(clip)
             self._scene.addItem(item)
             self._roi_items[rid] = item
             existing = item
@@ -1027,16 +1058,19 @@ class ImageCanvas(QGraphicsView):
 
         qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
 
+        clip = self._image_clip_rect()
         if existing is not None:
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
             existing.setZValue(1 + index * 0.001)
+            existing.setClipRect(clip)
             existing.setVisible(True)
         else:
             item = _ROIOverlayItem()
             item.setImage(qimg.copy())
             item.setPos(disp_x, disp_y)
             item.setZValue(1 + index * 0.001)
+            item.setClipRect(clip)
             self._scene.addItem(item)
             self._roi_items[rid] = item
             existing = item
@@ -1143,7 +1177,7 @@ class ImageCanvas(QGraphicsView):
         b = QPushButton()
         try:
             import qtawesome as qta
-            color = '#dcdcdc' if _theme.is_dark() else '#333'
+            color = '#ffffff' if _theme.is_dark() else '#111'
             b.setIcon(qta.icon(icon_name, color=color))
         except ImportError:
             b.setText(fallback)
@@ -1161,6 +1195,7 @@ class ImageCanvas(QGraphicsView):
     def _make_float_bar(self):
         """Return a new transparent floating bar widget."""
         bar = QWidget(self)
+        bar.setObjectName("FloatingBar")
         bar.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         bar.setStyleSheet(_theme.zoom_bar_style())
         return bar
@@ -1184,9 +1219,6 @@ class ImageCanvas(QGraphicsView):
         lay.addWidget(self._zb_pct)
         self._zb_in = self._make_float_btn(lay, 'fa6s.plus', '+',
                                             'Zoom In (Ctrl+=)', self.zoom_in)
-        self._zb_fit = self._make_float_btn(lay, 'fa6s.expand', '\u2922',
-                                             'Fit to Window (Ctrl+0)',
-                                             self.fit_to_window)
         bar.adjustSize()
         bar.show()
         return bar
@@ -1211,22 +1243,10 @@ class ImageCanvas(QGraphicsView):
 
     def _build_edit_bar(self):
         bar = self._make_float_bar()
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(2)
-
-        self._make_float_btn(lay, 'fa6s.rotate-left', '\u21A9',
-                             'Undo (Ctrl+Z)', self._cb_undo)
-        self._make_float_btn(lay, 'fa6s.rotate-right', '\u21AA',
-                             'Redo (Ctrl+Shift+Z)', self._cb_redo)
-        self._lock_btn = self._make_float_btn(
-            lay, 'fa6s.lock-open', '\U0001F513',
-            'Lock / Unlock Editing', self._cb_toggle_lock, checkable=True)
-        bar.adjustSize()
-        bar.show()
+        bar.hide()
         return bar
 
-    # -- Bottom-left: ROI navigation ----------------------------------------
+    # -- Bottom-left: Screenshot / Lock / Fullscreen ------------------------
 
     def _build_roi_bar(self):
         bar = self._make_float_bar()
@@ -1234,15 +1254,11 @@ class ImageCanvas(QGraphicsView):
         lay.setContentsMargins(4, 2, 4, 2)
         lay.setSpacing(2)
 
-        self._make_float_btn(lay, 'fa6s.chevron-left', '\u25C0',
-                             'Previous ROI', self._cb_prev_roi)
-        self._make_float_btn(lay, 'fa6s.chevron-right', '\u25B6',
-                             'Next ROI', self._cb_next_roi)
-        self._overlay_btn = self._make_float_btn(
-            lay, 'fa6s.eye', '\U0001F441',
-            'Toggle ROI Overlay', self._cb_toggle_overlay, checkable=True)
         self._make_float_btn(lay, 'fa6s.camera', '\U0001F4F7',
                              'Screenshot', self._cb_screenshot)
+        self._lock_btn = self._make_float_btn(
+            lay, 'fa6s.lock-open', '\U0001F513',
+            'Lock / Unlock Editing', self._cb_toggle_lock, checkable=True)
         self._make_float_btn(lay, 'fa6s.maximize', '\u26F6',
                              'Fullscreen (F11)', self._cb_fullscreen)
         bar.adjustSize()
@@ -1289,16 +1305,6 @@ class ImageCanvas(QGraphicsView):
         if app and hasattr(app, 'rotate_90'):
             app.rotate_90()
 
-    def _cb_undo(self):
-        app = self._app()
-        if app and hasattr(app, 'undo'):
-            app.undo()
-
-    def _cb_redo(self):
-        app = self._app()
-        if app and hasattr(app, 'redo'):
-            app.redo()
-
     def _cb_toggle_lock(self):
         self._editing_locked = self._lock_btn.isChecked()
         try:
@@ -1309,44 +1315,6 @@ class ImageCanvas(QGraphicsView):
             self._lock_btn._qta_name = icon_name
         except ImportError:
             self._lock_btn.setText('\U0001F512' if self._editing_locked else '\U0001F513')
-
-    def _cb_prev_roi(self):
-        self._step_roi(-1)
-
-    def _cb_next_roi(self):
-        self._step_roi(1)
-
-    def _step_roi(self, direction):
-        app = self._app()
-        if not app:
-            return
-        layers = self.layer_stack.roi_layers
-        if not layers:
-            return
-        cur = self._active_layer
-        if cur in layers:
-            idx = (layers.index(cur) + direction) % len(layers)
-        else:
-            idx = 0
-        app._on_layer_selected(layers[idx])
-        if hasattr(app, 'layer_panel'):
-            row = idx + (1 if self.layer_stack.image_layer else 0)
-            app.layer_panel.list_widget.setCurrentRow(row)
-
-    def _cb_toggle_overlay(self):
-        """Toggle visibility of all ROI overlay items."""
-        show = not self._overlay_btn.isChecked()
-        for item in self._roi_items.values():
-            item.setVisible(show)
-        # Update icon
-        try:
-            import qtawesome as qta
-            color = '#dcdcdc' if _theme.is_dark() else '#333'
-            icon_name = 'fa6s.eye-slash' if not show else 'fa6s.eye'
-            self._overlay_btn.setIcon(qta.icon(icon_name, color=color))
-            self._overlay_btn._qta_name = icon_name
-        except ImportError:
-            pass
 
     def _cb_screenshot(self):
         """Save a screenshot of the current canvas view."""
@@ -1567,13 +1535,17 @@ class ImageCanvas(QGraphicsView):
             if (self._editing_locked
                     and getattr(self._tool, 'name', None) in self._PAINT_TOOLS):
                 return
-            # Auto-create ROI layer if painting with no active layer
+            # Block paint tools when no ROI is selected
             if (self._active_layer is None
                     and getattr(self._tool, 'name', None) in self._PAINT_TOOLS
                     and self.layer_stack.image_layer is not None):
                 win = self.window()
-                if hasattr(win, '_on_roi_added'):
-                    win._on_roi_added()
+                if hasattr(win, 'toast'):
+                    win.toast.show(
+                        "No ROI selected — create or select an ROI in Layers & Properties",
+                        "warning",
+                    )
+                return
             scene_pos = self.mapToScene(event.position().toPoint())
             self._tool.on_press(scene_pos, self._active_layer, self)
             return

@@ -82,6 +82,29 @@ class FlattenUndoCommand:
         return sum(c.nbytes for _, c, _, _ in self._entries if c is not None)
 
 
+class AddROIUndoCommand:
+    """Undo command for adding an ROI layer."""
+
+    def __init__(self, layer_stack, roi_layer):
+        self.layer_stack = layer_stack
+        self.roi_layer = roi_layer
+
+    def undo(self):
+        try:
+            idx = self.layer_stack.roi_layers.index(self.roi_layer)
+            self.layer_stack.roi_layers.pop(idx)
+        except ValueError:
+            pass
+
+    def redo(self):
+        if self.roi_layer not in self.layer_stack.roi_layers:
+            self.layer_stack.roi_layers.append(self.roi_layer)
+
+    @property
+    def byte_size(self):
+        return 64
+
+
 def _cmd_byte_size(cmd):
     """Return the byte size of a command, or 0 if it doesn't report one."""
     if hasattr(cmd, 'byte_size'):

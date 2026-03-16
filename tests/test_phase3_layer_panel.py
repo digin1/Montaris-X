@@ -78,7 +78,7 @@ class TestLayerPanelFeatures:
         app = app_with_image
         app.layer_panel.refresh()
         item = app.layer_panel.list_widget.item(1)
-        assert item.text().startswith("1.")
+        assert item.text().startswith("(1)")
 
     def test_global_opacity_slider(self, qapp, app_with_image):
         app = app_with_image

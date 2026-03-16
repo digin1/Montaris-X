@@ -194,6 +194,7 @@ class MontarisApp(QMainWindow):
         self._composite_mode = False
         self._session_dir = None  # current session folder path (reused on save)
 
+        self._icon_registry = []
         self._setup_canvas()
         self._setup_panels()
         self._setup_menus()
@@ -379,20 +380,17 @@ class MontarisApp(QMainWindow):
         self._left_toolbar.setMovable(False)
         from PySide6.QtCore import QSize
         self._left_toolbar.setIconSize(QSize(28, 28))
-        self._left_toolbar.setStyleSheet(
-            "QToolBar { spacing: 2px; padding: 2px; }"
-            "QToolButton { font-size: 18px; min-width: 36px; min-height: 32px; }"
-        )
+        self._left_toolbar.setStyleSheet(_theme.collapsed_toolbar_style())
         self.addToolBar(Qt.LeftToolBarArea, self._left_toolbar)
         self._left_toolbar.setVisible(False)
         self._left_collapsed = False
 
         from montaris.widgets.tool_panel import TOOL_ICONS, _QTA_ICONS, _tool_icon
-        _expand_ico = _qta_icon('fa6s.angles-right')
-        expand_left_act = QAction("Expand") if not _expand_ico else QAction(_expand_ico, "", self)
-        expand_left_act.setToolTip("Expand Toolbox (Ctrl+[)")
-        expand_left_act.triggered.connect(self._toggle_left_sidebar)
-        self._left_toolbar.addAction(expand_left_act)
+        _expand_ico = _qta_icon('fa6s.up-right-and-down-left-from-center')
+        self._left_expand_act = QAction("Expand") if not _expand_ico else QAction(_expand_ico, "", self)
+        self._left_expand_act.setToolTip("Expand Toolbox (Ctrl+[)")
+        self._left_expand_act.triggered.connect(self._toggle_left_sidebar)
+        self._left_toolbar.addAction(self._left_expand_act)
         self._left_toolbar.addSeparator()
 
         self._left_tool_actions = {}
@@ -416,26 +414,23 @@ class MontarisApp(QMainWindow):
         self._right_toolbar.setOrientation(Qt.Vertical)
         self._right_toolbar.setMovable(False)
         self._right_toolbar.setIconSize(QSize(28, 28))
-        self._right_toolbar.setStyleSheet(
-            "QToolBar { spacing: 2px; padding: 2px; }"
-            "QToolButton { font-size: 18px; min-width: 36px; min-height: 32px; }"
-        )
+        self._right_toolbar.setStyleSheet(_theme.collapsed_toolbar_style())
         self.addToolBar(Qt.RightToolBarArea, self._right_toolbar)
         self._right_toolbar.setVisible(False)
         self._right_collapsed = False
 
-        _expand_left_ico = _qta_icon('fa6s.angles-left')
-        expand_right_act = QAction("Expand") if not _expand_left_ico else QAction(_expand_left_ico, "", self)
-        expand_right_act.setToolTip("Expand Layers & Properties (Ctrl+])")
-        expand_right_act.triggered.connect(self._toggle_right_sidebar)
-        self._right_toolbar.addAction(expand_right_act)
-        self._icon_registry.append((expand_right_act, 'fa6s.angles-left'))
+        _expand_left_ico = _qta_icon('fa6s.up-right-and-down-left-from-center')
+        self._right_expand_act = QAction("Expand") if not _expand_left_ico else QAction(_expand_left_ico, "", self)
+        self._right_expand_act.setToolTip("Expand Layers & Properties (Ctrl+])")
+        self._right_expand_act.triggered.connect(self._toggle_right_sidebar)
+        self._right_toolbar.addAction(self._right_expand_act)
+        self._icon_registry.append((self._right_expand_act, 'fa6s.up-right-and-down-left-from-center'))
 
         self._right_toolbar.addSeparator()
 
         # Quick-access actions for collapsed right sidebar (icon-only)
         _rt_actions = [
-            ('fa6s.plus',                  "Add ROI",             lambda: self.add_roi_layer()),
+            ('fa6s.plus',                  "Add ROI",             lambda: self._on_roi_added()),
             ('fa6s.trash-can',             "Delete Active ROI",   lambda: self.clear_active_roi()),
             ('fa6s.eye',                   "Toggle Visibility",   lambda: self._toggle_active_visibility()),
             ('fa6s.layer-group',           "Layers",              lambda: self._expand_right_to_layers()),
@@ -457,7 +452,7 @@ class MontarisApp(QMainWindow):
             self._right_toolbar.addAction(act)
 
         # Full-width clickable header bar for right sidebar
-        _collapse_right_ico = _qta_icon('fa6s.angles-right')
+        _collapse_right_ico = _qta_icon('fa6s.down-left-and-up-right-to-center')
         if _collapse_right_ico:
             self._right_collapse_btn = QPushButton(_collapse_right_ico, " Layers && Properties")
         else:
@@ -480,6 +475,7 @@ class MontarisApp(QMainWindow):
         self.tool_panel.export_roi_zip_requested.connect(self.export_all_rois_zip)
         self.tool_panel.load_instructions_requested.connect(self.load_instructions_file)
         self.tool_panel.view_instructions_requested.connect(self._view_instructions)
+        self.tool_panel.fit_to_window_requested.connect(self.canvas.fit_to_window)
         self.canvas.viewport_changed.connect(self._update_minimap_viewport)
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
         self.layer_panel.visibility_changed.connect(self.canvas.refresh_overlays)
@@ -496,8 +492,6 @@ class MontarisApp(QMainWindow):
 
     def _setup_menus(self):
         menubar = self.menuBar()
-        # Track (widget, icon_name) for theme-aware icon refresh.
-        self._icon_registry = []
 
         # File
         file_menu = menubar.addMenu("&File")
@@ -799,11 +793,9 @@ class MontarisApp(QMainWindow):
         ss_btn = QPushButton(_ss_ico, " Screenshot") if _ss_ico else QPushButton("\U0001F4F7 Screenshot")
         ss_btn.setToolTip("Save full app screenshot (Ctrl+Shift+P)")
         ss_btn.setFlat(True)
-        ss_btn.setStyleSheet(
-            "QPushButton { padding: 2px 10px; font-size: 12px; }"
-            "QPushButton:hover { background: rgba(255,255,255,20); border-radius: 3px; }"
-        )
+        ss_btn.setStyleSheet(_theme.screenshot_btn_style())
         ss_btn.clicked.connect(self._take_app_screenshot)
+        self._ss_btn = ss_btn
         self._icon_registry.append((ss_btn, 'fa6s.camera'))
         menubar.setCornerWidget(ss_btn, Qt.TopRightCorner)
 
@@ -1104,6 +1096,8 @@ class MontarisApp(QMainWindow):
         name = generate_unique_roi_name(base, self.layer_stack.roi_layers)
         roi = ROILayer(name, w, h)
         self.layer_stack.add_roi(roi)
+        from montaris.core.undo import AddROIUndoCommand
+        self.undo_stack.push(AddROIUndoCommand(self.layer_stack, roi))
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()
 
@@ -1260,7 +1254,10 @@ class MontarisApp(QMainWindow):
         for sep in self._toolbar_seps:
             sep.setStyleSheet(f"color: {_sep_c};")
         self._right_collapse_btn.setStyleSheet(_theme.collapse_btn_style())
+        self._left_toolbar.setStyleSheet(_theme.collapsed_toolbar_style())
+        self._right_toolbar.setStyleSheet(_theme.collapsed_toolbar_style())
         self._move_hint.setStyleSheet(_theme.hint_style())
+        self._ss_btn.setStyleSheet(_theme.screenshot_btn_style())
         # Refresh icon colors across the app
         if _HAS_QTA:
             from montaris.widgets.tool_panel import _QTA_ICONS
@@ -1270,7 +1267,8 @@ class MontarisApp(QMainWindow):
                 if name in _QTA_ICONS:
                     act.setIcon(qta.icon(_QTA_ICONS[name], color=color))
             # Collapse / expand header buttons
-            self._right_collapse_btn.setIcon(qta.icon('fa6s.angles-right', color=color))
+            self._right_collapse_btn.setIcon(qta.icon('fa6s.down-left-and-up-right-to-center', color=color))
+            self._left_expand_act.setIcon(qta.icon('fa6s.up-right-and-down-left-from-center', color=color))
             # Refresh all registered menu/toolbar icons
             for widget, icon_name in self._icon_registry:
                 widget.setIcon(qta.icon(icon_name, color=color))
@@ -2939,18 +2937,27 @@ class MontarisApp(QMainWindow):
         if text is None:
             QMessageBox.information(self, "Info", "No instructions loaded yet.")
             return
+        # Reuse existing window if still open
+        existing = getattr(self, '_instructions_dlg', None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
         dlg = QDialog(self)
         dlg.setWindowTitle("Instructions")
         dlg.resize(800, 600)
+        dlg.setModal(False)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
         layout = QVBoxLayout(dlg)
         te = QTextEdit()
         te.setReadOnly(True)
         te.setPlainText(text)
         layout.addWidget(te)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
-        bb.rejected.connect(dlg.reject)
+        bb.rejected.connect(dlg.close)
         layout.addWidget(bb)
-        dlg.exec()
+        self._instructions_dlg = dlg
+        dlg.show()
 
     def clear_active_roi(self):
         """Remove selected ROI(s), or the active ROI if none selected."""
@@ -3021,6 +3028,12 @@ class MontarisApp(QMainWindow):
 
     def _refresh_affected_layers(self, cmd):
         """Refresh only the layers affected by an undo/redo command."""
+        from montaris.core.undo import AddROIUndoCommand
+        if isinstance(cmd, AddROIUndoCommand):
+            # ROI added/removed — need full refresh
+            self.canvas.refresh_overlays()
+            return
+
         layers = set()
         if hasattr(cmd, 'commands'):
             # CompoundUndoCommand
@@ -3051,7 +3064,12 @@ class MontarisApp(QMainWindow):
         try:
             idx = self.layer_stack.roi_layers.index(roi)
         except ValueError:
-            if self.canvas._active_layer:
+            # ROI was removed (e.g. undo of add) — clear if it was active
+            if self.canvas._active_layer is roi:
+                self.canvas._active_layer = None
+                self.canvas._selection._layers.clear()
+                self.properties_panel.set_layer(None)
+            elif self.canvas._active_layer:
                 self.properties_panel.set_layer(self.canvas._active_layer)
             return
         self.canvas.set_active_layer(roi)

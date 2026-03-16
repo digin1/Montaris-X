@@ -51,6 +51,29 @@ def collapse_btn_style():
     )
 
 
+def collapsed_toolbar_style():
+    """CSS for collapsed sidebar toolbars (left/right)."""
+    if is_dark():
+        return (
+            "QToolBar { spacing: 2px; padding: 2px; background: #353535;"
+            " border: none; }"
+            "QToolButton { font-size: 18px; min-width: 36px; min-height: 32px;"
+            " background: #3a3a3a; border: 1px solid #4a4a4a; border-radius: 3px; }"
+            "QToolButton:hover { background: #4a4a4a; border-color: #5a5a5a; }"
+            "QToolButton:pressed { background: #2a2a2a; }"
+            "QToolButton:checked { background: #4a6a8a; border-color: #5a9ad5; }"
+        )
+    return (
+        "QToolBar { spacing: 2px; padding: 2px; background: #e8e8e8;"
+        " border: none; }"
+        "QToolButton { font-size: 18px; min-width: 36px; min-height: 32px;"
+        " background: #e0e0e0; border: 1px solid #ccc; border-radius: 3px; }"
+        "QToolButton:hover { background: #d0d0d0; border-color: #bbb; }"
+        "QToolButton:pressed { background: #c0c0c0; }"
+        "QToolButton:checked { background: #b0c8e0; border-color: #4a8abf; }"
+    )
+
+
 def toolbar_btn_style():
     """CSS for top toolbar buttons (Undo, Redo, Save Progress, etc.)."""
     if is_dark():
@@ -442,12 +465,25 @@ def student_label_style():
             " color: #1a8a6a; padding: 0 8px; }")
 
 
+def screenshot_btn_style():
+    """CSS for the Screenshot button in the menu bar."""
+    if is_dark():
+        return (
+            "QPushButton { padding: 2px 10px; font-size: 12px; color: #ffffff; }"
+            "QPushButton:hover { background: rgba(255,255,255,20); border-radius: 3px; }"
+        )
+    return (
+        "QPushButton { padding: 2px 10px; font-size: 12px; color: #111; }"
+        "QPushButton:hover { background: rgba(0,0,0,10); border-radius: 3px; }"
+    )
+
+
 def zoom_bar_style():
     """CSS for the floating zoom bar container."""
     if is_dark():
-        return ("QWidget { background: rgba(30,30,30,200);"
+        return ("#FloatingBar { background: rgba(30,30,30,200);"
                 " border-radius: 6px; }")
-    return ("QWidget { background: rgba(245,245,245,210);"
+    return ("#FloatingBar { background: rgba(245,245,245,210);"
             " border-radius: 6px; }")
 
 
@@ -456,13 +492,13 @@ def zoom_bar_button_style():
     if is_dark():
         return (
             "QPushButton { background: transparent; border: none;"
-            " border-radius: 4px; padding: 2px; }"
+            " border-radius: 4px; padding: 2px; color: #ffffff; }"
             "QPushButton:hover { background: rgba(255,255,255,30); }"
             "QPushButton:pressed { background: rgba(255,255,255,50); }"
         )
     return (
         "QPushButton { background: transparent; border: none;"
-        " border-radius: 4px; padding: 2px; }"
+        " border-radius: 4px; padding: 2px; color: #111; }"
         "QPushButton:hover { background: rgba(0,0,0,15); }"
         "QPushButton:pressed { background: rgba(0,0,0,30); }"
     )
