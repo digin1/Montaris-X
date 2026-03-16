@@ -1,2 +1,2 @@
 """Montaris-X: Cross-platform ROI editor for scientific images."""
-__version__ = "2.1.2"
+__version__ = "2.1.3"

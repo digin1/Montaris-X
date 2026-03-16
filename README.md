@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/v/montaris-x?color=blue&v=2.1.2" alt="PyPI"></a>
-  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/pyversions/montaris-x?v=2.1.2" alt="Python"></a>
+  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/v/montaris-x?color=blue&v=2.1.3" alt="PyPI"></a>
+  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/pyversions/montaris-x?v=2.1.3" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/digin1/Montaris-X" alt="License"></a>
   <a href="https://github.com/digin1/Montaris-X/actions"><img src="https://img.shields.io/github/actions/workflow/status/digin1/Montaris-X/tests.yml?label=tests" alt="Tests"></a>
 </p>
