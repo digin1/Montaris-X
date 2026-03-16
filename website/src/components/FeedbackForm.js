@@ -22,7 +22,7 @@ export default function FeedbackForm() {
     window.open(
       `https://github.com/digin1/Montaris-X/issues/new?title=${title}&body=${body}&labels=feedback`,
       '_blank',
-      'noopener',
+      'noopener,noreferrer',
     );
     setSubmitted(true);
   }
@@ -74,6 +74,7 @@ export default function FeedbackForm() {
         rows={4}
         placeholder="Tell us what you think, request a feature, or report a bug…"
         required
+        aria-required="true"
         value={message}
         onChange={(e) => setMessage(e.target.value)}
       />
