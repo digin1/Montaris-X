@@ -5,12 +5,13 @@ Usage:
 """
 import os
 import time
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from PySide6.QtCore import QPointF
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 pytestmark = pytest.mark.headed
 
@@ -53,3 +54,62 @@ class TestLoadImageAndRois:
         rois = window.layer_stack.roi_layers
         nonempty = [r for r in rois if np.any(r.mask)]
         assert len(nonempty) > 0, "All ROI masks are empty"
+
+
+class TestNoSelectionWarnings:
+    """Verify that ROI operations warn the user when no ROI is selected.
+
+    Reproduces the issue Nic reported: "no warning message appears when
+    trying to Duplicate with no ROI selected."
+    """
+
+    def test_duplicate_no_selection_warns(self, app_with_real_image):
+        """Clicking Duplicate with no ROI selected should show a warning."""
+        window = app_with_real_image
+        panel = window.layer_panel
+        # Deselect everything
+        panel.list_widget.clearSelection()
+        panel.list_widget.setCurrentRow(-1)
+        QApplication.processEvents()
+
+        roi_count_before = len(window.layer_stack.roi_layers)
+
+        with patch.object(QMessageBox, 'information') as mock_info:
+            panel._duplicate_selected()
+            QApplication.processEvents()
+
+        roi_count_after = len(window.layer_stack.roi_layers)
+        assert roi_count_after == roi_count_before, \
+            "Duplicate should not create a new ROI when nothing is selected"
+        mock_info.assert_called_once(), \
+            "Duplicate should show a warning when no ROI is selected"
+
+    def test_merge_no_selection_warns(self, app_with_real_image):
+        """Clicking Merge with <2 ROIs selected should show a warning."""
+        window = app_with_real_image
+        panel = window.layer_panel
+        panel.list_widget.clearSelection()
+        panel.list_widget.setCurrentRow(-1)
+        QApplication.processEvents()
+
+        with patch.object(QMessageBox, 'information') as mock_info:
+            panel._merge_selected()
+            QApplication.processEvents()
+
+        mock_info.assert_called_once(), \
+            "Merge should show a warning when fewer than 2 ROIs are selected"
+
+    def test_rename_no_selection_warns(self, app_with_real_image):
+        """Clicking Rename with no ROI selected should show a warning."""
+        window = app_with_real_image
+        panel = window.layer_panel
+        panel.list_widget.clearSelection()
+        panel.list_widget.setCurrentRow(-1)
+        QApplication.processEvents()
+
+        with patch.object(QMessageBox, 'information') as mock_info:
+            panel._rename_selected()
+            QApplication.processEvents()
+
+        mock_info.assert_called_once(), \
+            "Rename should show a warning when no ROI is selected"

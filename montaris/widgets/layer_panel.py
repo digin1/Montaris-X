@@ -639,19 +639,21 @@ class LayerPanel(QWidget):
     def _duplicate_selected(self):
         row = self.list_widget.currentRow()
         item = self.list_widget.item(row)
-        if item:
-            data = item.data(Qt.UserRole)
-            if data and data[0] == "roi":
-                self.layer_stack.duplicate_roi(data[1])
-                self.refresh()
-                self.visibility_changed.emit()
+        if not item or not (data := item.data(Qt.UserRole)) or data[0] != "roi":
+            QMessageBox.information(self, "Duplicate", "Select an ROI to duplicate.")
+            return
+        self.layer_stack.duplicate_roi(data[1])
+        self.refresh()
+        self.visibility_changed.emit()
 
     def _merge_selected(self):
         indices = self._get_selected_roi_indices()
-        if len(indices) >= 2:
-            self.layer_stack.merge_rois(indices)
-            self.refresh()
-            self.visibility_changed.emit()
+        if len(indices) < 2:
+            QMessageBox.information(self, "Merge", "Select at least 2 ROIs to merge.")
+            return
+        self.layer_stack.merge_rois(indices)
+        self.refresh()
+        self.visibility_changed.emit()
 
     def _insert_roi_at(self, index):
         img = self.layer_stack.image_layer
@@ -740,20 +742,20 @@ class LayerPanel(QWidget):
     def _rename_selected(self):
         row = self.list_widget.currentRow()
         item = self.list_widget.item(row)
-        if item:
-            data = item.data(Qt.UserRole)
-            if data and data[0] == "roi":
-                roi = self.layer_stack.get_roi(data[1])
-                if roi:
-                    name, ok = QInputDialog.getText(
-                        self, "Rename ROI", "Name:", text=roi.name
-                    )
-                    if ok and name:
-                        validated = generate_unique_roi_name(
-                            name, self.layer_stack.roi_layers
-                        )
-                        roi.name = validated
-                        self.refresh()
+        if not item or not (data := item.data(Qt.UserRole)) or data[0] != "roi":
+            QMessageBox.information(self, "Rename", "Select an ROI to rename.")
+            return
+        roi = self.layer_stack.get_roi(data[1])
+        if roi:
+            name, ok = QInputDialog.getText(
+                self, "Rename ROI", "Name:", text=roi.name
+            )
+            if ok and name:
+                validated = generate_unique_roi_name(
+                    name, self.layer_stack.roi_layers
+                )
+                roi.name = validated
+                self.refresh()
 
     def _move_roi_to(self, current_index):
         """Move ROI to a specific position (B.22)."""
