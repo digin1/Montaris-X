@@ -285,6 +285,7 @@ class TestTransformToolGUI:
         tool = TransformTool(app)
         tool.on_press(QPointF(20, 20), roi1, app.canvas)
         # Union bbox should span both ROIs
+        assert tool._bbox is not None
         y1, y2, x1, x2 = tool._bbox
         assert y1 == 10  # roi1 starts at 10
         assert y2 == 70  # roi2 ends at 70

@@ -40,13 +40,14 @@ def get_component_at(mask, x, y, bbox=None):
     return ndimage.binary_propagation(seed, mask=(mask > 0))
 
 
-def label_connected_components(mask):
+def label_connected_components(mask) -> tuple[np.ndarray, int]:
     """Label connected components in a binary mask.
 
     Returns:
         (label_array, n_components) where label_array has integer labels 1..n
     """
-    return ndimage.label(mask > 0)
+    result = ndimage.label(mask > 0)
+    return result[0], int(result[1])  # type: ignore[index]
 
 
 def get_component_bbox(label_array, label_id):

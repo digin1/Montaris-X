@@ -82,6 +82,23 @@ montaris = ["assets/*"]
 [tool.setuptools.dynamic]
 version = {attr = "montaris.__version__"}
 
+[tool.pyright]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+include = ["montaris", "tests"]
+reportMissingImports = "warning"
+reportMissingTypeStubs = false
+# PySide6 stubs are incomplete — these produce many false positives
+reportAttributeAccessIssue = "warning"
+reportOptionalMemberAccess = "warning"
+reportOptionalSubscript = "warning"
+# QSettings.value() returns object, numpy stubs are complex
+reportArgumentType = "warning"
+reportCallIssue = "warning"
+reportOperatorIssue = "warning"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyside6"

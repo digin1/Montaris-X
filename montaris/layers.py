@@ -241,10 +241,6 @@ class ROILayer:
             self._mask_shape = value.shape
         self.invalidate_bbox()
 
-    @property
-    def shape(self):
-        return self._mask_shape
-
     def compress(self):
         """Compress mask to RLE, freeing the numpy array."""
         if self._mask is not None:
@@ -502,6 +498,6 @@ class MontageDocument:
     })
     color_index: int = 0
     downsample_factor: int = 1
-    original_shape: tuple = None
-    tint_color: tuple = None  # (R, G, B) or None for grayscale
-    image_path: str = None  # full path to the source image file
+    original_shape: tuple | None = None
+    tint_color: tuple | None = None  # (R, G, B) or None for grayscale
+    image_path: str | None = None  # full path to the source image file

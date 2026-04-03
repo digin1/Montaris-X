@@ -306,7 +306,8 @@ class MoveTool(BaseTool):
             new_mask = np.zeros_like(old_mask)
             ys, xs = np.where(old_mask)
             nys, nxs = ys + idx_dy, xs + idx_dx
-            mh, mw = new_mask.shape
+            s = new_mask.shape
+            mh, mw = s[0], s[1]  # type: ignore[index]
             v = (nys >= 0) & (nys < mh) & (nxs >= 0) & (nxs < mw)
             new_mask[nys[v], nxs[v]] = True
             self._multi_comp_mask = new_mask

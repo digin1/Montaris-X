@@ -138,6 +138,7 @@ class TestDirtyRegion:
         roi = ROILayer("test", 100, 80)
         roi.mark_dirty((10, 10, 20, 20))
         roi.mark_dirty((50, 50, 20, 20))
+        assert roi.dirty_rect is not None
         x, y, w, h = roi.dirty_rect
         assert x == 10
         assert y == 10

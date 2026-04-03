@@ -220,7 +220,7 @@ class TransformTool(BaseTool):
             self._update_hover(pos, canvas)
             return
 
-        if self._active_handle is None or not self._snapshots:
+        if self._active_handle is None or not self._snapshots or self._bbox is None:
             return
 
         dx = pos.x() - self._start_pos.x()
