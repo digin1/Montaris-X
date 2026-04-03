@@ -604,8 +604,13 @@ class LayerPanel(QWidget):
                                      QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
-        # Batch remove without per-item signal/refresh
+        # Build undo entries before removing
         app = self.window()
+        entries = []
+        for idx in sorted(indices):
+            if 0 <= idx < len(self.layer_stack.roi_layers):
+                entries.append((idx, self.layer_stack.roi_layers[idx]))
+
         # Silent-clear selection and active layer before removing to avoid
         # signal cascades accessing deleted layer references
         if hasattr(app, 'canvas'):
@@ -614,6 +619,11 @@ class LayerPanel(QWidget):
         for idx in sorted(indices, reverse=True):
             if 0 <= idx < len(self.layer_stack.roi_layers):
                 self.layer_stack.roi_layers.pop(idx)
+
+        # Push undo command so deleted ROIs can be recovered
+        if entries and hasattr(app, 'undo_stack'):
+            from montaris.core.undo import RemoveROIUndoCommand
+            app.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
         # Now emit signals after state is consistent
         self.layer_stack.changed.emit()
         if hasattr(app, 'canvas'):
@@ -632,8 +642,15 @@ class LayerPanel(QWidget):
         )
         if reply != QMessageBox.Yes:
             return
+        # Build undo entries before clearing
+        entries = list(enumerate(self.layer_stack.roi_layers))
         self.layer_stack.roi_layers.clear()
         self.layer_stack._color_index = 0
+        # Push undo so all ROIs can be recovered
+        app = self.window()
+        if entries and hasattr(app, 'undo_stack'):
+            from montaris.core.undo import RemoveROIUndoCommand
+            app.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
         self.all_cleared.emit()
 
     def _duplicate_selected(self):

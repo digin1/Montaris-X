@@ -3081,8 +3081,8 @@ class MontarisApp(QMainWindow):
 
     def _refresh_affected_layers(self, cmd):
         """Refresh only the layers affected by an undo/redo command."""
-        from montaris.core.undo import AddROIUndoCommand
-        if isinstance(cmd, AddROIUndoCommand):
+        from montaris.core.undo import AddROIUndoCommand, RemoveROIUndoCommand
+        if isinstance(cmd, (AddROIUndoCommand, RemoveROIUndoCommand)):
             # ROI added/removed — need full refresh
             self.canvas.refresh_overlays()
             return

@@ -185,6 +185,74 @@ class TestTransformUndoVisual:
                     f"Tool bbox should match undone ROI bbox {bbox_before}, got {tool._bbox}"
 
 
+class TestUndoDeleteROI:
+    """Deleted ROIs should be recoverable via undo."""
+
+    def test_undo_single_delete(self, app_with_drawn_roi):
+        window = app_with_drawn_roi
+        panel = window.layer_panel
+        rois_before = list(window.layer_stack.roi_layers)
+        count_before = len(rois_before)
+        assert count_before > 0
+
+        # Find the first ROI row in the list widget
+        from PySide6.QtCore import Qt as QtCore_Qt
+        roi_row = None
+        for i in range(panel.list_widget.count()):
+            item = panel.list_widget.item(i)
+            data = item.data(QtCore_Qt.UserRole)
+            if data and data[0] == "roi":
+                roi_row = i
+                break
+        assert roi_row is not None, "No ROI row found in list widget"
+
+        # Select the ROI row
+        panel.list_widget.setCurrentRow(roi_row)
+        panel.list_widget.item(roi_row).setSelected(True)
+        QApplication.processEvents()
+
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.Yes):
+            panel._remove_selected()
+        QApplication.processEvents()
+
+        assert len(window.layer_stack.roi_layers) == count_before - 1
+
+        # Undo should restore the deleted ROI
+        window.undo()
+        QApplication.processEvents()
+
+        assert len(window.layer_stack.roi_layers) == count_before, \
+            "Undo should restore the deleted ROI"
+        assert rois_before[0] in window.layer_stack.roi_layers, \
+            "The specific deleted ROI should be back"
+
+    def test_undo_clear_all(self, app_with_real_image):
+        """Undo after Clear All should restore all ROIs."""
+        window = app_with_real_image
+        rois_before = list(window.layer_stack.roi_layers)
+        count_before = len(rois_before)
+        assert count_before > 0
+
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.Yes):
+            window.layer_panel._clear_all()
+        QApplication.processEvents()
+
+        assert len(window.layer_stack.roi_layers) == 0
+
+        # Undo should restore all ROIs
+        window.undo()
+        QApplication.processEvents()
+
+        assert len(window.layer_stack.roi_layers) == count_before, \
+            f"Undo should restore all {count_before} ROIs, got {len(window.layer_stack.roi_layers)}"
+
+        _save_screenshot(window.canvas, "12_after_undo_clear_all")
+
+
 class TestDeleteAllVisual:
     """After Delete All ROIs, no ROI outlines should remain on the canvas."""
 

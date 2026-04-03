@@ -19,14 +19,26 @@ class UndoCommand:
         from montaris.core.rle import rle_decode
         return rle_decode(*self._new_rle)
 
+    @staticmethod
+    def _safe_decode(rle_pair, expected_shape):
+        from montaris.core.rle import rle_decode
+        import numpy as np
+        data = rle_decode(*rle_pair)
+        if data.shape != expected_shape:
+            # RLE stored a (0,0) shape for an all-zeros region — rebuild
+            return np.zeros(expected_shape, dtype=np.uint8)
+        return data
+
     def undo(self):
         y1, y2, x1, x2 = self.bbox
-        self.roi_layer.mask[y1:y2, x1:x2] = self._decode_old()
+        self.roi_layer.mask[y1:y2, x1:x2] = self._safe_decode(
+            self._old_rle, (y2 - y1, x2 - x1))
         self.roi_layer.invalidate_bbox()
 
     def redo(self):
         y1, y2, x1, x2 = self.bbox
-        self.roi_layer.mask[y1:y2, x1:x2] = self._decode_new()
+        self.roi_layer.mask[y1:y2, x1:x2] = self._safe_decode(
+            self._new_rle, (y2 - y1, x2 - x1))
         self.roi_layer.invalidate_bbox()
 
     @property
@@ -103,6 +115,33 @@ class AddROIUndoCommand:
     @property
     def byte_size(self):
         return 64
+
+
+class RemoveROIUndoCommand:
+    """Undo command for removing ROI layer(s). Restores them on undo."""
+
+    def __init__(self, layer_stack, entries):
+        """entries: list of (index, roi_layer) tuples, sorted by index."""
+        self.layer_stack = layer_stack
+        self._entries = entries  # [(original_index, roi_layer), ...]
+        self.roi_layer = entries[0][1] if len(entries) == 1 else None
+
+    def undo(self):
+        for idx, roi in self._entries:
+            pos = min(idx, len(self.layer_stack.roi_layers))
+            if roi not in self.layer_stack.roi_layers:
+                self.layer_stack.roi_layers.insert(pos, roi)
+
+    def redo(self):
+        for _, roi in reversed(self._entries):
+            try:
+                self.layer_stack.roi_layers.remove(roi)
+            except ValueError:
+                pass
+
+    @property
+    def byte_size(self):
+        return sum(getattr(r, '_raw_bytes', 64) for _, r in self._entries)
 
 
 def _cmd_byte_size(cmd):
