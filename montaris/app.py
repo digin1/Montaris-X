@@ -1121,6 +1121,9 @@ class MontarisApp(QMainWindow):
         self.properties_panel.set_layer(None)
 
     def _on_all_cleared(self):
+        tool = self.canvas._tool
+        if tool is not None and hasattr(tool, '_clear_handles'):
+            tool._clear_handles(self.canvas)
         self.canvas._active_layer = None
         self.canvas._selection._layers.clear()
         self.canvas.refresh_overlays()
@@ -3015,6 +3018,7 @@ class MontarisApp(QMainWindow):
             EventLogger.instance().log("undo", "undo", bytes=getattr(cmd, 'byte_size', 0))
             self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
+            self._refresh_tool_after_undo()
             self.layer_panel.refresh()
 
     def redo(self):
@@ -3024,7 +3028,56 @@ class MontarisApp(QMainWindow):
             EventLogger.instance().log("undo", "redo", bytes=getattr(cmd, 'byte_size', 0))
             self._refresh_affected_layers(cmd)
             self._auto_select_roi_from_command(cmd)
+            self._refresh_tool_after_undo()
             self.layer_panel.refresh()
+
+    def _refresh_tool_after_undo(self):
+        """Clear and rebuild active tool visuals at the correct position.
+
+        After undo/redo, tool overlays (transform handles, move marching
+        ants) may reflect the pre-undo state. This clears them and
+        rebuilds from the current (post-undo) layer data.
+        """
+        tool = self.canvas._tool
+        if tool is None:
+            return
+
+        # Purge deleted ROIs from selection before rebuilding
+        self.canvas._clean_stale_selection()
+
+        layer = self.canvas._active_layer
+        if layer is None or not getattr(layer, 'is_roi', False):
+            # No active ROI — just clear any stale visuals
+            if hasattr(tool, '_clear_handles'):
+                tool._clear_handles(self.canvas)
+            return
+
+        # TransformTool: full reset + rebuild handles at undone bbox
+        if hasattr(tool, '_show_handles'):
+            tool._clear_handles(self.canvas)
+            target = [layer]
+            if hasattr(tool, '_get_target_layers'):
+                target = tool._get_target_layers(layer, self.canvas)
+            live_rois = set(id(r) for r in self.canvas.layer_stack.roi_layers)
+            target = [t for t in target if id(t) in live_rois]
+            if not target:
+                return
+            bbox = tool._compute_union_bbox(target)
+            if bbox is not None:
+                tool._target_layers = target
+                tool._canvas = self.canvas
+                tool._rotation = 0.0
+                tool._show_handles(bbox, self.canvas)
+
+        # MoveTool: full reset (clears ants + component state) then rebuild
+        elif hasattr(tool, '_show_marching_ants_multi'):
+            tool._clear_handles(self.canvas)
+            sel = self.canvas._selection.layers
+            layers = sel if sel else [layer]
+            visible = [l for l in layers
+                       if getattr(l, 'is_roi', False) and l.get_bbox() is not None]
+            if visible:
+                tool._show_marching_ants_multi(visible, self.canvas)
 
     def _refresh_affected_layers(self, cmd):
         """Refresh only the layers affected by an undo/redo command."""
