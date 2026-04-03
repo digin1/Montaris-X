@@ -1111,7 +1111,15 @@ class MontarisApp(QMainWindow):
 
     def _on_roi_removed(self, index):
         removed = self.layer_stack.get_roi(index)
+        if removed is not None:
+            entries = [(index, removed)]
+        else:
+            entries = []
         self.layer_stack.remove_roi(index)
+        # Push undo command so deleted ROI can be recovered
+        if entries:
+            from montaris.core.undo import RemoveROIUndoCommand
+            self.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
         # Clean stale reference from selection
         if removed and self.canvas._selection.contains(removed):
             self.canvas._selection.remove(removed)
@@ -2980,6 +2988,11 @@ class MontarisApp(QMainWindow):
             if not indices:
                 return
             first_idx = min(indices)
+            # Build undo entries before removing
+            entries = []
+            for idx in sorted(indices):
+                if 0 <= idx < len(self.layer_stack.roi_layers):
+                    entries.append((idx, self.layer_stack.roi_layers[idx]))
             # Block signals during batch removal to prevent cascading updates
             # on stale layer references
             self.canvas._active_layer = None
@@ -2988,6 +3001,10 @@ class MontarisApp(QMainWindow):
             for idx in sorted(indices, reverse=True):
                 if 0 <= idx < len(self.layer_stack.roi_layers):
                     self.layer_stack.roi_layers.pop(idx)
+            # Push undo command so deleted ROIs can be recovered via Ctrl+Z
+            if entries:
+                from montaris.core.undo import RemoveROIUndoCommand
+                self.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
             # Now emit signals after state is consistent
             self.layer_stack.changed.emit()
             # Select adjacent ROI if available
