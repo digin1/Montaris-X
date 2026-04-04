@@ -1767,7 +1767,37 @@ class ImageCanvas(QGraphicsView):
         main_win = self.parent()
         if main_win and hasattr(main_win, 'tool_panel'):
             slider = main_win.tool_panel.size_slider
-            slider.setValue(max(1, min(2000, slider.value() + delta)))
+            current = slider.value()
+            # Adaptive step: fine at low sizes, coarser at high sizes.
+            # Tier boundaries: [20, 100, 500] with steps [1, 2, 5, 10].
+            # Stepping up snaps to the next boundary when crossing it.
+            # Stepping down from a boundary uses the lower tier's step.
+            _BOUNDS = (20, 100, 500)
+            _STEPS = (1, 2, 5, 10)
+
+            def _tier(v):
+                for i, b in enumerate(_BOUNDS):
+                    if v < b:
+                        return i
+                return len(_BOUNDS)
+
+            if delta > 0:
+                tier = _tier(current)
+                new_val = current + _STEPS[tier]
+                # Snap to boundary if we crossed one
+                if tier < len(_BOUNDS) and current < _BOUNDS[tier] < new_val:
+                    new_val = _BOUNDS[tier]
+            else:
+                tier = _tier(current)
+                # At a boundary, use the lower tier's step
+                if tier > 0 and current == _BOUNDS[tier - 1]:
+                    new_val = current - _STEPS[tier - 1]
+                else:
+                    new_val = current - _STEPS[tier]
+                # Snap to boundary if we crossed one
+                if tier > 0 and new_val < _BOUNDS[tier - 1] < current:
+                    new_val = _BOUNDS[tier - 1]
+            slider.setValue(max(1, min(2000, new_val)))
 
     def refresh_brush_cursor(self):
         """Redraw the brush cursor at the last known mouse position."""

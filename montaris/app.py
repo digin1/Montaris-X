@@ -866,10 +866,9 @@ class MontarisApp(QMainWindow):
         tb_lay.addWidget(redo_btn, 0, Qt.AlignVCenter)
         tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
 
-        # -- Group 2: Brush size --
+        # -- Group 2: Brush size (nonlinear slider for fine control at low sizes) --
         self._tb_size_slider = QSlider(Qt.Horizontal)
-        self._tb_size_slider.setRange(1, 2000)
-        self._tb_size_slider.setValue(100)
+        self._tb_size_slider.setRange(0, 1000)
         self._tb_size_slider.setFixedWidth(120)
         self._tb_size_slider.setStyleSheet(_theme.slider_style())
         self._tb_size_spin = QSpinBox()
@@ -882,12 +881,48 @@ class MontarisApp(QMainWindow):
         )
         tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
 
-        # Bidirectional sync between toolbar and tool_panel
-        tp_slider = self.tool_panel.size_slider
-        self._tb_size_slider.valueChanged.connect(tp_slider.setValue)
-        tp_slider.valueChanged.connect(self._tb_size_slider.setValue)
-        self._tb_size_spin.valueChanged.connect(self._tb_size_slider.setValue)
-        self._tb_size_slider.valueChanged.connect(self._tb_size_spin.setValue)
+        # Nonlinear mapping: slider position (0–1000) ↔ brush size (1–2000)
+        # size = 1 + (pos/1000)² × 1999  →  ~22% of slider range covers 1–100
+        import math
+
+        def _pos_to_size(pos):
+            return max(1, min(2000, 1 + round((pos / 1000.0) ** 2 * 1999)))
+
+        def _size_to_pos(size):
+            return max(0, min(1000, round(math.sqrt((size - 1) / 1999.0) * 1000)))
+
+        self._brush_syncing = False
+
+        def _slider_to_size(pos):
+            if self._brush_syncing:
+                return
+            self._brush_syncing = True
+            s = _pos_to_size(pos)
+            self._tb_size_spin.setValue(s)
+            self.tool_panel.size_slider.setValue(s)
+            self._brush_syncing = False
+
+        def _size_to_slider(size):
+            if self._brush_syncing:
+                return
+            self._brush_syncing = True
+            self._tb_size_slider.setValue(_size_to_pos(size))
+            self._tb_size_spin.setValue(size)
+            self._brush_syncing = False
+
+        def _spin_to_all(size):
+            if self._brush_syncing:
+                return
+            self._brush_syncing = True
+            self._tb_size_slider.setValue(_size_to_pos(size))
+            self.tool_panel.size_slider.setValue(size)
+            self._brush_syncing = False
+
+        self._tb_size_slider.valueChanged.connect(_slider_to_size)
+        self.tool_panel.size_slider.valueChanged.connect(_size_to_slider)
+        self._tb_size_spin.valueChanged.connect(_spin_to_all)
+        # Set initial slider position
+        self._tb_size_slider.setValue(_size_to_pos(100))
 
         # -- Group 3: Global opacity --
         self._global_opacity_slider = QSlider(Qt.Horizontal)
