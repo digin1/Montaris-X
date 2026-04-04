@@ -3,6 +3,7 @@ import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import FeedbackForm from '../components/FeedbackForm';
 
 const heroSignals = [
   'Windows, macOS, and Linux',
@@ -391,6 +392,20 @@ export default function Home() {
               <FAQCard key={item.question} {...item} />
             ))}
           </div>
+        </section>
+
+        <section className="container scienceSection">
+          <div className="sectionIntro">
+            <span className="sectionIntro__eyebrow">Feedback</span>
+            <Heading as="h2">Share your thoughts with the team</Heading>
+            <p>
+              Have a feature idea, found a bug, or want to share how you use
+              Montaris-X? Your feedback is submitted as a GitHub issue so the
+              community can track and discuss it.
+            </p>
+          </div>
+
+          <FeedbackForm />
         </section>
 
         <section className="container scienceSection">

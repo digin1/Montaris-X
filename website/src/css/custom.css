@@ -707,6 +707,64 @@ a {
   border-top: 1px solid var(--mx-line);
 }
 
+/* --- Feedback form --- */
+
+.feedbackForm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 32rem;
+  border: 1px solid var(--mx-line);
+  border-radius: var(--mx-radius-lg);
+  background: var(--mx-surface);
+  padding: 2rem;
+  box-shadow: var(--mx-shadow-sm);
+}
+
+.feedbackForm--done {
+  align-items: flex-start;
+}
+
+.feedbackForm__thanks {
+  color: var(--mx-ink-soft);
+  line-height: 1.65;
+}
+
+.feedbackForm__label {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--mx-ink);
+}
+
+.feedbackForm__select,
+.feedbackForm__textarea {
+  border: 1px solid var(--mx-line);
+  border-radius: var(--mx-radius-sm);
+  background: var(--mx-surface);
+  padding: 0.625rem 0.75rem;
+  font-family: var(--ifm-font-family-base);
+  font-size: 0.9375rem;
+  color: var(--mx-ink);
+  transition: border-color 160ms ease-out;
+}
+
+.feedbackForm__select:focus,
+.feedbackForm__textarea:focus {
+  outline: none;
+  border-color: var(--mx-accent);
+  box-shadow: 0 0 0 3px var(--mx-accent-soft);
+}
+
+.feedbackForm__textarea {
+  resize: vertical;
+  min-height: 5rem;
+}
+
+.feedbackForm .button {
+  align-self: flex-start;
+  margin-top: 0.25rem;
+}
+
 /* --- CTA band --- */
 
 .ctaBand {
