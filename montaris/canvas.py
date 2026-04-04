@@ -699,7 +699,7 @@ class ImageCanvas(QGraphicsView):
 
     def _report_render(self, ms, render_type="overlay"):
         """Report a frame to the perf monitor if available."""
-        win = self.parent()
+        win = self.window()
         if win and hasattr(win, 'perf_monitor'):
             win.perf_monitor.record_frame()
             win.perf_monitor.record_render_time(ms)
@@ -789,7 +789,7 @@ class ImageCanvas(QGraphicsView):
             job_i = 0
 
             # Get perf monitor for memory sampling during render
-            _perf = getattr(self.parent(), 'perf_monitor', None) if self.parent() else None
+            _perf = getattr(self.window(), 'perf_monitor', None) if self.window() else None
 
             for batch_start in range(0, nv, batch_size):
                 batch = visible_jobs[batch_start:batch_start + batch_size]
@@ -1367,7 +1367,7 @@ class ImageCanvas(QGraphicsView):
 
     def _app(self):
         """Return parent MontarisApp instance."""
-        return self.parent()
+        return self.window()
 
     def _cb_flip_h(self):
         app = self._app()
@@ -1661,7 +1661,7 @@ class ImageCanvas(QGraphicsView):
             self.cursor_moved.emit(ix, iy, str(val))
         # Update HUD (E.23, E.24)
         zoom = self.transform().m11()
-        ds = getattr(self.parent(), '_downsample_factor', 1) if self.parent() else 1
+        ds = getattr(self.window(), '_downsample_factor', 1) if self.window() else 1
         hud_text = f"I: ({ix}, {iy})  Z: {zoom:.0%}"
         if ds > 1:
             hud_text += f"  DS: {ds}x"
@@ -1764,7 +1764,7 @@ class ImageCanvas(QGraphicsView):
             self.setCursor(Qt.CrossCursor)
 
     def _adjust_brush_size(self, delta):
-        main_win = self.parent()
+        main_win = self.window()
         if main_win and hasattr(main_win, 'tool_panel'):
             slider = main_win.tool_panel.size_slider
             current = slider.value()

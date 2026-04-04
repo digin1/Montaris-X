@@ -383,10 +383,30 @@ class LayerPanel(QWidget):
         row = roi_index + (1 if self.layer_stack.image_layer else 0)
         self.list_widget.setCurrentRow(row)
 
+    def set_layer_stack(self, layer_stack):
+        """Swap the LayerStack this panel displays (used by grid switching)."""
+        self.layer_stack = layer_stack
+        self._updating = True
+        self.list_widget.clearSelection()
+        self.list_widget.setCurrentRow(-1)
+        self._updating = False
+        self.refresh()
+
     def set_selection_model(self, model):
-        """Connect to a SelectionModel for bidirectional sync."""
+        """Connect to a SelectionModel for bidirectional sync.
+
+        Disconnects the previous model first to avoid stale signals.
+        """
+        if self._selection_model is not None:
+            try:
+                self._selection_model.changed.disconnect(
+                    self._on_external_selection_changed)
+            except RuntimeError:
+                pass  # already disconnected
         self._selection_model = model
         model.changed.connect(self._on_external_selection_changed)
+        # Sync the new model's current selection into the list widget
+        self._on_external_selection_changed(model.layers)
 
     def _on_multi_selection_changed(self):
         """Push list-widget multi-selection into SelectionModel."""

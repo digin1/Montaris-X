@@ -14,6 +14,7 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette, QColor,
 
 from montaris.canvas import ImageCanvas
 from montaris.layers import LayerStack, ImageLayer, ROILayer, ROI_COLORS, generate_unique_roi_name, MontageDocument
+from montaris.widgets.canvas_grid import CanvasGrid, GridSetupDialog
 from montaris.widgets.layer_panel import LayerPanel
 from montaris.widgets.tool_panel import ToolPanel
 from montaris.widgets.properties_panel import PropertiesPanel
@@ -180,17 +181,20 @@ class MontarisApp(QMainWindow):
         if os.path.exists(_logo):
             self.setWindowIcon(QIcon(_logo))
 
-        self.layer_stack = LayerStack()
-        self.undo_stack = UndoStack()
+        # These are set properly by _setup_canvas → CanvasGrid
+        self.layer_stack = None
+        self.undo_stack = None
+        self.canvas = None
+        self._adjustments = None
+        self._documents = []
+        self._active_doc_index = -1
+
         self.active_tool = None
         self._compositor = DisplayCompositor()
-        self._adjustments = ImageAdjustments()
         self._auto_overlap = False
         self._downsample_factor = 1
         self._student_session = False
         self._roi_import_path = None  # track where ROI ZIP was loaded from
-        self._documents = []
-        self._active_doc_index = -1
         self._composite_mode = False
         self._session_dir = None  # current session folder path (reused on save)
 
@@ -261,9 +265,17 @@ class MontarisApp(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_canvas(self):
-        self.canvas = ImageCanvas(self.layer_stack, self)
-        self.canvas._adjustments = self._adjustments
-        self.setCentralWidget(self.canvas)
+        self._canvas_grid = CanvasGrid(self, self)
+        self._canvas_grid.setup_grid(1, 1)
+        cell = self._canvas_grid.active_cell
+        # Point app-level refs at the first (and only) cell
+        self.canvas = cell.canvas
+        self.layer_stack = cell.layer_stack
+        self.undo_stack = cell.undo_stack
+        self._adjustments = cell.adjustments
+        self._documents = cell.documents
+        self._active_doc_index = cell.active_doc_index
+        self.setCentralWidget(self._canvas_grid)
 
     def _setup_panels(self):
         # Layer panel
@@ -369,9 +381,9 @@ class MontarisApp(QMainWindow):
         debug_dock.setVisible(False)
         self._debug_dock = debug_dock
 
-        # Wire selection model
+        # Wire selection model + canvas signals (reconnected on cell switch)
         self.layer_panel.set_selection_model(self.canvas._selection)
-        self.canvas._selection.changed.connect(self._on_selection_count_changed)
+        self._connect_canvas_signals()
 
         # Collapsed left toolbar (hidden by default)
         self._left_toolbar = QToolBar("Toolbox", self)
@@ -467,7 +479,7 @@ class MontarisApp(QMainWindow):
         right_header_lay.addWidget(self._right_collapse_btn)
         self._layer_dock.setTitleBarWidget(right_header)
 
-        # Connections
+        # Connections (lambdas resolve self.canvas at call time for grid switching)
         self.tool_panel.collapse_requested.connect(self._toggle_left_sidebar)
         self.tool_panel.tool_changed.connect(self._on_tool_changed)
         self.tool_panel.open_montage_requested.connect(self.open_image)
@@ -475,13 +487,15 @@ class MontarisApp(QMainWindow):
         self.tool_panel.export_roi_zip_requested.connect(self.export_all_rois_zip)
         self.tool_panel.load_instructions_requested.connect(self.load_instructions_file)
         self.tool_panel.view_instructions_requested.connect(self._view_instructions)
-        self.tool_panel.fit_to_window_requested.connect(self.canvas.fit_to_window)
-        self.canvas.viewport_changed.connect(self._update_minimap_viewport)
+        self.tool_panel.fit_to_window_requested.connect(lambda: self.canvas.fit_to_window())
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
-        self.layer_panel.visibility_changed.connect(self.canvas.refresh_overlays)
+        self.layer_panel.visibility_changed.connect(lambda: self.canvas.refresh_overlays())
         self.layer_panel.roi_added.connect(self._on_roi_added)
         self.layer_panel.roi_removed.connect(self._on_roi_removed)
         self.layer_panel.all_cleared.connect(self._on_all_cleared)
+
+        # Grid cell switching
+        self._canvas_grid.active_cell_changed.connect(self._on_active_cell_changed)
 
     def _icon_act(self, icon_name, text, parent=None):
         """Create a QAction with a themed icon and register it for refresh."""
@@ -517,6 +531,11 @@ class MontarisApp(QMainWindow):
         save_roi_act.setShortcut(QKeySequence.Save)
         save_roi_act.triggered.connect(self.save_rois)
         file_menu.addAction(save_roi_act)
+
+        save_all_act = self._icon_act('fa6s.layer-group', "Save &All Grid Sessions")
+        save_all_act.setShortcut(QKeySequence("Ctrl+Alt+S"))
+        save_all_act.triggered.connect(self.save_all_grid_sessions)
+        file_menu.addAction(save_all_act)
 
         file_menu.addSeparator()
 
@@ -568,6 +587,12 @@ class MontarisApp(QMainWindow):
         batch_export_act = self._icon_act('fa6s.boxes-stacked', "Batch Export (choose format)...")
         batch_export_act.triggered.connect(self.batch_export_rois)
         export_menu.addAction(batch_export_act)
+
+        export_menu.addSeparator()
+        export_all_grid_act = self._icon_act('fa6s.table-cells', "All Grid Cells as ZIP...")
+        export_all_grid_act.setShortcut(QKeySequence("Ctrl+Alt+E"))
+        export_all_grid_act.triggered.connect(self.export_all_grid_zips)
+        export_menu.addAction(export_all_grid_act)
 
         file_menu.addSeparator()
 
@@ -657,22 +682,22 @@ class MontarisApp(QMainWindow):
 
         fit_act = self._icon_act('fa6s.expand', "&Fit to Window")
         fit_act.setShortcut(QKeySequence("Ctrl+0"))
-        fit_act.triggered.connect(self.canvas.fit_to_window)
+        fit_act.triggered.connect(lambda: self.canvas.fit_to_window())
         view_menu.addAction(fit_act)
 
         reset_act = self._icon_act('fa6s.magnifying-glass', "&Reset Zoom (1:1)")
         reset_act.setShortcut(QKeySequence("Ctrl+1"))
-        reset_act.triggered.connect(self.canvas.reset_zoom)
+        reset_act.triggered.connect(lambda: self.canvas.reset_zoom())
         view_menu.addAction(reset_act)
 
         zoom_in_act = self._icon_act('fa6s.magnifying-glass-plus', "Zoom &In")
         zoom_in_act.setShortcut(QKeySequence("Ctrl+="))
-        zoom_in_act.triggered.connect(self.canvas.zoom_in)
+        zoom_in_act.triggered.connect(lambda: self.canvas.zoom_in())
         view_menu.addAction(zoom_in_act)
 
         zoom_out_act = self._icon_act('fa6s.magnifying-glass-minus', "Zoom &Out")
         zoom_out_act.setShortcut(QKeySequence("Ctrl+-"))
-        zoom_out_act.triggered.connect(self.canvas.zoom_out)
+        zoom_out_act.triggered.connect(lambda: self.canvas.zoom_out())
         view_menu.addAction(zoom_out_act)
 
         view_menu.addSeparator()
@@ -712,6 +737,19 @@ class MontarisApp(QMainWindow):
         collapse_right_act.setShortcut(QKeySequence("Ctrl+]"))
         collapse_right_act.triggered.connect(self._toggle_right_sidebar)
         view_menu.addAction(collapse_right_act)
+
+        view_menu.addSeparator()
+
+        # Canvas grid layout
+        grid_act = self._icon_act('fa6s.table-cells', "&Grid Layout...")
+        grid_act.triggered.connect(self._show_grid_dialog)
+        view_menu.addAction(grid_act)
+
+        maximize_cell_act = self._icon_act('fa6s.expand', "Ma&ximize Cell")
+        maximize_cell_act.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        maximize_cell_act.triggered.connect(
+            lambda: self._canvas_grid.toggle_maximize())
+        view_menu.addAction(maximize_cell_act)
 
         view_menu.addSeparator()
 
@@ -802,7 +840,6 @@ class MontarisApp(QMainWindow):
     def _setup_statusbar(self):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
-        self.canvas.cursor_moved.connect(self._update_cursor_info)
         # Student Session indicator
         self._student_label = QLabel("")
         self._student_label.setStyleSheet(_theme.student_label_style())
@@ -822,6 +859,196 @@ class MontarisApp(QMainWindow):
         self._move_hint.setStyleSheet(_theme.hint_style())
         self._move_hint.setVisible(False)
         self.statusbar.addPermanentWidget(self._move_hint)
+
+    # -- Canvas grid support -----------------------------------------------
+
+    def _connect_canvas_signals(self):
+        """Connect signals from the current active canvas."""
+        self.canvas._selection.changed.connect(self._on_selection_count_changed)
+        self.canvas.viewport_changed.connect(self._update_minimap_viewport)
+        self.canvas.cursor_moved.connect(self._update_cursor_info)
+
+    def _disconnect_canvas_signals(self, canvas):
+        """Disconnect signals from a canvas before switching away."""
+        try:
+            canvas._selection.changed.disconnect(self._on_selection_count_changed)
+        except RuntimeError:
+            pass
+        try:
+            canvas.viewport_changed.disconnect(self._update_minimap_viewport)
+        except RuntimeError:
+            pass
+        try:
+            canvas.cursor_moved.disconnect(self._update_cursor_info)
+        except RuntimeError:
+            pass
+
+    def _save_cell_state(self):
+        """Persist live app-level state back into the active GridCell."""
+        for c in self._canvas_grid.all_cells():
+            if c.canvas is self.canvas:
+                c.documents = self._documents
+                c.active_doc_index = self._active_doc_index
+                c.downsample_factor = self._downsample_factor
+                c.adjustments = self._adjustments
+                c.session_dir = self._session_dir
+                c.roi_import_path = self._roi_import_path
+                break
+
+    def _on_active_cell_changed(self, cell):
+        """Handle switching the active grid cell — swap all app-level refs."""
+        old_canvas = self.canvas
+
+        # Save current cell state
+        self._save_cell_state()
+
+        # Restore old canvas from composite mode before switching
+        if self._composite_mode:
+            self._composite_mode = False
+            self.display_panel.composite_cb.blockSignals(True)
+            self.display_panel.composite_cb.setChecked(False)
+            self.display_panel.composite_cb.blockSignals(False)
+            old_canvas.set_tint_color(self._get_active_tint())
+            old_canvas.refresh_image()
+
+        # Clean up in-progress tool state on old canvas
+        old_canvas.clear_polygon_preview()
+        old_canvas.hide_brush_preview()
+        old_canvas._hide_stamp_preview()
+
+        # Disconnect old canvas signals
+        self._disconnect_canvas_signals(old_canvas)
+
+        # Swap app-level references
+        self.canvas = cell.canvas
+        self.layer_stack = cell.layer_stack
+        self.undo_stack = cell.undo_stack
+        self._adjustments = cell.adjustments
+        self._documents = cell.documents
+        self._active_doc_index = cell.active_doc_index
+        self._downsample_factor = cell.downsample_factor
+        self._session_dir = cell.session_dir
+        self._roi_import_path = cell.roi_import_path
+
+        # Reconnect canvas signals
+        self._connect_canvas_signals()
+
+        # Update panels
+        self.layer_panel.set_layer_stack(cell.layer_stack)
+        self.layer_panel.set_selection_model(cell.canvas._selection)
+
+        # Create a fresh tool instance for the new canvas (avoids leaking
+        # in-progress state like PolygonTool._vertices).  We bypass
+        # canvas.set_tool() to avoid its side effects (offset flattening,
+        # "All" selection clearing) which would mutate ROI state.
+        tool_name = getattr(self.active_tool, 'name', None)
+        if tool_name:
+            from montaris.tools import get_tool_class
+            # Clear old tool's scene items (e.g. transform handles)
+            old_tool = self.active_tool
+            if old_tool is not None and hasattr(old_tool, '_clear_handles'):
+                old_tool._clear_handles(old_canvas)
+            fresh_tool = get_tool_class(tool_name)(self)
+            # Copy size/tolerance/stamp dims from the tool panel
+            if hasattr(fresh_tool, 'size'):
+                fresh_tool.size = self.tool_panel.size_slider.value()
+            if hasattr(fresh_tool, 'tolerance'):
+                fresh_tool.tolerance = self.tool_panel.tolerance_slider.value()
+            if hasattr(fresh_tool, 'width'):
+                fresh_tool.width = self.tool_panel.stamp_w_spin.value()
+                fresh_tool.height = self.tool_panel.stamp_h_spin.value()
+            self.active_tool = fresh_tool
+            self.canvas._tool = fresh_tool
+            self.canvas._update_cursor()
+            # Keep ToolPanel in sync so slider/button handlers target the fresh tool
+            self.tool_panel._current_tool = fresh_tool
+            # Activate the tool on the new canvas (e.g. show transform handles)
+            if hasattr(fresh_tool, 'on_activate'):
+                fresh_tool.on_activate(self.canvas._active_layer, self.canvas)
+
+        # Sync properties panel
+        active_layer = self.canvas._active_layer
+        self.properties_panel.set_layer(active_layer)
+
+        # Sync adjustments
+        self.canvas._adjustments = self._adjustments
+        if hasattr(self.adjustments_panel, '_adjustments'):
+            self.adjustments_panel._adjustments = self._adjustments
+            self.adjustments_panel._sync_sliders()
+
+        # Update minimap and adjustments panel (clear if empty cell)
+        if self.layer_stack.image_layer:
+            self.minimap.set_image(self.layer_stack.image_layer.data)
+            self.adjustments_panel.set_image_data(self.layer_stack.image_layer.data)
+        else:
+            self.minimap.set_image(None)
+            self.adjustments_panel.set_image_data(None)
+        # Force minimap viewport/scene mapping to match the new canvas
+        self._update_minimap_viewport()
+
+        # Refresh document combo
+        self._doc_combo.blockSignals(True)
+        self._doc_combo.clear()
+        for doc in self._documents:
+            self._doc_combo.addItem(doc.name)
+        if 0 <= self._active_doc_index < len(self._documents):
+            self._doc_combo.setCurrentIndex(self._active_doc_index)
+        self._doc_combo.blockSignals(False)
+
+        # Sync display panel to the new cell's documents
+        self.display_panel.set_channels(
+            [d.name for d in self._documents],
+            {self._active_doc_index} if self._active_doc_index >= 0 else None)
+
+        # Update status
+        self.canvas.refresh_overlays()
+        self._update_tint_btn()
+        tool_name = getattr(self.active_tool, 'name', 'None') if self.active_tool else 'None'
+        roi_info = ""
+        if active_layer and hasattr(active_layer, 'name'):
+            roi_info = f"  |  {active_layer.name}"
+        self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
+
+        r, c = cell.row, cell.col
+        if not self._canvas_grid.is_single():
+            self.toast.show(f"Active: cell ({r+1}, {c+1})", "info")
+
+    def _show_grid_dialog(self):
+        """Open the grid setup dialog."""
+        dlg = GridSetupDialog(
+            self._canvas_grid.rows, self._canvas_grid.cols, self)
+        if dlg.exec() == QDialog.Accepted:
+            rows, cols = dlg.result_size()
+            if rows == self._canvas_grid.rows and cols == self._canvas_grid.cols:
+                return
+            # Save live state so has_content() checks are accurate
+            self._save_cell_state()
+            # Warn if shrinking would destroy cells with content
+            dropped = self._canvas_grid.cells_to_be_dropped(rows, cols)
+            has_work = [c for c in dropped if c.has_content()]
+            if has_work:
+                labels = ", ".join(
+                    f"({c.row+1},{c.col+1})" for c in has_work)
+                ans = QMessageBox.question(
+                    self, "Discard cell data?",
+                    f"Shrinking the grid will discard images/ROIs in "
+                    f"cell(s) {labels}.\n\nContinue?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if ans != QMessageBox.Yes:
+                    return
+            # Disconnect old canvas signals before grid rebuild
+            self._disconnect_canvas_signals(self.canvas)
+            # Track whether setup_grid triggers _on_active_cell_changed
+            old_canvas = self.canvas
+            self._canvas_grid.setup_grid(rows, cols)
+            cell = self._canvas_grid.active_cell
+            if self.canvas is old_canvas:
+                # _on_active_cell_changed did NOT fire (same cell stayed active)
+                # — reconnect manually since we disconnected above
+                self._connect_canvas_signals()
+                self.canvas.refresh_overlays()
+            # else: _on_active_cell_changed already handled everything
+            self.toast.show(f"Grid: {rows} x {cols}", "info")
 
     def _setup_toolbar(self):
         """Add main toolbar with brush size and opacity controls (G.19, G.20)."""
@@ -1228,6 +1455,9 @@ class MontarisApp(QMainWindow):
     def _on_adjustments_changed(self, adjustments):
         self._adjustments = adjustments
         self.canvas._adjustments = adjustments
+        # Persist into the active grid cell so switching away/back preserves them
+        if hasattr(self, '_canvas_grid') and self._canvas_grid.active_cell:
+            self._canvas_grid.active_cell.adjustments = adjustments
         # Debounce: coalesce rapid slider ticks into a single update
         if not hasattr(self, '_adj_timer'):
             self._adj_timer = QTimer(self)
@@ -1414,7 +1644,8 @@ class MontarisApp(QMainWindow):
             )
             if not paths:
                 return
-        self._initial_session_saved = False
+        if hasattr(self, '_canvas_grid') and self._canvas_grid.active_cell:
+            self._canvas_grid.active_cell._initial_session_saved = False
         self._session_dir = None
         self._update_last_dir(paths)
         # Ask downsample once for the batch
@@ -1527,7 +1758,8 @@ class MontarisApp(QMainWindow):
         """Close the current image, prompting user about ROIs."""
         if self.layer_stack.image_layer is None:
             return
-        self._initial_session_saved = False
+        if hasattr(self, '_canvas_grid') and self._canvas_grid.active_cell:
+            self._canvas_grid.active_cell._initial_session_saved = False
         self._session_dir = None
 
         clear_rois = False
@@ -1697,7 +1929,9 @@ class MontarisApp(QMainWindow):
             })
 
         # Recompress ROIs that were decompressed during snapshotting
-        QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
+        _ls = self.layer_stack
+        _cv = self.canvas
+        QTimer.singleShot(0, lambda: _ls.compress_inactive(_cv._active_layer))
 
         if not snapshots:
             self.toast.show("All ROIs are empty — nothing to save", "warning")
@@ -1751,6 +1985,68 @@ class MontarisApp(QMainWindow):
                 self.toast.show(f"Session save failed: {exc}", "error")
 
         QTimer.singleShot(100, _poll_save)
+
+    def save_all_grid_sessions(self):
+        """Save session progress for every grid cell that has content."""
+        if not hasattr(self, '_canvas_grid'):
+            self.save_session_progress()
+            return
+
+        # Persist live state so each cell's fields are up-to-date
+        self._save_cell_state()
+
+        cells_with_content = [
+            c for c in self._canvas_grid.all_cells() if c.has_content()
+        ]
+        if not cells_with_content:
+            self.toast.show("No cells have content to save", "warning")
+            return
+
+        # Remember which cell is currently active so we can restore it
+        original_cell = self._canvas_grid.active_cell
+        saved = 0
+        skipped = 0
+
+        for cell in cells_with_content:
+            # Temporarily swap app-level refs to this cell's state
+            self.layer_stack = cell.layer_stack
+            self.canvas = cell.canvas
+            self._documents = cell.documents
+            self._active_doc_index = cell.active_doc_index
+            self._downsample_factor = cell.downsample_factor
+            self._adjustments = cell.adjustments
+            self._session_dir = cell.session_dir
+            self._roi_import_path = cell.roi_import_path
+
+            if not cell.layer_stack.roi_layers or cell.layer_stack.image_layer is None:
+                skipped += 1
+                continue
+
+            # Use the existing save logic (it reads self.layer_stack, etc.)
+            self.save_session_progress()
+            # Write back session_dir that save_session_progress may have created
+            cell.session_dir = self._session_dir
+            saved += 1
+
+        # Restore refs to the original active cell
+        self.layer_stack = original_cell.layer_stack
+        self.canvas = original_cell.canvas
+        self._documents = original_cell.documents
+        self._active_doc_index = original_cell.active_doc_index
+        self._downsample_factor = original_cell.downsample_factor
+        self._adjustments = original_cell.adjustments
+        self._session_dir = original_cell.session_dir
+        self._roi_import_path = original_cell.roi_import_path
+
+        label = f"({self._canvas_grid.rows}x{self._canvas_grid.cols})"
+        if saved:
+            self.toast.show(
+                f"Saving {saved} cell(s) {label}..." +
+                (f" ({skipped} skipped)" if skipped else ""),
+                "info",
+            )
+        else:
+            self.toast.show(f"No cells had ROIs to save {label}", "warning")
 
     def restore_from_session(self):
         """Restore ROIs from a previous session folder."""
@@ -1908,16 +2204,63 @@ class MontarisApp(QMainWindow):
         self._save_progress_btn.setVisible(checked)
         self._save_progress_shortcut.setEnabled(checked)
 
-    def _auto_save_initial_session(self):
-        """Auto-save session after ROI import (called once per image load)."""
+    def _auto_save_initial_session(self, target_canvas=None):
+        """Auto-save session after ROI import (called once per cell).
+
+        *target_canvas* pins which cell the save is for.  If the user
+        switched away, we temporarily swap refs to save that cell's state
+        rather than retrying indefinitely.
+        """
         if not self._save_progress_act.isChecked():
             return
+
+        # Find the target cell
+        target_cell = None
+        if hasattr(self, '_canvas_grid'):
+            for c in self._canvas_grid.all_cells():
+                if target_canvas is not None and c.canvas is target_canvas:
+                    target_cell = c
+                    break
+            if target_cell is None:
+                target_cell = self._canvas_grid.active_cell
+        if target_cell and getattr(target_cell, '_initial_session_saved', False):
+            return
+
+        need_swap = (target_canvas is not None and target_canvas is not self.canvas
+                     and target_cell is not None)
+        if need_swap:
+            # Target cell is not active — save its state first, then
+            # temporarily swap refs so save_session_progress works on it.
+            self._save_cell_state()
+            saved_refs = (self.layer_stack, self.canvas, self._documents,
+                          self._active_doc_index, self._downsample_factor,
+                          self._adjustments, self._session_dir, self._roi_import_path)
+            self.layer_stack = target_cell.layer_stack
+            self.canvas = target_cell.canvas
+            self._documents = target_cell.documents
+            self._active_doc_index = target_cell.active_doc_index
+            self._downsample_factor = target_cell.downsample_factor
+            self._adjustments = target_cell.adjustments
+            self._session_dir = target_cell.session_dir
+            self._roi_import_path = target_cell.roi_import_path
+
         if not self.layer_stack.roi_layers:
+            if need_swap:
+                (self.layer_stack, self.canvas, self._documents,
+                 self._active_doc_index, self._downsample_factor,
+                 self._adjustments, self._session_dir, self._roi_import_path) = saved_refs
             return
-        if getattr(self, '_initial_session_saved', False):
-            return
-        self._initial_session_saved = True
+
+        if target_cell:
+            target_cell._initial_session_saved = True
         self.save_session_progress()
+
+        if need_swap:
+            # Write back session_dir that may have been created
+            target_cell.session_dir = self._session_dir
+            (self.layer_stack, self.canvas, self._documents,
+             self._active_doc_index, self._downsample_factor,
+             self._adjustments, self._session_dir, self._roi_import_path) = saved_refs
 
     def _auto_detect_session(self, folder):
         """Prompt user if sessions are found for the current image."""
@@ -2735,7 +3078,8 @@ class MontarisApp(QMainWindow):
             EventLogger.instance().log("io", "import_roi_zip",
                 duration_ms=(time.perf_counter() - _t0) * 1000, count=count)
             QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
-            QTimer.singleShot(500, self._auto_save_initial_session)
+            _target = self.canvas
+            QTimer.singleShot(500, lambda: self._auto_save_initial_session(_target))
         except Exception as e:
             QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Error", f"Failed to import ZIP:\n{e}")
@@ -2843,6 +3187,117 @@ class MontarisApp(QMainWindow):
                 self.toast.show(f"Exported {n} ROI(s) to ZIP", "success")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export ZIP:\n{e}")
+
+    def export_all_grid_zips(self):
+        """Export every grid cell's ROIs as a separate ZIP file.
+
+        Prompts once for a directory, then writes one ZIP per cell named
+        ``cell_R{row}C{col}_{stem}.zip`` (or just ``{stem}.zip`` in 1x1 mode).
+        Each cell's own downsample factor is respected for upscaling.
+        """
+        if not hasattr(self, '_canvas_grid'):
+            self.export_all_rois_zip()
+            return
+
+        self._save_cell_state()
+        cells_with_content = [
+            c for c in self._canvas_grid.all_cells()
+            if c.has_content() and c.layer_stack.roi_layers
+               and c.layer_stack.image_layer is not None
+        ]
+        if not cells_with_content:
+            QMessageBox.information(self, "Info", "No cells with ROIs to export.")
+            return
+
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Export All Grid Cells — Choose Directory")
+        if not dir_path:
+            return
+        self._update_last_dir(dir_path + "/")
+
+        original_cell = self._canvas_grid.active_cell
+        exported = 0
+        errors = []
+
+        for cell in cells_with_content:
+            # Swap refs to this cell
+            self.layer_stack = cell.layer_stack
+            self.canvas = cell.canvas
+            self._documents = cell.documents
+            self._active_doc_index = cell.active_doc_index
+            self._downsample_factor = cell.downsample_factor
+            self._adjustments = cell.adjustments
+            self._session_dir = cell.session_dir
+            self._roi_import_path = cell.roi_import_path
+
+            # Determine stem from source image filenames.
+            # Single TIF or multi-channel from one file → use that filename.
+            # Multiple separate TIFs → join unique stems with "+".
+            stem = "untitled"
+            if cell.documents:
+                seen = []
+                for d in cell.documents:
+                    if d.image_path:
+                        s = os.path.splitext(os.path.basename(d.image_path))[0]
+                        if s not in seen:
+                            seen.append(s)
+                if seen:
+                    stem = "+".join(seen)
+                else:
+                    stem = cell.documents[0].name
+
+            if not self._canvas_grid.is_single():
+                # Use image name as primary identifier; append cell position
+                # only to disambiguate when multiple cells share the same stem
+                zip_name = f"{stem}_R{cell.row+1}C{cell.col+1}.zip"
+            else:
+                zip_name = f"{stem}.zip"
+
+            zip_path = os.path.join(dir_path, zip_name)
+
+            try:
+                import zipfile
+                from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi_bytes
+
+                self._flatten_roi_offsets()
+
+                # Ask upscale per-cell only if downsampled; default to original
+                upscale = self._downsample_factor > 1
+                results = []
+                for roi in cell.layer_stack.roi_layers:
+                    mask = self._get_export_mask(roi, upscale)
+                    bbox = self._get_export_bbox(roi, upscale)
+                    roi_dict = mask_to_imagej_roi(mask, roi.name, bbox=bbox)
+                    if roi_dict:
+                        safe = roi.name.replace("/", "_").replace("\\", "_")
+                        results.append((f"{safe}.roi", write_imagej_roi_bytes(roi_dict)))
+                    if upscale:
+                        del mask
+
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for entry_name, entry_bytes in results:
+                        zf.writestr(entry_name, entry_bytes)
+                exported += 1
+            except Exception as e:
+                errors.append(f"Cell ({cell.row+1},{cell.col+1}): {e}")
+
+        # Restore refs
+        self.layer_stack = original_cell.layer_stack
+        self.canvas = original_cell.canvas
+        self._documents = original_cell.documents
+        self._active_doc_index = original_cell.active_doc_index
+        self._downsample_factor = original_cell.downsample_factor
+        self._adjustments = original_cell.adjustments
+        self._session_dir = original_cell.session_dir
+        self._roi_import_path = original_cell.roi_import_path
+
+        if errors:
+            QMessageBox.warning(
+                self, "Export Errors",
+                f"Exported {exported} cell(s) but {len(errors)} failed:\n"
+                + "\n".join(errors))
+        else:
+            self.toast.show(f"Exported {exported} cell(s) as ZIP to {os.path.basename(dir_path)}", "success")
 
     # -- Auto-fit OOB ROIs --
 
@@ -3262,6 +3717,12 @@ class MontarisApp(QMainWindow):
         self._save_progress_act.setChecked(
             self.settings.value("save_progress", False, type=bool))
 
+        # Restore Flip/Rotate on Load
+        self._flip_on_load_act.setChecked(
+            self.settings.value("flip_on_load", False, type=bool))
+        self._rotate_on_load_act.setChecked(
+            self.settings.value("rotate_on_load", False, type=bool))
+
         # Restore theme selection (check radio button; theme itself applied at startup)
         saved_theme = self.settings.value("theme", "dark")
         for act in self._theme_group.actions():
@@ -3279,6 +3740,8 @@ class MontarisApp(QMainWindow):
         self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("student_session", self._student_session_act.isChecked())
         self.settings.setValue("save_progress", self._save_progress_act.isChecked())
+        self.settings.setValue("flip_on_load", self._flip_on_load_act.isChecked())
+        self.settings.setValue("rotate_on_load", self._rotate_on_load_act.isChecked())
         checked_theme = self._theme_group.checkedAction()
         self.settings.setValue("theme", checked_theme.data() if checked_theme else "dark")
         from montaris.core.workers import shutdown_pool
