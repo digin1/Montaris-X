@@ -284,9 +284,12 @@ class LayerPanel(QWidget):
             self.next_roi_btn.setIcon(qta.icon('fa6s.chevron-right', color=color))
             icon_name = getattr(self.overlay_btn, '_qta_name', 'fa6s.eye')
             self.overlay_btn.setIcon(qta.icon(icon_name, color=color))
+        # Rebuild ROI item icons so number text matches the new theme
+        self.refresh()
 
     def refresh(self):
         self._updating = True
+        prev_row = self.list_widget.currentRow()
         self.list_widget.clear()
 
         roi_layers = self.layer_stack.roi_layers
@@ -305,7 +308,7 @@ class LayerPanel(QWidget):
         # O(n) RLE decodes just for the layer panel pixel counts.
         use_bbox_area = len(roi_layers) > 20
         for i, roi in enumerate(roi_layers):
-            icon = self._color_icon(roi.color)
+            icon = self._color_icon(roi.color, number=i + 1)
             bbox = roi.get_bbox()
             if bbox is None:
                 px_count = 0
@@ -316,8 +319,7 @@ class LayerPanel(QWidget):
                 y1, y2, x1, x2 = bbox
                 px_count = int(np.count_nonzero(roi.get_mask_crop((y1, y2, x1, x2))))
             px_counts.append(px_count)
-            display_name = f"({i + 1}) {roi.name}"
-            item = QListWidgetItem(display_name)
+            item = QListWidgetItem(roi.name)
             item.setIcon(icon)
             item.setData(Qt.UserRole, ("roi", i))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
@@ -326,6 +328,10 @@ class LayerPanel(QWidget):
 
         # Update nav bar (G.13) — reuse precomputed pixel counts
         self._update_nav_bar(px_counts)
+
+        # Restore previous selection if still valid
+        if 0 <= prev_row < self.list_widget.count():
+            self.list_widget.setCurrentRow(prev_row)
 
         self._updating = False
 
@@ -408,9 +414,31 @@ class LayerPanel(QWidget):
         if layers:
             self.selection_changed.emit(layers[0])
 
-    def _color_icon(self, color):
-        pixmap = QPixmap(16, 16)
-        pixmap.fill(QColor(*color))
+    def _color_icon(self, color, number=None):
+        """Create a colour-square icon, optionally prefixed with a number."""
+        if number is None:
+            pixmap = QPixmap(16, 16)
+            pixmap.fill(QColor(*color))
+            return QIcon(pixmap)
+        from PySide6.QtGui import QPainter, QFont, QFontMetrics
+        font = QFont()
+        font.setPixelSize(12)
+        fm = QFontMetrics(font)
+        num_text = f"({number})"
+        text_w = fm.horizontalAdvance(num_text) + 2
+        sq = 12  # colour square size
+        gap = 3
+        total_w = text_w + gap + sq
+        h = 16
+        pixmap = QPixmap(total_w, h)
+        pixmap.fill(QColor(0, 0, 0, 0))  # transparent
+        painter = QPainter(pixmap)
+        painter.setFont(font)
+        text_color = QColor('#dcdcdc') if _theme.is_dark() else QColor('#333')
+        painter.setPen(text_color)
+        painter.drawText(0, fm.ascent() + (h - fm.height()) // 2, num_text)
+        painter.fillRect(text_w + gap, (h - sq) // 2, sq, sq, QColor(*color))
+        painter.end()
         return QIcon(pixmap)
 
     def _on_selection_changed(self, row):
