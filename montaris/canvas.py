@@ -1361,6 +1361,25 @@ class ImageCanvas(QGraphicsView):
 
     # -- Zoom helpers -------------------------------------------------------
 
+    _ZOOM_MIN = 0.02   # 2%
+    _ZOOM_MAX = 64.0   # 6400%
+
+    def _clamp_scale(self, factor):
+        """Apply scale factor only if the result stays within zoom limits.
+
+        Returns True if the scale was applied, False if clamped out.
+        """
+        current = abs(self.transform().m11())
+        target = current * factor
+        if target > self._ZOOM_MAX:
+            factor = self._ZOOM_MAX / current
+        elif target < self._ZOOM_MIN:
+            factor = self._ZOOM_MIN / current
+        if abs(factor - 1.0) < 1e-6:
+            return False
+        self.scale(factor, factor)
+        return True
+
     def _update_zoom_pct(self):
         """Sync zoom percentage label to current view transform."""
         zoom = self.transform().m11()
@@ -1376,14 +1395,14 @@ class ImageCanvas(QGraphicsView):
         self._update_zoom_pct()
 
     def zoom_in(self):
-        self.scale(1.25, 1.25)
-        self.viewport_changed.emit()
-        self._update_zoom_pct()
+        if self._clamp_scale(1.25):
+            self.viewport_changed.emit()
+            self._update_zoom_pct()
 
     def zoom_out(self):
-        self.scale(1 / 1.25, 1 / 1.25)
-        self.viewport_changed.emit()
-        self._update_zoom_pct()
+        if self._clamp_scale(1 / 1.25):
+            self.viewport_changed.emit()
+            self._update_zoom_pct()
 
     # ------------------------------------------------------------------
     # LOD / viewport culling
@@ -1488,9 +1507,9 @@ class ImageCanvas(QGraphicsView):
 
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
-        self.viewport_changed.emit()
-        self._update_zoom_pct()
+        if self._clamp_scale(factor):
+            self.viewport_changed.emit()
+            self._update_zoom_pct()
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
