@@ -394,6 +394,25 @@ export default function Home() {
         </section>
 
         <section className="container scienceSection">
+          <div className="sectionIntro" style={{textAlign: 'center', maxWidth: '640px', margin: '0 auto'}}>
+            <span className="sectionIntro__eyebrow">Acknowledgments</span>
+            <p style={{fontSize: '0.95rem', lineHeight: '1.6'}}>
+              Montaris-X is developed in the{' '}
+              <a href="https://www.ed.ac.uk/clinical-brain-sciences">
+                Centre for Clinical Brain Sciences
+              </a>
+              , University of Edinburgh, with support from the{' '}
+              <a href="https://www.ed.ac.uk/clinical-brain-sciences/research/grant-lab">
+                Grant Lab
+              </a>
+              . Special thanks to Prof Seth Grant, Jessica Griffiths, Nicolas
+              Martinez-Wise, Colin Yuan, and everyone in the Grant Lab for
+              their contributions and feedback.
+            </p>
+          </div>
+        </section>
+
+        <section className="container scienceSection">
           <div className="ctaBand">
             <div>
               <span className="sectionIntro__eyebrow sectionIntro__eyebrow--light">
