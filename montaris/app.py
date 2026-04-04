@@ -3096,11 +3096,27 @@ class MontarisApp(QMainWindow):
             if visible:
                 tool._show_marching_ants_multi(visible, self.canvas)
 
+    @staticmethod
+    def _contains_structural_cmd(cmd):
+        """Recursively check if cmd contains an AddROI or RemoveROI command."""
+        from montaris.core.undo import AddROIUndoCommand, RemoveROIUndoCommand
+        if isinstance(cmd, (AddROIUndoCommand, RemoveROIUndoCommand)):
+            return True
+        if hasattr(cmd, 'commands'):
+            return any(MontarisApp._contains_structural_cmd(c) for c in cmd.commands)
+        return False
+
     def _refresh_affected_layers(self, cmd):
         """Refresh only the layers affected by an undo/redo command."""
         from montaris.core.undo import AddROIUndoCommand, RemoveROIUndoCommand
         if isinstance(cmd, (AddROIUndoCommand, RemoveROIUndoCommand)):
             # ROI added/removed — need full refresh
+            self.canvas.refresh_overlays()
+            return
+
+        # Compound that contains an AddROI (create+first-edit merge) also
+        # needs full refresh so the overlay is properly added/removed.
+        if self._contains_structural_cmd(cmd):
             self.canvas.refresh_overlays()
             return
 

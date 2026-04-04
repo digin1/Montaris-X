@@ -166,6 +166,20 @@ class UndoStack:
             self._total_bytes -= _cmd_byte_size(cmd)
         self._stack = self._stack[:self._index + 1]
 
+        # Merge first mask edit into the AddROIUndoCommand that created the ROI,
+        # so a single Ctrl+Z removes both the edit and the creation.
+        # Only merge mask-editing commands, not structural ones (Remove, Offset, etc.)
+        from montaris.core.multi_undo import CompoundUndoCommand
+        _MERGEABLE = (UndoCommand, FlattenUndoCommand, CompoundUndoCommand)
+        if (self._stack
+                and isinstance(self._stack[-1], AddROIUndoCommand)
+                and isinstance(command, _MERGEABLE)
+                and getattr(command, 'roi_layer', None) is not None
+                and command.roi_layer is self._stack[-1].roi_layer):
+            add_cmd = self._stack.pop()
+            self._total_bytes -= _cmd_byte_size(add_cmd)
+            command = CompoundUndoCommand([add_cmd, command])
+
         self._stack.append(command)
         self._total_bytes += _cmd_byte_size(command)
         self._index = len(self._stack) - 1
