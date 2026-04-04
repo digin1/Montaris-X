@@ -822,6 +822,11 @@ class MontarisApp(QMainWindow):
         diag_act.triggered.connect(self._export_diagnostics)
         help_menu.addAction(diag_act)
 
+        help_menu.addSeparator()
+        about_act = self._icon_act('fa6s.circle-info', "&About Montaris-X")
+        about_act.triggered.connect(self._show_about)
+        help_menu.addAction(about_act)
+
         # Screenshot button pinned to the right end of the menu bar
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -3406,6 +3411,76 @@ class MontarisApp(QMainWindow):
     def _show_help(self):
         from montaris.widgets.help_modal import HelpModal
         dlg = HelpModal(self)
+        dlg.exec()
+
+    def _show_about(self):
+        from montaris import __version__
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About Montaris-X")
+        dlg.setFixedWidth(480)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(12)
+        lay.setContentsMargins(24, 24, 24, 24)
+
+        # Title and version
+        title = QLabel(f"<h2>Montaris-X</h2><p>Version {__version__}</p>")
+        title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(title)
+
+        # Description
+        desc = QLabel(
+            "Cross-platform ROI editor for scientific microscopy images."
+        )
+        desc.setAlignment(Qt.AlignCenter)
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        lay.addWidget(line)
+
+        # Credits
+        credits_text = (
+            "<p><b>Developed by</b> Digin Dominic</p>"
+            "<p><b>Acknowledgments</b></p>"
+            "<p>Montaris-X was developed in the "
+            "<a href='https://www.ed.ac.uk/clinical-brain-sciences'>"
+            "Centre for Clinical Brain Sciences</a>, "
+            "University of Edinburgh, with support from the "
+            "<a href='https://www.ed.ac.uk/clinical-brain-sciences/"
+            "research/grant-lab'>Grant Lab</a>.</p>"
+            "<p>Special thanks to:</p>"
+            "<ul>"
+            "<li><b>Prof Seth Grant</b> — Principal Investigator, "
+            "Professor of Molecular Neuroscience</li>"
+            "<li><b>Nicolas Martinez-Wise</b> — Feature design, testing, and bug reports</li>"
+            "<li><b>Jessica Griffiths</b> — Feature design and testing</li>"
+            "<li><b>Colin Yuan</b> — Testing and feedback</li>"
+            "</ul>"
+            "<p>And everyone in the Grant Lab for their continued "
+            "feedback and support.</p>"
+        )
+        credits = QLabel(credits_text)
+        credits.setWordWrap(True)
+        credits.setOpenExternalLinks(True)
+        credits.setTextFormat(Qt.RichText)
+        lay.addWidget(credits)
+
+        # License
+        license_lbl = QLabel(
+            "<p style='color: gray; font-size: 11px;'>"
+            "Released under the MIT License.<br>"
+            "Copyright \u00a9 2026 Digin Dominic and Montaris-X Contributors</p>"
+        )
+        license_lbl.setAlignment(Qt.AlignCenter)
+        license_lbl.setWordWrap(True)
+        lay.addWidget(license_lbl)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn_box.accepted.connect(dlg.accept)
+        lay.addWidget(btn_box)
         dlg.exec()
 
     def _take_app_screenshot(self):
