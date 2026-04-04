@@ -405,9 +405,9 @@ export default function Home() {
               <a href="https://www.ed.ac.uk/clinical-brain-sciences/research/grant-lab">
                 Grant Lab
               </a>
-              . Special thanks to Prof Seth Grant, Jessica Griffiths, Nicolas
-              Martinez-Wise, Colin Yuan, and everyone in the Grant Lab for
-              their contributions and feedback.
+              . Special thanks to Prof Seth Grant, Nicolas Martinez-Wise,
+              Jessica Griffiths, Colin Yuan, and everyone in the Grant Lab
+              for their contributions and feedback.
             </p>
           </div>
         </section>

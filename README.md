@@ -300,8 +300,8 @@ Montaris-X is developed in the [Centre for Clinical Brain Sciences](https://www.
 Special thanks to:
 
 - **Prof Seth Grant** — Principal Investigator, Professor of Molecular Neuroscience
+- **Nicolas Martinez-Wise** — Feature design, testing, and bug reports
 - **Jessica Griffiths** — Feature design and testing
-- **Nicolas Martinez-Wise** — Testing and bug reports
 - **Colin Yuan** — Testing and feedback
 
 And everyone in the Grant Lab for their continued feedback and support.
