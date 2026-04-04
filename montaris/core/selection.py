@@ -35,6 +35,16 @@ class SelectionModel(QObject):
             self._layers.append(layer)
             self.changed.emit(self._layers)
 
+    def make_primary(self, layer):
+        """Move *layer* to position 0 (primary) without dropping others."""
+        if layer not in self._layers:
+            self._layers.insert(0, layer)
+            self.changed.emit(self._layers)
+        elif self._layers[0] is not layer:
+            self._layers.remove(layer)
+            self._layers.insert(0, layer)
+            self.changed.emit(self._layers)
+
     def remove(self, layer):
         if layer in self._layers:
             self._layers.remove(layer)

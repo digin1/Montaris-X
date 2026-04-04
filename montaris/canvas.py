@@ -129,6 +129,9 @@ class ImageCanvas(QGraphicsView):
         # Selection pulse timer (G.23)
         self._pulse_timer = None
 
+        self._prev_selected_ids = set()
+        self._in_set_active_layer = False  # re-entrancy guard
+
         # Prevent re-entrant refresh
         self._refreshing = False
 
@@ -303,7 +306,8 @@ class ImageCanvas(QGraphicsView):
 
     def set_active_layer(self, layer):
         t0 = time.perf_counter()
-        if layer is not self._active_layer:
+        changed = layer is not self._active_layer
+        if changed:
             old = self._active_layer
             # Clear transform/move handles when switching layers
             tool = self._tool
@@ -315,6 +319,19 @@ class ImageCanvas(QGraphicsView):
                 old.compress()
             # Ensure newly active ROI is at LOD 0 so dirty compositing aligns
             self._ensure_active_lod0(layer)
+            # Sync selection BEFORE tool activation so the tool sees the
+            # correct selection state.  Multi-select paths (layer panel
+            # Ctrl/Shift-click) already sync _active_layer via
+            # _on_selection_changed before reaching here, so `changed`
+            # is False and this branch is skipped for those flows.
+            if (layer is not None
+                    and getattr(layer, 'is_roi', False)
+                    and not self._selection.contains(layer)):
+                self._in_set_active_layer = True
+                try:
+                    self._selection.set([layer])
+                finally:
+                    self._in_set_active_layer = False
             # Re-show bbox for new layer if tool supports it
             if tool is not None and hasattr(tool, 'on_activate'):
                 tool.on_activate(layer, self)
@@ -350,9 +367,12 @@ class ImageCanvas(QGraphicsView):
     def _on_selection_changed(self, layers):
         """Sync _active_layer to primary selection and update highlights."""
         _t0 = time.perf_counter()
+        # If called from set_active_layer, it already handled tool activation,
+        # LOD0, and handle management — just update highlights.
+        from_set_active = getattr(self, '_in_set_active_layer', False)
         primary = self._selection.primary
         old = self._active_layer
-        if primary is not None:
+        if primary is not None and not from_set_active:
             self._active_layer = primary
             # Ensure newly active ROI is at LOD 0 so dirty compositing aligns
             if primary is not old:
@@ -360,17 +380,18 @@ class ImageCanvas(QGraphicsView):
         self._update_selection_highlights()
         _t1 = time.perf_counter()
         self._pulse_selection()
-        # Notify tool of layer/selection change so it can refresh visuals
-        tool = self._tool
-        if tool is not None and hasattr(tool, 'on_activate'):
-            if primary is not old:
-                # Layer changed: clear old state, show for new
-                if hasattr(tool, '_clear_handles'):
-                    tool._clear_handles(self)
-                tool.on_activate(primary, self)
-            elif primary is not None:
-                # Same layer but selection changed: refresh
-                tool.on_activate(primary, self)
+        if not from_set_active:
+            # Notify tool of layer/selection change so it can refresh visuals
+            tool = self._tool
+            if tool is not None and hasattr(tool, 'on_activate'):
+                if primary is not old:
+                    # Layer changed: clear old state, show for new
+                    if hasattr(tool, '_clear_handles'):
+                        tool._clear_handles(self)
+                    tool.on_activate(primary, self)
+                elif primary is not None:
+                    # Same layer but selection changed: refresh
+                    tool.on_activate(primary, self)
         _t2 = time.perf_counter()
         from montaris.core.event_logger import EventLogger
         EventLogger.instance().log("tool", "_on_selection_changed",
@@ -388,45 +409,48 @@ class ImageCanvas(QGraphicsView):
                 self._selection.remove(l)
 
     def _update_selection_highlights(self):
-        """Draw actual ROI boundary outline for selected layers.
+        """Re-render ROIs whose selection state changed.
 
-        Skips per-ROI edge highlights when many ROIs are selected
-        (e.g. Transform All) — the transform bbox outline is sufficient
-        and avoids O(n) edge detection passes.
+        Boundaries are now baked into ROI overlays (cyan for selected,
+        yellow for others), so this just refreshes the affected items
+        instead of maintaining separate highlight overlay items.
         """
+        # Clean up any legacy highlight items
         scene = self._scene
         for item in self._selection_highlight_items:
             scene.removeItem(item)
         self._selection_highlight_items.clear()
 
-        selected = self._selection.layers
-        # Skip expensive per-ROI edge highlights for bulk selections
-        if len(selected) > 10:
+        # Determine which ROIs changed selection state or active status
+        new_selected = {id(l) for l in self._selection.layers}
+        old_selected = getattr(self, '_prev_selected_ids', set())
+        changed = old_selected.symmetric_difference(new_selected)
+        self._prev_selected_ids = new_selected
+
+        active_rid = id(self._active_layer) if self._active_layer else None
+        prev_active_rid = getattr(self, '_prev_active_rid', None)
+        self._prev_active_rid = active_rid
+        # Also re-render if active layer changed within the same selection
+        # (old active needs LOD demotion, new active needs LOD 0)
+        if active_rid != prev_active_rid:
+            if prev_active_rid is not None:
+                changed.add(prev_active_rid)
+            if active_rid is not None:
+                changed.add(active_rid)
+
+        if not changed:
             return
 
-        for layer in selected:
-            if not getattr(layer, 'is_roi', False):
-                continue
-            bbox = layer.get_bbox()
-            if bbox is None:
-                continue
-            y1, y2, x1, x2 = bbox
-            bh, bw = y2 - y1, x2 - x1
-            mask_crop = layer.get_mask_crop((y1, y2, x1, x2))
-            edge = _compute_edge(mask_crop)
-            rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
-            rgba[edge] = [255, 255, 0, 200]
-            rgba = np.ascontiguousarray(rgba)
-            qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
-            pixmap = QPixmap.fromImage(qimg)
-            item = QGraphicsPixmapItem(pixmap)
-            disp_x = x1 + layer.offset_x
-            disp_y = y1 + layer.offset_y
-            item.setOffset(disp_x, disp_y)
-            item.setZValue(998)
-            item.setAcceptedMouseButtons(Qt.NoButton)
-            scene.addItem(item)
-            self._selection_highlight_items.append(item)
+        gof = self.layer_stack._global_opacity_factor
+        lod = self._current_lod_level()
+        for i, roi in enumerate(self.layer_stack.roi_layers):
+            rid = id(roi)
+            if rid in changed:
+                # Only the active layer needs LOD 0 (for dirty compositing);
+                # other ROIs use viewport LOD like refresh_overlays.
+                target_lod = 0 if rid == active_rid else lod
+                self._refresh_roi_item(roi, i, gof, lod_level=target_lod)
+                self._roi_lod[rid] = target_lod
 
     def _pulse_selection(self):
         """Animated grow-then-shrink pulse on selection for visual emphasis."""
@@ -755,6 +779,7 @@ class ImageCanvas(QGraphicsView):
         # Parallel path: compute RGBA arrays in threads, apply on main thread.
         # Process in batches of pool_size to cap peak memory — each batch's
         # crops/RGBAs are freed before the next batch is submitted.
+        _boundary_px = self._boundary_thickness_px()
         if nv > 3:
             from montaris.core.workers import get_pool, worker_count
             from montaris.core.busy import should_process_events
@@ -777,8 +802,9 @@ class ImageCanvas(QGraphicsView):
                     if bbox is None:
                         futures.append((idx, roi, target_lod, None))
                         continue
-                    fill_mode = getattr(roi, 'fill_mode', 'solid')
+                    fill_mode = self.layer_stack.fill_mode
                     eff_opacity = roi.opacity * gof
+                    is_sel = self._selection.contains(roi)
                     # Snapshot mask crop on main thread — workers must not
                     # read the shared roi.mask while the main thread may
                     # modify it (e.g. during processEvents).
@@ -788,6 +814,8 @@ class ImageCanvas(QGraphicsView):
                         _compute_roi_rgba_from_crop, mask_crop, roi.color,
                         eff_opacity, fill_mode, target_lod,
                         x1 + roi.offset_x, y1 + roi.offset_y,
+                        _boundary_px, self.layer_stack.boundary_color,
+                        is_sel, self.layer_stack.active_boundary_color,
                     )
                     futures.append((idx, roi, target_lod, fut))
 
@@ -902,6 +930,21 @@ class ImageCanvas(QGraphicsView):
         if dh <= 0 or dw <= 0:
             return
 
+        # Boundary rendering needs the full mask context (edge detection on
+        # a small tile gives wrong results at tile edges).  Fall back to a
+        # full-ROI refresh when boundaries are visible.
+        fill_mode = self.layer_stack.fill_mode
+        is_selected = self._selection.contains(layer)
+        if fill_mode in ('boundary', 'outline', 'both') or is_selected:
+            try:
+                idx = self.layer_stack.roi_layers.index(layer)
+            except ValueError:
+                return
+            # Active ROI must stay at LOD 0 for correct dirty compositing
+            target_lod = 0 if layer is self._active_layer else lod_level
+            self._refresh_roi_item(layer, idx, lod_level=target_lod)
+            return
+
         rid = id(layer)
         existing = self._roi_items.get(rid)
 
@@ -1009,7 +1052,8 @@ class ImageCanvas(QGraphicsView):
         bh, bw = y2 - y1, x2 - x1
         r, g, b = roi.color
         effective_opacity = int(roi.opacity * gof)
-        fill_mode = getattr(roi, 'fill_mode', 'solid')
+        fill_mode = self.layer_stack.fill_mode
+        is_selected = self._selection.contains(roi)
 
         mask_crop = roi.get_mask_crop((y1, y2, x1, x2))
 
@@ -1027,19 +1071,29 @@ class ImageCanvas(QGraphicsView):
                 scale_factor = factor
 
         rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
+        thickness = max(1, self._boundary_thickness_px() // scale_factor)
+        # Boundary color: cyan for active, yellow for all others
+        if is_selected:
+            bc = self.layer_stack.active_boundary_color
+        else:
+            bc = self.layer_stack.boundary_color
 
-        if fill_mode == 'outline':
-            edge = _compute_edge(mask_crop)
-            rgba[edge] = [r, g, b, effective_opacity]
+        if fill_mode in ('boundary', 'outline'):
+            edge = _compute_thick_edge(mask_crop, thickness)
+            rgba[edge] = [*bc, effective_opacity]
         elif fill_mode == 'both':
             fill_alpha = max(1, effective_opacity // 2)
             painted = mask_crop > 0
             rgba[painted] = [r, g, b, fill_alpha]
-            edge = _compute_edge(mask_crop)
-            rgba[edge] = [r, g, b, min(255, effective_opacity)]
-        else:
+            edge = _compute_thick_edge(mask_crop, thickness)
+            rgba[edge] = [*bc, min(255, effective_opacity)]
+        else:  # solid
             painted = mask_crop > 0
             rgba[painted] = [r, g, b, effective_opacity]
+            # In solid mode, active ROI still gets cyan boundary
+            if is_selected:
+                edge = _compute_thick_edge(mask_crop, thickness)
+                rgba[edge] = [*bc, min(255, effective_opacity)]
 
         rgba = np.ascontiguousarray(rgba)
         qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
@@ -1047,17 +1101,18 @@ class ImageCanvas(QGraphicsView):
         disp_x = x1 + roi.offset_x
         disp_y = y1 + roi.offset_y
         clip = self._image_clip_rect()
+        z = 1 + index * 0.001
         if existing is not None:
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
-            existing.setZValue(1 + index * 0.001)
+            existing.setZValue(z)
             existing.setClipRect(clip)
             existing.setVisible(True)
         else:
             item = _ROIOverlayItem()
             item.setImage(qimg.copy())
             item.setPos(disp_x, disp_y)
-            item.setZValue(1 + index * 0.001)
+            item.setZValue(z)
             item.setClipRect(clip)
             self._scene.addItem(item)
             self._roi_items[rid] = item
@@ -1077,17 +1132,18 @@ class ImageCanvas(QGraphicsView):
         qimg = QImage(rgba.data, bw, bh, bw * 4, QImage.Format_RGBA8888)
 
         clip = self._image_clip_rect()
+        z = 1 + index * 0.001
         if existing is not None:
             existing.setImage(qimg.copy())
             existing.setPos(disp_x, disp_y)
-            existing.setZValue(1 + index * 0.001)
+            existing.setZValue(z)
             existing.setClipRect(clip)
             existing.setVisible(True)
         else:
             item = _ROIOverlayItem()
             item.setImage(qimg.copy())
             item.setPos(disp_x, disp_y)
-            item.setZValue(1 + index * 0.001)
+            item.setZValue(z)
             item.setClipRect(clip)
             self._scene.addItem(item)
             self._roi_items[rid] = item
@@ -1407,6 +1463,12 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------
     # LOD / viewport culling
     # ------------------------------------------------------------------
+
+    def _boundary_thickness_px(self):
+        """Dilation radius for boundary rendering at current zoom."""
+        zoom = max(0.01, abs(self.transform().m11()))
+        base = self.layer_stack.boundary_thickness
+        return max(1, int(round(base / zoom)))
 
     def _current_lod_level(self):
         """LOD level from zoom: 0=full, 1=half, 2=quarter, 3=eighth."""
@@ -1788,24 +1850,52 @@ def _compute_edge(mask):
     return filled ^ binary_erosion(filled)
 
 
-def _compute_roi_rgba_from_crop(mask_crop, color, opacity, fill_mode, lod_level, disp_x, disp_y):
+def _compute_thick_edge(mask, thickness=1):
+    """Return boolean thick-edge array by dilating the thin edge.
+
+    Pads the mask so exterior dilation isn't clipped at the bbox boundary.
+    """
+    if thickness <= 1:
+        thin = _compute_edge(mask)
+        return thin
+    from scipy.ndimage import binary_dilation, generate_binary_structure
+    # Pad so outward dilation has room to expand at bbox edges
+    pad = thickness
+    padded = np.pad(mask, pad, mode='constant', constant_values=0)
+    thin = _compute_edge(padded)
+    struct = generate_binary_structure(2, 1)
+    iterations = thickness - 1  # each iteration grows 1px with cross kernel
+    thick = binary_dilation(thin, structure=struct, iterations=iterations)
+    # Limit to ROI interior + immediate exterior
+    filled = padded > 0
+    exterior = binary_dilation(filled, structure=struct, iterations=iterations)
+    result = thick & exterior
+    # Crop back to original dimensions
+    return result[pad:-pad, pad:-pad]
+
+
+def _compute_roi_rgba_from_crop(mask_crop, color, opacity, fill_mode, lod_level,
+                                disp_x, disp_y, boundary_thickness=1,
+                                boundary_color=(255, 255, 0), is_selected=False,
+                                active_boundary_color=(0, 255, 255)):
     """Pure numpy/scipy computation of ROI RGBA from a pre-cropped mask.
 
     Thread-safe: operates only on the owned mask_crop copy.
     Returns (rgba_array, width, height, disp_x, disp_y, scale_factor).
-    Dispatches to Numba JIT kernels when acceleration is enabled.
     """
-    try:
-        from montaris.core.accel import compute_roi_rgba
-        return compute_roi_rgba(mask_crop, color, opacity, fill_mode,
-                                lod_level, disp_x, disp_y)
-    except ImportError:
-        pass
+    # Use Numba accel for plain solid fill (no boundary rendering needed)
+    if fill_mode == 'solid' and not is_selected:
+        try:
+            from montaris.core.accel import compute_roi_rgba
+            return compute_roi_rgba(mask_crop, color, opacity, fill_mode,
+                                    lod_level, disp_x, disp_y)
+        except ImportError:
+            pass
 
-    # Numpy fallback
     bh, bw = mask_crop.shape
     r, g, b = color
     effective_opacity = int(opacity)
+    bc = active_boundary_color if is_selected else boundary_color
 
     scale_factor = 1
     if lod_level > 0:
@@ -1819,20 +1909,25 @@ def _compute_roi_rgba_from_crop(mask_crop, color, opacity, fill_mode, lod_level,
             bh, bw = th // factor, tw // factor
             scale_factor = factor
 
+    # Scale boundary thickness down for LOD-downsampled mask
+    bt = max(1, boundary_thickness // scale_factor) if scale_factor > 1 else boundary_thickness
     rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
 
-    if fill_mode == 'outline':
-        edge = _compute_edge(mask_crop)
-        rgba[edge] = [r, g, b, effective_opacity]
+    if fill_mode in ('boundary', 'outline'):
+        edge = _compute_thick_edge(mask_crop, bt)
+        rgba[edge] = [*bc, effective_opacity]
     elif fill_mode == 'both':
         fill_alpha = max(1, effective_opacity // 2)
         painted = mask_crop > 0
         rgba[painted] = [r, g, b, fill_alpha]
-        edge = _compute_edge(mask_crop)
-        rgba[edge] = [r, g, b, min(255, effective_opacity)]
-    else:
+        edge = _compute_thick_edge(mask_crop, bt)
+        rgba[edge] = [*bc, min(255, effective_opacity)]
+    else:  # solid
         painted = mask_crop > 0
         rgba[painted] = [r, g, b, effective_opacity]
+        if is_selected:
+            edge = _compute_thick_edge(mask_crop, bt)
+            rgba[edge] = [*bc, min(255, effective_opacity)]
 
     rgba = np.ascontiguousarray(rgba)
     return (rgba, bw, bh, disp_x, disp_y, scale_factor)
@@ -1848,7 +1943,7 @@ def _composite_roi(combined, mask, color, opacity, fill_mode="solid"):
     if not np.any(painted):
         return
 
-    if fill_mode == "outline":
+    if fill_mode in ("outline", "boundary"):
         edge = _compute_edge(mask)
         combined[edge] = [r, g, b, opacity]
     elif fill_mode == "both":
@@ -1869,7 +1964,7 @@ def _composite_roi_region(region, mask, color, opacity, fill_mode,
     if not np.any(painted):
         return
 
-    if fill_mode == "outline":
+    if fill_mode in ("outline", "boundary"):
         edge = _compute_edge(mask_region)
         region[edge] = [r, g, b, opacity]
     elif fill_mode == "both":

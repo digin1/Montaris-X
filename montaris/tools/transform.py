@@ -710,11 +710,17 @@ class TransformTool(BaseTool):
                             continue
                     mask_crop = l.get_mask_crop((y1, y2, x1, x2)).copy()
                     eff = int(l.opacity * gof)
-                    fill_mode = getattr(l, 'fill_mode', 'solid')
+                    fill_mode = canvas.layer_stack.fill_mode
+                    is_sel = canvas._selection.contains(l)
+                    _boundary_px = canvas._boundary_thickness_px()
                     fut = get_pool().submit(
                         _compute_roi_rgba_from_crop, mask_crop, l.color,
                         eff, fill_mode, target_lod,
-                        x1 + l.offset_x, y1 + l.offset_y)
+                        x1 + l.offset_x, y1 + l.offset_y,
+                        boundary_thickness=_boundary_px,
+                        boundary_color=canvas.layer_stack.boundary_color,
+                        is_selected=is_sel,
+                        active_boundary_color=canvas.layer_stack.active_boundary_color)
                     futures.append((l, idx, target_lod, fut))
                 for l, idx, target_lod, fut in futures:
                     rid = id(l)

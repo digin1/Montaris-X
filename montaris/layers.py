@@ -374,6 +374,11 @@ class LayerStack(QObject):
         self.roi_layers = []
         self._color_index = 0
         self._global_opacity_factor = 1.0
+        # Global ROI display settings
+        self.fill_mode = 'solid'                     # 'solid', 'boundary', 'both'
+        self.boundary_thickness = 1                   # boundary width
+        self.boundary_color = (255, 255, 0)           # yellow (all ROIs)
+        self.active_boundary_color = (0, 255, 255)    # cyan (selected ROIs)
 
     def set_image(self, layer):
         self.image_layer = layer
