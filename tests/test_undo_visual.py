@@ -185,6 +185,83 @@ class TestTransformUndoVisual:
                     f"Tool bbox should match undone ROI bbox {bbox_before}, got {tool._bbox}"
 
 
+class TestAllToolDeselection:
+    """After using Move All or Transform All, switching to another tool
+    should clear the global selection — no outlines should remain."""
+
+    def test_move_all_clears_selection_on_tool_switch(self, app_with_real_image):
+        """Switching away from Move All should clear selection and active layer."""
+        window = app_with_real_image
+        canvas = window.canvas
+        assert len(window.layer_stack.roi_layers) > 0
+
+        # Activate Move All tool
+        from montaris.tools.move import MoveAllTool
+        move_all = MoveAllTool(window)
+        canvas.set_tool(move_all)
+        QApplication.processEvents()
+
+        # All ROIs should be selected
+        assert canvas._selection.count == len(window.layer_stack.roi_layers), \
+            "Move All should select all ROIs"
+        assert canvas._active_layer is not None
+
+        _save_screenshot(canvas, "13_move_all_active")
+
+        # Switch to a different tool (e.g. Hand/pan)
+        from montaris.tools.move import MoveTool
+        move_single = MoveTool(window)
+        canvas.set_tool(move_single)
+        QApplication.processEvents()
+
+        # Selection should be cleared
+        assert canvas._selection.count == 0, \
+            f"Selection should be empty after leaving Move All, got {canvas._selection.count}"
+        assert canvas._active_layer is None, \
+            "Active layer should be None after leaving Move All"
+
+        # No selection highlight items should remain
+        scene_items = set(canvas.scene().items())
+        stale = [item for item in canvas._selection_highlight_items
+                 if item in scene_items]
+        assert len(stale) == 0, \
+            f"{len(stale)} selection highlights remain after leaving Move All"
+
+        _save_screenshot(canvas, "14_after_move_all_deselect")
+
+    def test_transform_all_clears_selection_on_tool_switch(self, app_with_real_image):
+        """Switching away from Transform All should clear selection and active layer."""
+        window = app_with_real_image
+        canvas = window.canvas
+        assert len(window.layer_stack.roi_layers) > 0
+
+        # Activate Transform All tool
+        from montaris.tools.transform import TransformAllTool
+        transform_all = TransformAllTool(window)
+        canvas.set_tool(transform_all)
+        QApplication.processEvents()
+
+        # All ROIs should be selected
+        assert canvas._selection.count == len(window.layer_stack.roi_layers), \
+            "Transform All should select all ROIs"
+
+        _save_screenshot(canvas, "15_transform_all_active")
+
+        # Switch to a different tool
+        from montaris.tools.move import MoveTool
+        move_single = MoveTool(window)
+        canvas.set_tool(move_single)
+        QApplication.processEvents()
+
+        # Selection should be cleared
+        assert canvas._selection.count == 0, \
+            f"Selection should be empty after leaving Transform All, got {canvas._selection.count}"
+        assert canvas._active_layer is None, \
+            "Active layer should be None after leaving Transform All"
+
+        _save_screenshot(canvas, "16_after_transform_all_deselect")
+
+
 class TestUndoDeleteROI:
     """Deleted ROIs should be recoverable via undo."""
 

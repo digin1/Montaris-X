@@ -204,6 +204,21 @@ class ImageCanvas(QGraphicsView):
         old = self._tool
         if old is not None and hasattr(old, '_clear_handles'):
             old._clear_handles(self)
+        # When leaving an "All" tool, clear the global selection so outlines
+        # don't linger over every ROI after the tool is deselected.
+        # Silent clear first (avoids cascade while old tool is still set);
+        # deferred signal emission after new tool is fully set up so that
+        # layer panel, status bar, etc. sync to the empty selection.
+        old_name = getattr(old, 'name', None)
+        _leaving_all_tool = old_name in ('Move All', 'Transform All')
+        _needs_selection_sync = _leaving_all_tool and bool(self._selection._layers)
+        if _leaving_all_tool:
+            # Always clear active layer when leaving an "All" tool, even if
+            # Esc already emptied the selection — prevents stale _active_layer
+            # from being passed into the new tool's on_activate.
+            self._selection._layers.clear()
+            self._active_layer = None
+            self._update_selection_highlights()
         # Set new tool BEFORE flatten so events during slow ops use correct tool
         self._tool = tool
         self.hide_brush_preview()
@@ -217,6 +232,9 @@ class ImageCanvas(QGraphicsView):
         if tool is not None and hasattr(tool, 'on_activate'):
             tool.on_activate(self._active_layer, self)
         _t3 = time.perf_counter()
+        # Now emit selection changed so layer panel / status bar sync
+        if _needs_selection_sync:
+            self._selection.changed.emit(self._selection._layers)
         from montaris.core.event_logger import EventLogger
         _log = EventLogger.instance()
         _log.log("tool", "set_tool",
