@@ -14,6 +14,8 @@ Montaris-X provides 7 drawing tools optimized for ROI delineation on scientific 
 Freehand drawing tool for tracing ROI boundaries.
 
 - **Size:** Adjust with `[` / `]` keys or the slider in the Tool Panel (1–2000 px)
+- **Fine control:** The size slider uses a nonlinear (quadratic) mapping for precise control at small sizes and fast sweeps at large sizes
+- **Adaptive keyboard steps:** `[`/`]` keys use smaller steps for small brushes (1 px below 20) and larger steps for big brushes (10 px above 500), with smooth snapping at tier boundaries
 - **Auto-overlap mode:** When enabled, the brush can paint over existing ROIs on other layers. Toggle in the Tool Panel.
 - **Color preview:** The brush cursor shows the active ROI's color
 

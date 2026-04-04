@@ -61,6 +61,16 @@ Drop any supported file directly onto the Montaris-X window:
 - ROIs: `.npz`, `.roi`, `.zip`
 - The file type is detected automatically
 
+## Grid Export
+
+When using the Grid Canvas (multi-image workspace), you can export all cells at once:
+
+- **Export All as ZIP:** File → Export → All Grid Cells as ZIP (`Ctrl+Alt+E`)
+- Prompts once for a directory, then creates one ZIP per cell
+- Files are named using the source image filename (e.g., `brain_A_R1C2.zip`)
+- Each cell's downsample factor is respected — masks are upscaled to original resolution
+- Multiple source TIFs in one cell are joined in the filename (e.g., `brain_A+brain_B_R1C1.zip`)
+
 ## Mask Upscaling on Export
 
 When working with downsampled montages, exported masks are automatically upscaled to match the original image resolution.

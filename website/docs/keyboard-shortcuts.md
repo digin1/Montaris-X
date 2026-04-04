@@ -17,7 +17,9 @@ Complete reference of all keyboard shortcuts in Montaris-X.
 | `Ctrl+Shift+O`     | Load ROI Set        |
 | `Ctrl+S`           | Save ROI Set        |
 | `Ctrl+Shift+S`     | Save Progress (Session) |
+| `Ctrl+Alt+S`       | Save All Grid Sessions |
 | `Ctrl+E`           | Export ROI(s) as PNG |
+| `Ctrl+Alt+E`       | Export All Grid Cells as ZIP |
 | `Ctrl+W`           | Close Image(s)      |
 | `Ctrl+Q`           | Quit                |
 
@@ -44,6 +46,7 @@ Complete reference of all keyboard shortcuts in Montaris-X.
 | `Ctrl+R`           | Rotate 90 CW         |
 | `Ctrl+[`           | Collapse Left Sidebar |
 | `Ctrl+]`           | Collapse Right Sidebar|
+| `Ctrl+Shift+M`     | Maximize / Restore Grid Cell |
 | `F11`              | Fullscreen            |
 | `Ctrl+Shift+P`     | Screenshot            |
 
@@ -64,7 +67,7 @@ Complete reference of all keyboard shortcuts in Montaris-X.
 | `Shift+T`   | Transform All        |
 | `V`         | Move (selected)      |
 | `Shift+V`   | Move All             |
-| `[` / `]`   | Adjust brush size    |
+| `[` / `]`   | Adjust brush size (adaptive steps) |
 | `Space`     | Pan (hold)           |
 | `Enter`     | Finish Polygon       |
 | `Escape`    | Cancel / Clear selection |

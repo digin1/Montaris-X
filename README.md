@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/v/montaris-x?color=blue&v=2.1.4" alt="PyPI"></a>
-  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/pyversions/montaris-x?v=2.1.4" alt="Python"></a>
+  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/v/montaris-x?color=blue&v=2.2.0" alt="PyPI"></a>
+  <a href="https://pypi.org/project/montaris-x/"><img src="https://img.shields.io/pypi/pyversions/montaris-x?v=2.2.0" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/digin1/Montaris-X" alt="License"></a>
   <a href="https://github.com/digin1/Montaris-X/actions"><img src="https://img.shields.io/github/actions/workflow/status/digin1/Montaris-X/tests.yml?label=tests" alt="Tests"></a>
 </p>
@@ -117,6 +117,15 @@ pip install numba
 - **Batch instructions** — JSON/TXT instruction files for automated workflows
 - **Drag-and-drop** — drop images and ROI ZIPs directly onto the window
 
+### Grid Canvas
+- **Multi-image workspace** — define an NxM grid (up to 4x4) to work with multiple images side-by-side
+- **Independent cells** — each cell has its own image, ROIs, undo history, adjustments, and downsample factor
+- **Click to switch** — click any cell to make it the active workspace; all tools and panels follow
+- **Double-click to maximize** — expand a single cell to fill the entire grid; double-click again to restore
+- **Save All** — save session progress for every cell in one action (`Ctrl+Alt+S`)
+- **Export All as ZIP** — export each cell's ROIs as separate ZIP files named by source image (`Ctrl+Alt+E`)
+- **Per-cell downsampling** — each cell can have its own downsample factor with correct upscaling on export
+
 ### Interface
 - **Dark & Light themes** — switch between themes on the fly
 - **Collapsible sidebars** — minimize panels for a distraction-free canvas
@@ -125,6 +134,7 @@ pip install numba
 - **Performance monitor** — real-time FPS and memory usage
 - **Global opacity slider** — adjust overlay transparency from the toolbar
 - **Session save** — auto-save and restore progress across sessions
+- **Persistent settings** — Flip on Load and Rotate on Load are remembered across launches
 
 ---
 
@@ -141,7 +151,9 @@ pip install numba
 | `Ctrl+Shift+O` | Load ROI Set |
 | `Ctrl+S` | Save ROI Set |
 | `Ctrl+Shift+S` | Save Progress (Session) |
+| `Ctrl+Alt+S` | Save All Grid Sessions |
 | `Ctrl+E` | Export ROI(s) as PNG |
+| `Ctrl+Alt+E` | Export All Grid Cells as ZIP |
 | `Ctrl+W` | Close Image(s) |
 | `Ctrl+Q` | Quit |
 
@@ -168,6 +180,7 @@ pip install numba
 | `Ctrl+R` | Rotate 90 CW |
 | `Ctrl+[` | Collapse Left Sidebar |
 | `Ctrl+]` | Collapse Right Sidebar |
+| `Ctrl+Shift+M` | Maximize / Restore Grid Cell |
 | `F11` | Fullscreen |
 | `Ctrl+Shift+P` | Screenshot |
 
@@ -188,7 +201,7 @@ pip install numba
 | `Shift+T` | Transform All |
 | `V` | Move (selected) |
 | `Shift+V` | Move All |
-| `[` / `]` | Adjust brush size |
+| `[` / `]` | Adjust brush size (adaptive steps) |
 | `Space` | Pan (hold) |
 | `Enter` | Finish Polygon |
 | `Escape` | Cancel / Clear selection |

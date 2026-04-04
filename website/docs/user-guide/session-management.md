@@ -41,8 +41,19 @@ For sharing or archiving just the ROI data (without the image):
 - Saves as `.npz` archive — compact, fast, and lossless
 - Load on any machine with Montaris-X
 
+## Save All Grid Sessions
+
+When using the Grid Canvas with multiple images loaded across cells:
+
+- **Menu:** File → Save All Grid Sessions (`Ctrl+Alt+S`)
+- Saves session progress for every cell that has content in a single action
+- Each cell's session is saved to its own folder alongside its source image
+- Empty cells are automatically skipped
+- Per-cell downsample factors and adjustments are preserved
+
 ## Best Practices
 
-- Use **Save Session** (`Ctrl+Shift+S`) for work-in-progress
+- Use **Save Session** (`Ctrl+Shift+S`) for work-in-progress on the active cell
+- Use **Save All** (`Ctrl+Alt+S`) to save all grid cells at once
 - Use **Save ROI Set** (`Ctrl+S`) for sharing or archiving final annotations
 - Export to ImageJ format for interoperability with FIJI workflows
