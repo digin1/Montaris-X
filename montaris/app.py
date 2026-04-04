@@ -2950,10 +2950,15 @@ class MontarisApp(QMainWindow):
             return
         # Reuse existing window if still open
         existing = getattr(self, '_instructions_dlg', None)
-        if existing is not None and existing.isVisible():
-            existing.raise_()
-            existing.activateWindow()
-            return
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.activateWindow()
+                    return
+            except RuntimeError:
+                # C++ object deleted (WA_DeleteOnClose)
+                self._instructions_dlg = None
         dlg = QDialog(self)
         dlg.setWindowTitle("Instructions")
         dlg.resize(800, 600)

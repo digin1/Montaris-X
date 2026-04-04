@@ -31,6 +31,27 @@ def _qta_btn(icon_name, text, fixed_width=None):
     return btn
 
 
+class _AutoColorUndoCommand:
+    """Undo/redo for auto-color contrast reassignment."""
+
+    def __init__(self, changes):
+        # Store (roi_ref, old_color, new_color) — keyed by object identity,
+        # not index, so reordering ROIs doesn't break undo.
+        self._changes = changes
+
+    def undo(self):
+        for roi, old_color, _new_color in self._changes:
+            roi.color = old_color
+
+    def redo(self):
+        for roi, _old_color, new_color in self._changes:
+            roi.color = new_color
+
+    @property
+    def byte_size(self):
+        return len(self._changes) * 48
+
+
 class PlaceholderListWidget(QListWidget):
     """QListWidget that shows placeholder text when empty."""
 
@@ -601,6 +622,11 @@ class LayerPanel(QWidget):
         random_action.triggered.connect(self._random_color)
         menu.addAction(random_action)
 
+        auto_color_action = QAction("Auto-Color for Contrast", self)
+        auto_color_action.triggered.connect(self._auto_color_contrast)
+        auto_color_action.setEnabled(len(self.layer_stack.roi_layers) >= 2)
+        menu.addAction(auto_color_action)
+
         menu.addSeparator()
 
         delete_action = QAction("Delete", self)
@@ -881,6 +907,22 @@ class LayerPanel(QWidget):
                     )
                     self.refresh()
                     self.visibility_changed.emit()
+
+    def _auto_color_contrast(self):
+        """Reassign all ROI colours for maximum contrast between neighbours."""
+        from montaris.core.roi_ops import auto_color_for_contrast
+        rois = self.layer_stack.roi_layers
+        if len(rois) < 2:
+            return
+        changes = auto_color_for_contrast(rois)
+        if not changes:
+            return
+        # Push undo command
+        app = self.window()
+        if hasattr(app, 'undo_stack'):
+            app.undo_stack.push(_AutoColorUndoCommand(changes))
+        self.refresh()
+        self.visibility_changed.emit()
 
     def _step_roi(self, direction):
         """Navigate to previous/next ROI."""
