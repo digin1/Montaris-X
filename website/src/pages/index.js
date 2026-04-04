@@ -402,7 +402,7 @@ export default function Home() {
                 Centre for Clinical Brain Sciences
               </a>
               , University of Edinburgh, with support from the{' '}
-              <a href="https://www.ed.ac.uk/clinical-brain-sciences/research/grant-lab">
+              <a href="https://sidb.org.uk/seth-grant/">
                 Grant Lab
               </a>
               . Special thanks to Prof Seth Grant, Nicolas Martinez-Wise,

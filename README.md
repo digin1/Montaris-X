@@ -295,7 +295,7 @@ Contributions are welcome! Please open an issue or submit a pull request on [Git
 
 ## Acknowledgments
 
-Montaris-X is developed in the [Centre for Clinical Brain Sciences](https://www.ed.ac.uk/clinical-brain-sciences), University of Edinburgh, with support from the [Grant Lab](https://www.ed.ac.uk/clinical-brain-sciences/research/grant-lab).
+Montaris-X is developed in the [Centre for Clinical Brain Sciences](https://www.ed.ac.uk/clinical-brain-sciences), University of Edinburgh, with support from the [Grant Lab](https://sidb.org.uk/seth-grant/).
 
 Special thanks to:
 
