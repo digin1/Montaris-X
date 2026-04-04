@@ -217,8 +217,8 @@ class ToolPanel(QWidget):
         montage_btn.clicked.connect(lambda: QTimer.singleShot(0, self.open_montage_requested.emit))
         layout.addWidget(montage_btn)
 
-        roi_zip_btn = self._action_btn('fa6s.file-import', "Import ROI ZIP")
-        roi_zip_btn.setToolTip("Import ROIs from a ZIP file")
+        roi_zip_btn = self._action_btn('fa6s.file-import', "Load ROI ZIP")
+        roi_zip_btn.setToolTip("Load ROIs from a ZIP file")
         roi_zip_btn.clicked.connect(lambda: QTimer.singleShot(0, self.import_roi_zip_requested.emit))
         layout.addWidget(roi_zip_btn)
 

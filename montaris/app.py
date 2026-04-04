@@ -2520,7 +2520,7 @@ class MontarisApp(QMainWindow):
             return
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
-                self, "Import ROI ZIP", self._last_dir(),
+                self, "Load ROI ZIP", self._last_dir(),
                 "ZIP Archive (*.zip);;All Files (*)",
             )
             if not path:
@@ -2688,7 +2688,7 @@ class MontarisApp(QMainWindow):
             self.layer_panel.refresh()
             progress.close()
             QApplication.restoreOverrideCursor()
-            msg = f"Imported {count} ROI(s) from ZIP"
+            msg = f"Loaded {count} ROI(s) from ZIP"
             if need_scale:
                 msg += f" (scaled from {max_w}\u00d7{max_h} to {img_w}\u00d7{img_h})"
             self.toast.show(msg, "success")
