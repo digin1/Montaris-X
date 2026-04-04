@@ -2134,6 +2134,7 @@ class MontarisApp(QMainWindow):
         )
         if not path:
             return
+        self._update_last_dir(path)
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
             with busy_cursor("Exporting ImageJ ROI...", self, log_as="io.export_imagej_single"):
@@ -2161,6 +2162,7 @@ class MontarisApp(QMainWindow):
         dir_path = QFileDialog.getExistingDirectory(self, "Export ImageJ ROIs to Directory")
         if not dir_path:
             return
+        self._update_last_dir(dir_path + "/")
         try:
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
             n = len(self.layer_stack.roi_layers)
@@ -2234,6 +2236,7 @@ class MontarisApp(QMainWindow):
         )
         if not path:
             return
+        self._update_last_dir(path)
         try:
             with busy_cursor("Batch exporting...", self, log_as="io.batch_export"):
                 n = len(self.layer_stack.roi_layers)
@@ -2330,6 +2333,7 @@ class MontarisApp(QMainWindow):
         )
         if not path:
             return
+        self._update_last_dir(path)
         try:
             with open(path, 'r') as f:
                 self._last_instructions_text = f.read()
@@ -2724,6 +2728,7 @@ class MontarisApp(QMainWindow):
             )
             if not path:
                 return
+        self._update_last_dir(path)
         try:
             import zipfile
             from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi_bytes
@@ -2923,6 +2928,7 @@ class MontarisApp(QMainWindow):
         )
         if not path:
             return
+        self._update_last_dir(path)
         pixmap = self.grab()
         pixmap.save(path)
         self.toast.show("Screenshot saved", "success")
@@ -2938,6 +2944,7 @@ class MontarisApp(QMainWindow):
         )
         if not path:
             return
+        self._update_last_dir(path)
         data = EventLogger.instance().export_json(app=self)
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
