@@ -12,6 +12,7 @@ venv/
 .idea/
 .vscode/
 .claude/
+.codex
 uv.lock
 tasks/
 testimages/
