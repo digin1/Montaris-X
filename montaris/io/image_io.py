@@ -7,6 +7,79 @@ from pathlib import Path
 _MEMMAP_THRESHOLD = 100 * 1024 * 1024
 
 
+def probe_tiff(path):
+    """Inspect a TIFF without loading the full array.
+
+    Returns a dict with keys: is_zstack (bool), shape (tuple), dtype (str),
+    axes (str — tifffile series axes, e.g. 'ZYX'), n_slices (int), pages (int).
+    Returns None for non-TIFF files.
+    """
+    p = Path(path)
+    if p.suffix.lower() not in ('.tif', '.tiff'):
+        return None
+    import tifffile
+    with tifffile.TiffFile(str(p)) as tf:
+        if not tf.series:
+            return None
+        s = tf.series[0]
+        axes = s.axes or ''
+        shape = tuple(s.shape)
+        dtype = str(s.dtype)
+        pages = len(tf.pages)
+        # Z-stack detection: explicit Z axis in series, or ImageJ slices > 1.
+        n_slices = 1
+        is_zstack = False
+        if 'Z' in axes:
+            is_zstack = True
+            n_slices = shape[axes.index('Z')]
+        else:
+            md = tf.imagej_metadata or {}
+            slices = md.get('slices', 1) or 1
+            if slices > 1:
+                is_zstack = True
+                n_slices = int(slices)
+        return {
+            'is_zstack': is_zstack,
+            'shape': shape,
+            'dtype': dtype,
+            'axes': axes,
+            'n_slices': n_slices,
+            'pages': pages,
+        }
+
+
+def load_volume(path):
+    """Load a TIFF as a 3D volume (Z, H, W), squeezing trailing singletons.
+
+    Returns (volume, axes) where axes is the tifffile series axes string.
+    Raises ValueError if the file is not a 3D stack.
+    """
+    import tifffile
+    with tifffile.TiffFile(str(path)) as tf:
+        s = tf.series[0]
+        axes = s.axes or ''
+        data = s.asarray()
+    # Reorder to ZYX. If no Z, fall back to treating leading axis as Z when ndim==3.
+    if 'Z' in axes and 'Y' in axes and 'X' in axes:
+        # Keep Z/Y/X; squeeze other axes (C, T, S) by indexing 0.
+        keep = {axes.index(a) for a in 'ZYX'}
+        slicer = [slice(None) if i in keep else 0 for i in range(data.ndim)]
+        data = data[tuple(slicer)]
+        cur_axes = ''.join(ax for i, ax in enumerate(axes) if isinstance(slicer[i], slice))
+        perm = [cur_axes.index(a) for a in 'ZYX']
+        data = np.transpose(data, perm)
+    elif data.ndim == 3:
+        axes = axes or 'ZYX'
+    else:
+        raise ValueError(f"Not a 3D stack: shape={data.shape}, axes={axes!r}")
+    return data, 'ZYX'
+
+
+def max_projection(volume, axis=0):
+    """Max-intensity projection along the given axis (default Z)."""
+    return np.max(volume, axis=axis)
+
+
 def load_image(path):
     path = Path(path)
     suffix = path.suffix.lower()

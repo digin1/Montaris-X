@@ -506,3 +506,8 @@ class MontageDocument:
     original_shape: tuple | None = None
     tint_color: tuple | None = None  # (R, G, B) or None for grayscale
     image_path: str | None = None  # full path to the source image file
+    # Raw 3D z-stack (Z, H, W) when imported from a z-stack TIFF; None for 2D images.
+    # The image_layer holds the 2D representation used for ROI drawing (max projection or
+    # selected slice), while this keeps the full volume for 3D viewing.
+    volume_data: object = None
+    volume_axes: str | None = None  # e.g. 'ZYX'

@@ -27,7 +27,8 @@ from montaris.core.undo import UndoStack
 from montaris.core.adjustments import ImageAdjustments
 from montaris.core.display_modes import DisplayCompositor
 from montaris.widgets.toast import ToastManager
-from montaris.io.image_io import load_image, load_image_stack
+from montaris.io.image_io import load_image, load_image_stack, probe_tiff, load_volume, max_projection
+from montaris.widgets.z_stack_dialog import ZStackImportDialog
 from montaris.io.roi_io import save_roi_set, load_roi_set
 from montaris.core.busy import busy_cursor, should_process_events
 from montaris import theme as _theme
@@ -1218,6 +1219,17 @@ class MontarisApp(QMainWindow):
         _screenshot_shortcut.triggered.connect(self._take_app_screenshot)
         self.addAction(_screenshot_shortcut)
 
+        # -- Group 6: View in 3D (z-stacks only) --
+        tb_lay.addWidget(self._toolbar_sep(), 0, Qt.AlignVCenter)
+        _view3d_ico = _qta_icon('fa6s.cube')
+        self._view3d_btn = AnimatedButton(_view3d_ico, " View in 3D") if _view3d_ico else AnimatedButton("\u2B22  View in 3D")
+        self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
+        self._view3d_btn.setStyleSheet(_tb_btn_style)
+        self._view3d_btn.clicked.connect(self._open_view_3d)
+        self._icon_registry.append((self._view3d_btn, 'fa6s.cube'))
+        self._themed_tb_btns.append(self._view3d_btn)
+        tb_lay.addWidget(self._view3d_btn, 0, Qt.AlignVCenter)
+
         tb_lay.addStretch(1)
 
         toolbar.addWidget(tb_widget)
@@ -1653,10 +1665,23 @@ class MontarisApp(QMainWindow):
             self._canvas_grid.active_cell._initial_session_saved = False
         self._session_dir = None
         self._update_last_dir(paths)
-        # Ask downsample once for the batch
-        first_data = load_image(paths[0])
+        # Ask downsample once for the batch. For z-stacks, probe gives (Z,Y,X);
+        # use Y*X. For plain images, read full array (matches prior behavior).
+        first_probe = None
+        try:
+            first_probe = probe_tiff(paths[0])
+        except Exception:
+            first_probe = None
+        if first_probe is not None and first_probe.get('is_zstack'):
+            shp = first_probe['shape']
+            h = shp[-2] if len(shp) >= 2 else 0
+            w = shp[-1] if len(shp) >= 1 else 0
+            first_hw = h * w
+        else:
+            first_data = load_image(paths[0])
+            first_hw = first_data.shape[0] * first_data.shape[1]
         ds_factor = 1
-        if first_data.shape[0] * first_data.shape[1] > 4_000_000:
+        if first_hw > 4_000_000:
             items = ["1x (Original)", "2x", "4x", "8x"]
             item, ok = QInputDialog.getItem(
                 self, "Downsample", "Image is large. Choose downsample factor:",
@@ -1665,13 +1690,55 @@ class MontarisApp(QMainWindow):
             if ok and item != items[0]:
                 ds_factor = int(item[0])
         skipped = []
+        # Probe for z-stacks up-front so we can prompt once per batch.
+        z_probes = {}
+        for path in paths:
+            try:
+                probe = probe_tiff(path)
+            except Exception:
+                probe = None
+            if probe is not None and probe.get('is_zstack'):
+                z_probes[path] = probe
+        z_mode = None        # 'max' | 'slice' | 'all' — chosen by user
+        z_slice = 0
+        z_apply_batch = False
+        if z_probes:
+            first_path = next(iter(z_probes))
+            probe = z_probes[first_path]
+            dlg = ZStackImportDialog(
+                self,
+                filename=os.path.basename(first_path),
+                n_slices=probe['n_slices'],
+                batch=len(z_probes) > 1,
+            )
+            if dlg.exec() != QDialog.Accepted:
+                return
+            z_mode, z_slice, z_apply_batch = dlg.result_tuple
         with busy_cursor("Loading image...", self, log_as="io.open_image"):
             for path in paths:
                 try:
-                    # Split multi-channel TIFFs into individual images
-                    channels = load_image_stack(path)
-                    for name, data in channels:
-                        self._load_single_channel(name, data, ds_factor, skipped, image_path=path)
+                    if path in z_probes and (z_apply_batch or path == next(iter(z_probes))):
+                        mode = z_mode
+                        slice_idx = z_slice
+                    elif path in z_probes:
+                        # Non-batch mode: prompt per file for remaining z-stacks
+                        probe = z_probes[path]
+                        dlg = ZStackImportDialog(
+                            self, filename=os.path.basename(path),
+                            n_slices=probe['n_slices'], batch=False,
+                        )
+                        if dlg.exec() != QDialog.Accepted:
+                            continue
+                        mode, slice_idx, _ = dlg.result_tuple
+                    else:
+                        mode = None
+                        slice_idx = 0
+                    channels = self._channels_from_path(path, mode, slice_idx)
+                    for name, data, volume in channels:
+                        self._load_single_channel(
+                            name, data, ds_factor, skipped,
+                            image_path=path, volume_data=volume,
+                        )
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
         if skipped:
@@ -1694,7 +1761,32 @@ class MontarisApp(QMainWindow):
         # Auto-detect previous sessions
         self._auto_detect_session(folder)
 
-    def _load_single_channel(self, name, data, ds_factor, skipped, image_path=None):
+    def _open_view_3d(self):
+        """Open the vispy-based 3D volume viewer for any loaded z-stacks."""
+        from montaris.widgets.view_3d import open_view_3d
+        open_view_3d(self, self._documents)
+
+    def _channels_from_path(self, path, z_mode, z_slice):
+        """Return list of (name, data_2d, volume_or_None) for a given file path.
+
+        z_mode is one of 'max', 'slice', 'all', or None for non-z-stack files.
+        The 3D volume is attached to every channel tuple produced from a z-stack
+        so the 3D viewer can access it regardless of which 2D projection was chosen.
+        """
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if z_mode is None:
+            return [(name, data, None) for name, data in load_image_stack(path)]
+        volume, _axes = load_volume(path)  # (Z, H, W)
+        if z_mode == 'max':
+            return [(stem, max_projection(volume, axis=0), volume)]
+        if z_mode == 'slice':
+            z = max(0, min(volume.shape[0] - 1, int(z_slice)))
+            return [(f"{stem}_z{z}", volume[z], volume)]
+        if z_mode == 'all':
+            return [(f"{stem}_z{i}", volume[i], volume) for i in range(volume.shape[0])]
+        return [(stem, max_projection(volume, axis=0), volume)]
+
+    def _load_single_channel(self, name, data, ds_factor, skipped, image_path=None, volume_data=None):
         """Load one image/channel into the image stack."""
         if self._flip_on_load_act.isChecked():
             data = np.flip(data, axis=1).copy()
@@ -1743,6 +1835,8 @@ class MontarisApp(QMainWindow):
             downsample_factor=ds_factor,
             original_shape=original_shape,
             image_path=image_path,
+            volume_data=volume_data,
+            volume_axes='ZYX' if volume_data is not None else None,
         )
         self._documents.append(doc)
         self._active_doc_index = len(self._documents) - 1
@@ -3823,6 +3917,83 @@ class MontarisApp(QMainWindow):
         super().closeEvent(event)
 
 
+def _xcb_is_viable():
+    """Return True if Qt's xcb platform plugin can load here.
+
+    Qt 6.5+ refuses xcb without libxcb-cursor0. ldconfig is cheap.
+    """
+    if sys.platform != "linux":
+        return False
+    import shutil
+    ldconfig = shutil.which("ldconfig")
+    if not ldconfig:
+        return False
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            [ldconfig, "-p"], stderr=subprocess.DEVNULL, timeout=2, text=True,
+        )
+    except Exception:
+        return False
+    return "libxcb-cursor.so.0" in out
+
+
+def _apply_gpu_selection(args):
+    """Set GPU offload env vars and choose the Qt platform plugin.
+
+    Runs once, guarded by the MONTARIS_GPU_PREFERENCE env var so it is
+    idempotent when the module is reached twice (e.g. via ``python -m
+    montaris`` which delegates to us here).
+    """
+    if "MONTARIS_GPU_PREFERENCE" in os.environ:
+        return
+
+    from montaris import gpu_select
+
+    enable = True if args.gpu is None else args.gpu
+
+    if args.list_gpus:
+        gpus = gpu_select.list_gpus()
+        chosen_idx = None
+        if enable:
+            pick = (gpu_select.pick_discrete(gpus) if args.gpu_index is None
+                    else next((g for g in gpus if g.index == args.gpu_index), None))
+            if pick is not None:
+                chosen_idx = pick.index
+        print(gpu_select.format_list(gpus, chosen_index=chosen_idx))
+        sys.exit(0)
+
+    status = gpu_select.apply_selection(enable=enable, index=args.gpu_index)
+    print(f"[Montaris-X] {status['reason']}", file=sys.stderr)
+
+    if args.platform == "xcb":
+        if _xcb_is_viable():
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
+            print("[Montaris-X] Forcing XWayland (QT_QPA_PLATFORM=xcb)",
+                  file=sys.stderr)
+        else:
+            print("[Montaris-X] --xwayland requested but xcb is not viable "
+                  "(install libxcb-cursor0). Falling back to default.",
+                  file=sys.stderr)
+    elif args.platform == "wayland":
+        os.environ["QT_QPA_PLATFORM"] = "wayland"
+    elif (enable
+          and sys.platform == "linux"
+          and os.environ.get("XDG_SESSION_TYPE") == "wayland"
+          and os.environ.get("DISPLAY")
+          and status.get("chosen")
+          and status["chosen"].vendor == "nvidia"):
+        if _xcb_is_viable():
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
+            print("[Montaris-X] Switching to XWayland to honor NVIDIA offload. "
+                  "Pass --stay-wayland to keep Wayland.", file=sys.stderr)
+        else:
+            print("[Montaris-X] Wayland compositor may ignore NVIDIA offload. "
+                  "For guaranteed dGPU rendering, install libxcb-cursor0 "
+                  "(sudo apt install libxcb-cursor0) and relaunch.",
+                  file=sys.stderr)
+
+
 def _install_crash_handler(dump_dir):
     """Install a global exception hook that writes crash dumps to *dump_dir*.
 
@@ -3901,7 +4072,42 @@ def main():
         "--crash-dump-default", action="store_true",
         help="Enable crash dump logging to ~/.montaris/crash_dumps/",
     )
+    gpu_group = parser.add_argument_group("GPU")
+    gpu_excl = gpu_group.add_mutually_exclusive_group()
+    gpu_excl.add_argument(
+        "--gpu", dest="gpu", action="store_true", default=None,
+        help="Prefer the discrete GPU (default)",
+    )
+    gpu_excl.add_argument(
+        "--no-gpu", dest="gpu", action="store_false",
+        help="Use the compositor's default (integrated) GPU",
+    )
+    gpu_group.add_argument(
+        "--gpu-index", type=int, metavar="N", default=None,
+        help="Prefer GPU at index N (see --list-gpus)",
+    )
+    gpu_group.add_argument(
+        "--list-gpus", action="store_true",
+        help="Print detected GPUs and exit",
+    )
+    platform_excl = gpu_group.add_mutually_exclusive_group()
+    platform_excl.add_argument(
+        "--xwayland", dest="platform", action="store_const", const="xcb",
+        default=None,
+        help="Force Qt to use XWayland (xcb); needed for NVIDIA offload on "
+             "Wayland. Requires libxcb-cursor0.",
+    )
+    platform_excl.add_argument(
+        "--stay-wayland", dest="platform", action="store_const", const="wayland",
+        help="Disable the automatic XWayland fallback even when a dGPU is "
+             "requested.",
+    )
     args, qt_args = parser.parse_known_args()
+
+    # GPU/platform selection MUST happen before QApplication() is constructed
+    # so the offload env vars and QT_QPA_PLATFORM land before Qt chooses a
+    # platform plugin and the GL vendor library.
+    _apply_gpu_selection(args)
 
     # Windows: set AppUserModelID so taskbar uses our icon, not Python's
     if sys.platform == 'win32':
