@@ -431,6 +431,12 @@ class View3DPanel(QWidget):
         self._drag_mode = None         # 'paint' or 'erase' during a stroke
         self._drag_label_id = None     # reserved on mouse_press for paint
         self._drag_dirty = False       # set by _stamp_brush, consumed by timer
+        # Bbox of voxels touched since the last overlay refresh: accumulated
+        # across _stamp_brush calls and consumed by the drag tick for a
+        # sub-region texture upload (instead of recreating the whole volume
+        # visual every frame — the difference is seconds vs. milliseconds on
+        # a 50M+ voxel stack). Format: (z0, z1, y0, y1, x0, x1) or None.
+        self._dirty_bbox = None
         # When non-None and the id exists in the active doc, paint strokes
         # extend that ROI instead of allocating a new one. MontarisApp pushes
         # this from the LayerPanel's selection_changed signal.
@@ -837,6 +843,7 @@ class View3DPanel(QWidget):
         self._drag_label_id = None
         self._drag_extends_existing = False
         self._drag_dirty = False
+        self._dirty_bbox = None
         # Rollback only applies to freshly-reserved paint ids — erase writes
         # 0 and extensions reuse an id owned by an existing VolumeROILayer.
         if (rollback and doc is not None and mode == 'paint'
@@ -853,18 +860,48 @@ class View3DPanel(QWidget):
         self._active_volume_roi_id = int(lid) if lid else None
 
     def _on_drag_refresh_tick(self):
-        """Coalesced overlay repaint while a stroke is in progress."""
+        """Coalesced overlay repaint while a stroke is in progress.
+
+        Does a sub-region texture upload when possible (existing labels
+        visual + no downsample) instead of rebuilding the Volume visual
+        from scratch. Full rebuild = seconds on 50M-voxel stacks because
+        it recreates the entire 3D texture; sub-region upload is ms.
+        """
         if not self._drag_dirty:
             return
         self._drag_dirty = False
+        bbox = self._dirty_bbox
+        self._dirty_bbox = None
+        doc = self._primary_doc
+        labels = doc.labels_3d if doc is not None else None
+        # Fast path: live visual, no downsample, bbox available. Upload
+        # just the touched subvolume via Texture3D.set_data(offset=...).
+        if (self._labels_volume is not None
+                and labels is not None
+                and bbox is not None
+                and int(self._last_total_ds) == 1):
+            z0, z1, y0, y1, x0, x1 = bbox
+            sub = np.ascontiguousarray(labels[z0:z1, y0:y1, x0:x1])
+            try:
+                # vispy's Texture3D stores data in (X, Y, Z) order; offset
+                # likewise. Pass the data as-is (uint8/16), the texture is
+                # created to match the labels dtype.
+                self._labels_volume._texture.set_data(
+                    sub, offset=(x0, y0, z0),
+                )
+                self._labels_volume.update()
+                return
+            except Exception:
+                # Fallthrough to full rebuild on any upload failure.
+                pass
         self._rebuild_labels_overlay()
 
     def _stamp_brush(self, seed_zyx):
         """Stamp a filled sphere of radius ``self._brush_radius`` into
         ``labels_3d`` centered at ``seed_zyx``. Paint uses the drag's
         reserved label id; erase writes 0 (background). Marks
-        ``_drag_dirty`` so the throttle timer issues a single rebuild at
-        the next tick.
+        ``_drag_dirty`` so the throttle timer issues a single sub-region
+        upload at the next tick, and accumulates ``_dirty_bbox``.
         """
         doc = self._primary_doc
         if doc is None or doc.labels_3d is None:
@@ -882,6 +919,17 @@ class View3DPanel(QWidget):
         val = int(self._drag_label_id) if self._drag_mode == 'paint' else 0
         region = doc.labels_3d[z0:z1, y0:y1, x0:x1]
         region[inside] = val
+        # Grow the dirty bbox so the tick uploads the smallest subvolume
+        # that covers everything since the last refresh.
+        if self._dirty_bbox is None:
+            self._dirty_bbox = (z0, z1, y0, y1, x0, x1)
+        else:
+            pz0, pz1, py0, py1, px0, px1 = self._dirty_bbox
+            self._dirty_bbox = (
+                min(pz0, z0), max(pz1, z1),
+                min(py0, y0), max(py1, y1),
+                min(px0, x0), max(px1, x1),
+            )
         self._drag_dirty = True
 
     def _ray_pick_seed(self, pos, require_bright=True):
@@ -1170,8 +1218,13 @@ class View3DPanel(QWidget):
             return
         cmap = self._build_labels_colormap(doc.labels_meta, max_id)
         try:
+            # Hand the integer array straight through — vispy's Volume
+            # accepts uint8/uint16 and uploads them verbatim. Casting to
+            # float32 quadrupled the texture bytes for no visual benefit
+            # (we have at most a few hundred label ids per document, so
+            # uint16 is already more than enough precision).
             vol = scene.visuals.Volume(
-                labels.astype(np.float32, copy=False),
+                np.ascontiguousarray(labels),
                 parent=self._view.scene,
                 method='translucent',
                 cmap=cmap,

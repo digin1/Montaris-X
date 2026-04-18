@@ -1956,6 +1956,14 @@ class MontarisApp(QMainWindow):
         # MontarisApp calls refresh() explicitly after every roi_layers
         # mutation, so do the same here or the new 3D ROI won't show up.
         self.layer_panel.refresh()
+        # Auto-select the new ROI so the next paint/fill stroke extends it
+        # (napari parity: selected_label sticks to what was last painted).
+        # Without this, each stroke reserves yet another id because plain
+        # 2D ROILayers don't carry a label_id for the selection sync to pick
+        # up, so _active_volume_roi_id stays None forever.
+        idx = len(self.layer_stack.roi_layers) - 1
+        row = idx + (1 if self.layer_stack.image_layer else 0)
+        self.layer_panel.list_widget.setCurrentRow(row)
         # Keep the 3D overlay's colormap in sync with the assigned color.
         if self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
