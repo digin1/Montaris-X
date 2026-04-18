@@ -702,7 +702,10 @@ class View3DPanel(QWidget):
             self._canvas.native.unsetCursor()
         # Gate the mode-specific controls so it's visually obvious which
         # parameter applies to the current tool.
-        self._tol_slider.setEnabled(self._tool_mode == 'fill')
+        # Fill is napari-style (label-based, no tolerance) — the slider is
+        # kept visible as dead UI for now but never enabled. Remove when the
+        # next redesign pass cleans up the 3D toolbar.
+        self._tol_slider.setEnabled(False)
         self._brush_spin.setEnabled(self._tool_mode in ('paint', 'erase'))
         # A tool switch mid-drag (via keyboard shortcut etc.) should abandon
         # the stroke cleanly so we don't paint into the new mode's state.
@@ -951,84 +954,80 @@ class View3DPanel(QWidget):
         return None if vol is None else np.asarray(vol)
 
     def _run_fill(self, seed_zyx):
-        """Run an intensity-tolerance flood fill from ``seed_zyx`` and write
-        the resulting mask into ``primary_doc.labels_3d``.
+        """napari-style label-flood from ``seed_zyx``.
 
-        When a 3D ROI is selected in the LayerPanel (see
-        ``set_active_volume_roi_id``) the flood extends that ROI's label id
-        — matching napari's Fill, which always writes into
-        ``selected_label``. Otherwise a fresh id is allocated and
-        ``label_added`` fires so MontarisApp can mirror it into the panel.
+        Reads the label id under the seed (``old_label``) and replaces its
+        connected component in ``labels_3d`` with the target id. Target is
+        the LayerPanel-selected 3D ROI when one is active, else a fresh id.
+
+        This is the napari model: Fill operates on ``labels_3d``, not on
+        image intensity. It relabels already-painted regions — it does not
+        segment raw voxels. Users who need initial segmentation should use
+        Paint first (or a future intensity-wand tool).
         """
         doc = self._primary_doc
-        volume = self._active_channel_volume()
-        if doc is None or volume is None:
+        if doc is None:
             return
-        # Flood tolerance: slider is 0..100 in percent, interpreted as the
-        # allowed deviation from the seed voxel's intensity. That's Fiji's
-        # wand model — much better than "% of full dynamic range", which on
-        # uint16 microscopy stacks with cosmic-ray spikes blows the window
-        # wide enough to flood the entire background.
-        #
-        # Example: seed at intensity 3000, slider=15 → tol = 450, flood
-        # keeps voxels in [2550, 3450]. Seed on a dim cosmic-ray voxel of
-        # 60000, slider=15 → tol = 9000 — still tight enough vs. background.
-        seed_intensity = float(volume[tuple(seed_zyx)])
-        vmax = float(volume.max())
-        # Floor the reference so clicks on a near-zero voxel don't collapse
-        # tol to 0 (which would flood nothing) or to a useless tiny number.
-        ref = max(seed_intensity, vmax * 0.01, 1.0)
-        tol = (self._fill_tolerance / 100.0) * ref
+        if doc.labels_3d is None:
+            doc.ensure_labels_3d()
 
-        try:
-            from skimage.segmentation import flood
-        except Exception as e:  # noqa: BLE001 — surface to the user
-            QMessageBox.warning(
-                self, "Fill unavailable",
-                f"The Fill tool needs scikit-image installed:\n{e}",
-            )
-            return
-        # skimage.flood works on 3D arrays; returns bool mask.
-        mask = flood(volume, tuple(seed_zyx), tolerance=tol, connectivity=1)
-        if not mask.any():
+        old_label = int(doc.labels_3d[tuple(seed_zyx)])
+
+        active = self._active_volume_roi_id
+        if active is not None and active in doc.labels_meta:
+            new_label = int(active)
+            extends_existing = True
+        else:
+            # napari allows fill-on-background with `selected_label` set; we
+            # refuse the no-selection + background combo because it would
+            # relabel the (huge) background connected component into a
+            # brand-new ROI. Guide the user instead.
+            if old_label == 0:
+                QMessageBox.information(
+                    self, "Nothing to fill",
+                    "Fill extends an existing 3D ROI into its connected "
+                    "component. Paint a region first, or select a 3D ROI "
+                    "in the Layers panel before clicking.",
+                )
+                return
+            new_label = doc.reserve_label_id()
+            extends_existing = False
+
+        # napari early-out: clicking on a voxel already of the target id.
+        if old_label == new_label:
             return
 
-        # Runaway-flood guard: if the mask covers >=50% of the volume the
-        # user almost certainly seeded background. Warn and refuse instead
-        # of silently nuking the labels volume into one giant ROI.
+        # Connected component of `old_label` containing the seed. scipy's
+        # default structure is 6-connectivity on 3D — same as napari.
+        from scipy.ndimage import label as cc_label
+        matches = (doc.labels_3d == old_label)
+        components, _ = cc_label(matches)
+        comp_id = int(components[tuple(seed_zyx)])
+        if comp_id == 0:
+            return  # impossible — seed matches by construction
+        mask = (components == comp_id)
+
+        # Runaway guard for the "fill the background by accident" footgun:
+        # if the connected component is half the volume, it's almost
+        # certainly background. Refuse and roll back an unused reservation.
         frac = mask.sum() / mask.size
         if frac >= 0.5:
             QMessageBox.warning(
                 self, "Fill aborted",
-                f"Flood would cover {frac*100:.0f}% of the volume — "
-                f"probably seeded on background. Lower the tolerance or "
-                f"click on a brighter voxel.",
+                f"Connected region covers {frac*100:.0f}% of the volume — "
+                f"probably seeded on background. Refusing.",
             )
+            if not extends_existing:
+                doc.release_label_id(new_label)
             return
 
-        # Allocate the labels volume on first fill (same shape as volume_data,
-        # which is what _primary_doc uses).
-        if doc.labels_3d is None:
-            doc.ensure_labels_3d()
-
-        # Extend the selected 3D ROI when one is active (napari parity);
-        # otherwise reserve a fresh id and signal MontarisApp to mirror it.
-        active = self._active_volume_roi_id
-        if active is not None and active in doc.labels_meta:
-            lid = int(active)
-            extends_existing = True
-        else:
-            lid = doc.reserve_label_id()
-            extends_existing = False
-        if lid > np.iinfo(doc.labels_3d.dtype).max:
+        if new_label > np.iinfo(doc.labels_3d.dtype).max:
             doc.promote_labels_dtype(np.uint16)
-        # Write voxels. Voxels already owned by another label get overwritten
-        # — napari's behavior is the same (whichever label you fill last wins).
-        doc.labels_3d[mask] = lid
+        doc.labels_3d[mask] = new_label
 
         self.refresh_labels()
         if not extends_existing:
-            self.label_added.emit(doc, lid)
+            self.label_added.emit(doc, new_label)
 
     def _reset_view(self):
         if self._volumes:

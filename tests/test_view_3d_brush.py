@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from montaris.layers import MontageDocument, ImageLayer
 from montaris.widgets.view_3d import View3DPanel, VISPY_AVAILABLE
@@ -184,11 +184,11 @@ def test_brush_spin_enabled_only_in_paint_or_erase(qapp):
         QApplication.processEvents()
         assert panel._brush_spin.isEnabled() is False
 
-        # Fill → disabled (fill uses tolerance, not brush)
+        # Fill → disabled (napari-style Fill is label-based, no tolerance)
         panel._tool_combo.setCurrentText("Fill")
         QApplication.processEvents()
         assert panel._brush_spin.isEnabled() is False
-        assert panel._tol_slider.isEnabled() is True
+        assert panel._tol_slider.isEnabled() is False
 
         # Paint → enabled
         panel._tool_combo.setCurrentText("Paint")
@@ -327,81 +327,117 @@ def test_tool_switch_midstroke_preserves_extended_id(qapp):
         panel.close()
 
 
-def test_fill_without_selection_allocates_new_id(qapp):
-    """Fill with nothing selected reserves a fresh id and emits label_added."""
-    doc, vol = _make_doc_with_volume((6, 12, 12))
-    # Give the channel a clearly-floodable bright region so skimage.flood
-    # returns a non-empty mask at the seed.
-    vol[2:5, 4:8, 4:8] = 250
-    panel = _make_panel(qapp, doc, vol)
+def test_fill_on_background_no_selection_guides_user(qapp, monkeypatch):
+    """napari Fill can't segment raw voxels — without a selected ROI on an
+    unpainted voxel, inform the user instead of flooding background."""
+    doc, _vol = _make_doc_with_volume((6, 12, 12))
+    panel = _make_panel(qapp, doc, _vol)
     try:
         panel.set_active_volume_roi_id(None)
-        pre_ids = set(doc.labels_meta.keys())
-
-        received = []
-        panel.label_added.connect(lambda d, lid: received.append((d, lid)))
-
+        infos = []
+        monkeypatch.setattr(
+            QMessageBox, "information",
+            staticmethod(lambda *a, **k: infos.append(a)),
+        )
         panel._tool_combo.setCurrentText("Fill")
-        panel._fill_tolerance = 5
         panel._run_fill((3, 6, 6))
-
-        new_ids = set(doc.labels_meta.keys()) - pre_ids
-        assert len(new_ids) == 1
-        lid = next(iter(new_ids))
-        assert (doc.labels_3d == lid).sum() > 0
-        assert received == [(doc, lid)]
+        assert infos, "expected guidance popup"
+        # No ROI reserved.
+        assert len(doc.labels_meta) == 0
     finally:
         panel.close()
 
 
-def test_fill_extends_selected_volume_roi(qapp):
-    """Fill with a selected ROI writes into that id — no new id, no emit."""
+def test_fill_relabels_connected_component_to_selected_roi(qapp):
+    """Click Fill on painted ROI A with B selected → A's connected region
+    becomes B. Matches napari's selected_label-driven Fill."""
     doc, vol = _make_doc_with_volume((6, 12, 12))
-    vol[2:5, 4:8, 4:8] = 250
     panel = _make_panel(qapp, doc, vol)
     try:
-        existing = doc.reserve_label_id(name="dendrite")
-        panel.set_active_volume_roi_id(existing)
-        pre_count = len(doc.labels_meta)
+        lid_a = doc.reserve_label_id(name="a")
+        lid_b = doc.reserve_label_id(name="b")
+        doc.labels_3d[2:5, 4:8, 4:8] = lid_a
+        panel.set_active_volume_roi_id(lid_b)
 
         received = []
         panel.label_added.connect(lambda d, lid: received.append((d, lid)))
 
         panel._tool_combo.setCurrentText("Fill")
-        panel._fill_tolerance = 5
         panel._run_fill((3, 6, 6))
 
-        # No new ROI created; voxels landed under the existing id.
-        assert len(doc.labels_meta) == pre_count
-        assert (doc.labels_3d == existing).sum() > 0
-        # Napari parity: extensions don't spawn a duplicate LayerPanel row.
+        assert (doc.labels_3d == lid_a).sum() == 0
+        assert (doc.labels_3d == lid_b).sum() > 0
+        # Extension — no new VolumeROILayer signal.
         assert received == []
     finally:
         panel.close()
 
 
-def test_fill_extends_across_multiple_clicks(qapp):
-    """Two Fill clicks with the same ROI selected land under one id."""
-    doc, vol = _make_doc_with_volume((6, 12, 20))
-    # Two disjoint bright regions so skimage.flood doesn't bridge them.
-    vol[1:3, 2:5, 2:5] = 250
-    vol[3:5, 7:10, 14:18] = 250
+def test_fill_on_painted_region_without_selection_assigns_new_id(qapp):
+    """No selection + click on painted region → allocate fresh id and
+    relabel the connected component to it. label_added fires."""
+    doc, vol = _make_doc_with_volume((6, 12, 12))
     panel = _make_panel(qapp, doc, vol)
     try:
-        existing = doc.reserve_label_id(name="both_branches")
-        panel.set_active_volume_roi_id(existing)
+        lid_a = doc.reserve_label_id(name="a")
+        doc.labels_3d[2:5, 4:8, 4:8] = lid_a
+        panel.set_active_volume_roi_id(None)
+
+        received = []
+        panel.label_added.connect(lambda d, lid: received.append((d, lid)))
 
         panel._tool_combo.setCurrentText("Fill")
-        panel._fill_tolerance = 5
-        panel._run_fill((2, 3, 3))
-        count_after_first = int((doc.labels_3d == existing).sum())
-        panel._run_fill((4, 8, 16))
-        count_after_second = int((doc.labels_3d == existing).sum())
+        panel._run_fill((3, 6, 6))
 
-        # Still just the one ROI in the meta dict.
-        assert list(doc.labels_meta.keys()) == [existing]
-        # Second click added voxels instead of replacing.
-        assert count_after_second > count_after_first
+        assert (doc.labels_3d == lid_a).sum() == 0
+        assert len(received) == 1
+        new_lid = received[0][1]
+        assert (doc.labels_3d == new_lid).sum() > 0
+    finally:
+        panel.close()
+
+
+def test_fill_on_own_label_is_noop(qapp):
+    """napari early-out: clicking Fill on a voxel already of the target id
+    leaves labels_3d unchanged and emits nothing."""
+    doc, vol = _make_doc_with_volume((6, 12, 12))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        lid = doc.reserve_label_id()
+        doc.labels_3d[2:5, 4:8, 4:8] = lid
+        panel.set_active_volume_roi_id(lid)
+        before = doc.labels_3d.copy()
+
+        received = []
+        panel.label_added.connect(lambda d, l: received.append((d, l)))
+
+        panel._tool_combo.setCurrentText("Fill")
+        panel._run_fill((3, 6, 6))
+
+        np.testing.assert_array_equal(doc.labels_3d, before)
+        assert received == []
+    finally:
+        panel.close()
+
+
+def test_fill_only_affects_connected_component(qapp):
+    """Two disjoint blobs of label A + click on blob 1 with B selected →
+    only blob 1 flips to B. Blob 2 stays A. (Contiguous semantics.)"""
+    doc, vol = _make_doc_with_volume((6, 12, 20))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        lid_a = doc.reserve_label_id(name="a")
+        lid_b = doc.reserve_label_id(name="b")
+        doc.labels_3d[1:3, 2:5, 2:5] = lid_a      # blob 1
+        doc.labels_3d[3:5, 7:10, 14:18] = lid_a   # blob 2 — disjoint
+        panel.set_active_volume_roi_id(lid_b)
+
+        panel._tool_combo.setCurrentText("Fill")
+        panel._run_fill((2, 3, 3))  # seed inside blob 1
+
+        assert doc.labels_3d[2, 3, 3] == lid_b
+        # Blob 2 untouched.
+        assert doc.labels_3d[4, 8, 16] == lid_a
     finally:
         panel.close()
 
