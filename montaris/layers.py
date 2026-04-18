@@ -365,6 +365,177 @@ class ROILayer:
                 x1 + self.offset_x, x2 + self.offset_x)
 
 
+class VolumeROILayer:
+    """A 3D ROI backed by a shared ``labels_3d`` volume on a MontageDocument.
+
+    Duck-types to :class:`ROILayer` so :class:`LayerPanel` can render/rename/
+    recolor it without branching. All storage lives in the document's
+    ``labels_3d`` array (one integer ID per ROI) and ``labels_meta`` dict
+    (display attributes keyed by ID). That keeps memory to one uint16 volume
+    for the whole document regardless of how many 3D ROIs exist, and matches
+    napari's Labels-layer format for single-file TIFF export.
+    """
+
+    is_roi = True
+    is_volume = True
+
+    def __init__(self, doc, label_id):
+        self._doc = doc
+        self._label_id = int(label_id)
+        # 3D ROIs don't carry a position offset like 2D ROIs do — the labels
+        # volume already defines the voxel coordinates. Keep the attributes
+        # present (zero-valued) so code paths reading offset_x/y don't break.
+        self.offset_x = 0
+        self.offset_y = 0
+        self._dirty_rect = None
+        self._cached_bbox = None
+        self._bbox_valid = False
+
+    @property
+    def label_id(self):
+        return self._label_id
+
+    def _meta(self):
+        return self._doc.labels_meta[self._label_id]
+
+    @property
+    def name(self):
+        return self._meta()["name"]
+
+    @name.setter
+    def name(self, v):
+        self._meta()["name"] = v
+
+    @property
+    def color(self):
+        return self._meta()["color"]
+
+    @color.setter
+    def color(self, v):
+        self._meta()["color"] = v
+
+    @property
+    def opacity(self):
+        return self._meta()["opacity"]
+
+    @opacity.setter
+    def opacity(self, v):
+        self._meta()["opacity"] = int(v)
+
+    @property
+    def visible(self):
+        return self._meta()["visible"]
+
+    @visible.setter
+    def visible(self, v):
+        self._meta()["visible"] = bool(v)
+
+    @property
+    def fill_mode(self):
+        return self._meta()["fill_mode"]
+
+    @fill_mode.setter
+    def fill_mode(self, v):
+        self._meta()["fill_mode"] = v
+
+    @property
+    def shape(self):
+        """Return ``(Y, X)`` so 2D compositor code reads a familiar 2D size."""
+        lab = self._doc.labels_3d
+        if lab is None:
+            img = self._doc.image_layer.data if self._doc.image_layer else None
+            return img.shape[:2] if img is not None else (0, 0)
+        return lab.shape[1:]
+
+    @property
+    def volume_shape(self):
+        """Return ``(Z, Y, X)`` of the backing labels volume, or ``None``."""
+        lab = self._doc.labels_3d
+        return None if lab is None else lab.shape
+
+    @property
+    def is_compressed(self):
+        return False
+
+    @property
+    def dirty_rect(self):
+        return self._dirty_rect
+
+    def clear_dirty(self):
+        self._dirty_rect = None
+
+    def mask_slice(self, z):
+        """Return the 2D binary mask for Z-slice ``z`` as uint8 (0/1)."""
+        lab = self._doc.labels_3d
+        if lab is None or not (0 <= z < lab.shape[0]):
+            y, x = self.shape
+            return np.zeros((y, x), dtype=np.uint8)
+        return (lab[z] == self._label_id).astype(np.uint8)
+
+    @property
+    def mask(self):
+        """2D mask = current slice's mask. Uses ``_doc.active_z`` if present.
+
+        Exists so code paths written against :class:`ROILayer` (ImageJ export,
+        the 2D compositor, bbox queries) see a 2D uint8 mask without caring
+        this ROI is actually 3D.
+        """
+        z = int(getattr(self._doc, 'active_z', 0) or 0)
+        return self.mask_slice(z)
+
+    def mask_volume(self):
+        """Return the full 3D binary mask ``(Z, Y, X)`` as uint8 (0/1)."""
+        lab = self._doc.labels_3d
+        if lab is None:
+            return None
+        return (lab == self._label_id).astype(np.uint8)
+
+    def get_mask_crop(self, bbox):
+        y1, y2, x1, x2 = bbox
+        return self.mask[y1:y2, x1:x2]
+
+    def invalidate_bbox(self):
+        self._bbox_valid = False
+
+    def get_bbox(self):
+        """Bbox of this ROI's footprint on the current Z-slice, or None."""
+        if self._bbox_valid:
+            return self._cached_bbox
+        from montaris.core.roi_transform import get_mask_bbox
+        self._cached_bbox = get_mask_bbox(self.mask)
+        self._bbox_valid = self._cached_bbox is not None
+        return self._cached_bbox
+
+    def get_display_bbox(self):
+        bbox = self.get_bbox()
+        if bbox is None:
+            return None
+        y1, y2, x1, x2 = bbox
+        return (y1 + self.offset_y, y2 + self.offset_y,
+                x1 + self.offset_x, x2 + self.offset_x)
+
+    def compress(self):
+        """No-op. The shared labels volume is the canonical storage."""
+        return
+
+    def flatten_offset(self):
+        return True
+
+    def has_oob_content(self):
+        return False
+
+    def mark_dirty(self, rect):
+        self.invalidate_bbox()
+        if self._dirty_rect is None:
+            self._dirty_rect = rect
+        else:
+            ox, oy, ow, oh = self._dirty_rect
+            nx, ny, nw, nh = rect
+            x1 = min(ox, nx); y1 = min(oy, ny)
+            x2 = max(ox + ow, nx + nw); y2 = max(oy + oh, ny + nh)
+            self._dirty_rect = (x1, y1, x2 - x1, y2 - y1)
+
+
 class LayerStack(QObject):
     changed = Signal()
 
@@ -509,5 +680,67 @@ class MontageDocument:
     # Raw 3D z-stack (Z, H, W) when imported from a z-stack TIFF; None for 2D images.
     # The image_layer holds the 2D representation used for ROI drawing (max projection or
     # selected slice), while this keeps the full volume for 3D viewing.
-    volume_data: object = None
+    volume_data: "np.ndarray | None" = None
     volume_axes: str | None = None  # e.g. 'ZYX'
+    # 3D ROI storage. ``labels_3d`` is a (Z, Y, X) integer array where each
+    # positive value is one ROI; 0 is background. Lazy-allocated the first
+    # time a 3D ROI is drawn. ``labels_meta`` maps label_id → display dict
+    # (name, color, opacity, visible, fill_mode). Matches napari's Labels
+    # layer, so the volume can be saved as a single multi-page TIFF.
+    labels_3d: "np.ndarray | None" = None
+    labels_meta: dict = field(default_factory=dict)
+    labels_next_id: int = 1
+    # Current Z-slice the user is viewing in 2D. VolumeROILayer reads this
+    # to compute its 2D ``mask`` property, so the 2D compositor can render
+    # 3D ROIs as per-slice overlays without any extra plumbing.
+    active_z: int = 0
+
+    def ensure_labels_3d(self):
+        """Lazy-allocate the labels volume the first time a 3D ROI is drawn.
+
+        Shape matches ``volume_data``. Starts as uint8 (up to 255 ROIs); the
+        caller must promote to uint16 before assigning IDs ≥ 256.
+        """
+        if self.labels_3d is not None:
+            return self.labels_3d
+        if self.volume_data is None:
+            raise RuntimeError("cannot allocate labels_3d: document has no volume_data")
+        self.labels_3d = np.zeros(self.volume_data.shape, dtype=np.uint8)
+        return self.labels_3d
+
+    def promote_labels_dtype(self, target_dtype):
+        """Promote ``labels_3d`` to a wider unsigned int dtype in-place."""
+        if self.labels_3d is None:
+            return
+        cur = np.dtype(self.labels_3d.dtype)
+        tgt = np.dtype(target_dtype)
+        if tgt.itemsize <= cur.itemsize:
+            return
+        self.labels_3d = self.labels_3d.astype(tgt, copy=False)
+
+    def reserve_label_id(self, name=None, color=None, opacity=128,
+                         visible=True, fill_mode="solid"):
+        """Allocate a new label ID and register its display metadata.
+
+        Returns the new integer ID. Promotes ``labels_3d`` to uint16 when the
+        ID would overflow uint8. Does NOT write into ``labels_3d`` — the
+        caller fills voxels after the ID is reserved (fill/paint tools do).
+        """
+        lid = self.labels_next_id
+        self.labels_next_id += 1
+        if self.labels_3d is not None and lid > np.iinfo(self.labels_3d.dtype).max:
+            self.promote_labels_dtype(np.uint16)
+        self.labels_meta[lid] = {
+            "name": name or f"3D ROI {lid}",
+            "color": color or ROI_COLORS[0],
+            "opacity": int(opacity),
+            "visible": bool(visible),
+            "fill_mode": fill_mode,
+        }
+        return lid
+
+    def release_label_id(self, lid):
+        """Zero out voxels with this label and drop its metadata."""
+        if self.labels_3d is not None and lid in self.labels_meta:
+            self.labels_3d[self.labels_3d == lid] = 0
+        self.labels_meta.pop(lid, None)
