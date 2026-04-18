@@ -964,12 +964,21 @@ class View3DPanel(QWidget):
         volume = self._active_channel_volume()
         if doc is None or volume is None:
             return
-        # Flood tolerance: slider is 0..100 in percentage of the channel's
-        # observed dynamic range. 20 on a [0, 1000] volume → ±200 intensity.
-        vmin = float(volume.min())
+        # Flood tolerance: slider is 0..100 in percent, interpreted as the
+        # allowed deviation from the seed voxel's intensity. That's Fiji's
+        # wand model — much better than "% of full dynamic range", which on
+        # uint16 microscopy stacks with cosmic-ray spikes blows the window
+        # wide enough to flood the entire background.
+        #
+        # Example: seed at intensity 3000, slider=15 → tol = 450, flood
+        # keeps voxels in [2550, 3450]. Seed on a dim cosmic-ray voxel of
+        # 60000, slider=15 → tol = 9000 — still tight enough vs. background.
+        seed_intensity = float(volume[tuple(seed_zyx)])
         vmax = float(volume.max())
-        drange = max(1.0, vmax - vmin)
-        tol = (self._fill_tolerance / 100.0) * drange
+        # Floor the reference so clicks on a near-zero voxel don't collapse
+        # tol to 0 (which would flood nothing) or to a useless tiny number.
+        ref = max(seed_intensity, vmax * 0.01, 1.0)
+        tol = (self._fill_tolerance / 100.0) * ref
 
         try:
             from skimage.segmentation import flood
@@ -982,6 +991,19 @@ class View3DPanel(QWidget):
         # skimage.flood works on 3D arrays; returns bool mask.
         mask = flood(volume, tuple(seed_zyx), tolerance=tol, connectivity=1)
         if not mask.any():
+            return
+
+        # Runaway-flood guard: if the mask covers >=50% of the volume the
+        # user almost certainly seeded background. Warn and refuse instead
+        # of silently nuking the labels volume into one giant ROI.
+        frac = mask.sum() / mask.size
+        if frac >= 0.5:
+            QMessageBox.warning(
+                self, "Fill aborted",
+                f"Flood would cover {frac*100:.0f}% of the volume — "
+                f"probably seeded on background. Lower the tolerance or "
+                f"click on a brighter voxel.",
+            )
             return
 
         # Allocate the labels volume on first fill (same shape as volume_data,
