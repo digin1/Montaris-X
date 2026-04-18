@@ -327,6 +327,85 @@ def test_tool_switch_midstroke_preserves_extended_id(qapp):
         panel.close()
 
 
+def test_fill_without_selection_allocates_new_id(qapp):
+    """Fill with nothing selected reserves a fresh id and emits label_added."""
+    doc, vol = _make_doc_with_volume((6, 12, 12))
+    # Give the channel a clearly-floodable bright region so skimage.flood
+    # returns a non-empty mask at the seed.
+    vol[2:5, 4:8, 4:8] = 250
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel.set_active_volume_roi_id(None)
+        pre_ids = set(doc.labels_meta.keys())
+
+        received = []
+        panel.label_added.connect(lambda d, lid: received.append((d, lid)))
+
+        panel._tool_combo.setCurrentText("Fill")
+        panel._fill_tolerance = 5
+        panel._run_fill((3, 6, 6))
+
+        new_ids = set(doc.labels_meta.keys()) - pre_ids
+        assert len(new_ids) == 1
+        lid = next(iter(new_ids))
+        assert (doc.labels_3d == lid).sum() > 0
+        assert received == [(doc, lid)]
+    finally:
+        panel.close()
+
+
+def test_fill_extends_selected_volume_roi(qapp):
+    """Fill with a selected ROI writes into that id — no new id, no emit."""
+    doc, vol = _make_doc_with_volume((6, 12, 12))
+    vol[2:5, 4:8, 4:8] = 250
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        existing = doc.reserve_label_id(name="dendrite")
+        panel.set_active_volume_roi_id(existing)
+        pre_count = len(doc.labels_meta)
+
+        received = []
+        panel.label_added.connect(lambda d, lid: received.append((d, lid)))
+
+        panel._tool_combo.setCurrentText("Fill")
+        panel._fill_tolerance = 5
+        panel._run_fill((3, 6, 6))
+
+        # No new ROI created; voxels landed under the existing id.
+        assert len(doc.labels_meta) == pre_count
+        assert (doc.labels_3d == existing).sum() > 0
+        # Napari parity: extensions don't spawn a duplicate LayerPanel row.
+        assert received == []
+    finally:
+        panel.close()
+
+
+def test_fill_extends_across_multiple_clicks(qapp):
+    """Two Fill clicks with the same ROI selected land under one id."""
+    doc, vol = _make_doc_with_volume((6, 12, 20))
+    # Two disjoint bright regions so skimage.flood doesn't bridge them.
+    vol[1:3, 2:5, 2:5] = 250
+    vol[3:5, 7:10, 14:18] = 250
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        existing = doc.reserve_label_id(name="both_branches")
+        panel.set_active_volume_roi_id(existing)
+
+        panel._tool_combo.setCurrentText("Fill")
+        panel._fill_tolerance = 5
+        panel._run_fill((2, 3, 3))
+        count_after_first = int((doc.labels_3d == existing).sum())
+        panel._run_fill((4, 8, 16))
+        count_after_second = int((doc.labels_3d == existing).sum())
+
+        # Still just the one ROI in the meta dict.
+        assert list(doc.labels_meta.keys()) == [existing]
+        # Second click added voxels instead of replacing.
+        assert count_after_second > count_after_first
+    finally:
+        panel.close()
+
+
 def test_set_active_volume_roi_id_accepts_none(qapp):
     """None/0 clears the active id so subsequent strokes allocate fresh."""
     doc, vol = _make_doc_with_volume((4, 8, 8))

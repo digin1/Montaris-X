@@ -952,8 +952,13 @@ class View3DPanel(QWidget):
 
     def _run_fill(self, seed_zyx):
         """Run an intensity-tolerance flood fill from ``seed_zyx`` and write
-        the resulting mask into ``primary_doc.labels_3d`` under a fresh
-        label ID. Emits ``label_added(doc, lid)`` on success.
+        the resulting mask into ``primary_doc.labels_3d``.
+
+        When a 3D ROI is selected in the LayerPanel (see
+        ``set_active_volume_roi_id``) the flood extends that ROI's label id
+        — matching napari's Fill, which always writes into
+        ``selected_label``. Otherwise a fresh id is allocated and
+        ``label_added`` fires so MontarisApp can mirror it into the panel.
         """
         doc = self._primary_doc
         volume = self._active_channel_volume()
@@ -980,10 +985,19 @@ class View3DPanel(QWidget):
             return
 
         # Allocate the labels volume on first fill (same shape as volume_data,
-        # which is what _primary_doc uses); reserve a label ID and stamp.
+        # which is what _primary_doc uses).
         if doc.labels_3d is None:
             doc.ensure_labels_3d()
-        lid = doc.reserve_label_id()
+
+        # Extend the selected 3D ROI when one is active (napari parity);
+        # otherwise reserve a fresh id and signal MontarisApp to mirror it.
+        active = self._active_volume_roi_id
+        if active is not None and active in doc.labels_meta:
+            lid = int(active)
+            extends_existing = True
+        else:
+            lid = doc.reserve_label_id()
+            extends_existing = False
         if lid > np.iinfo(doc.labels_3d.dtype).max:
             doc.promote_labels_dtype(np.uint16)
         # Write voxels. Voxels already owned by another label get overwritten
@@ -991,7 +1005,8 @@ class View3DPanel(QWidget):
         doc.labels_3d[mask] = lid
 
         self.refresh_labels()
-        self.label_added.emit(doc, lid)
+        if not extends_existing:
+            self.label_added.emit(doc, lid)
 
     def _reset_view(self):
         if self._volumes:
