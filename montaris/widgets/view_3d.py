@@ -363,11 +363,28 @@ class View3DPanel(QWidget):
     called before discarding the panel so volume textures are freed.
     """
 
-    def __init__(self, parent=None, channels=None):
-        """channels: list of (name, volume_ndarray, tint_rgb_or_None)."""
+    def __init__(self, parent=None, channels=None, documents=None):
+        """channels: list of (name, volume_ndarray, tint_rgb_or_None).
+
+        documents: optional list of MontageDocument. When provided, the
+        first document with volume_data becomes the "primary" doc and its
+        labels_3d / labels_meta back a labels overlay rendered on top of
+        the intensity volumes.
+        """
         super().__init__(parent)
         self._channels_raw = list(channels or [])
-        self._volumes = []        # list of scene.visuals.Volume
+        self._documents = list(documents or [])
+        self._primary_doc = next(
+            (d for d in self._documents if getattr(d, 'volume_data', None) is not None),
+            None,
+        )
+        self._volumes = []        # list of scene.visuals.Volume (intensity)
+        self._labels_volume = None  # scene.visuals.Volume for labels_3d overlay
+        self._labels_visible = True
+        self._labels_opacity = 0.6
+        # Last total downsample applied to intensity volumes; labels overlay
+        # re-uses the same factor so voxels line up.
+        self._last_total_ds = 1
         self._canvas = None
         self._view = None
         self._downsample_factor = 1
@@ -473,6 +490,34 @@ class View3DPanel(QWidget):
         if self._channel_toggles:
             root.addLayout(ch_row)
 
+        # Labels overlay controls. Only shown when a primary document is
+        # attached — the 2D-only callers (legacy open_view_3d, headed tests)
+        # pass no documents, and in that case we skip this row entirely.
+        self._labels_cb = None
+        self._labels_opacity_slider = None
+        if self._primary_doc is not None:
+            labels_row = QHBoxLayout()
+            labels_row.setSpacing(8)
+            self._labels_cb = QCheckBox("3D ROIs")
+            self._labels_cb.setChecked(self._labels_visible)
+            self._labels_cb.setToolTip(
+                "Show the 3D ROI labels volume on top of the intensity channels."
+            )
+            self._labels_cb.toggled.connect(self._on_labels_visible_toggled)
+            labels_row.addWidget(self._labels_cb)
+
+            labels_row.addWidget(QLabel("Opacity:"))
+            self._labels_opacity_slider = QSlider(Qt.Horizontal)
+            self._labels_opacity_slider.setRange(0, 100)
+            self._labels_opacity_slider.setValue(int(self._labels_opacity * 100))
+            self._labels_opacity_slider.setFixedWidth(120)
+            self._labels_opacity_slider.valueChanged.connect(
+                self._on_labels_opacity_changed
+            )
+            labels_row.addWidget(self._labels_opacity_slider)
+            labels_row.addStretch(1)
+            root.addLayout(labels_row)
+
         # Defer the first GPU upload by one event-loop tick so the panel
         # can lay out and paint before we block the thread with texture
         # uploads. Without this, embedding the panel into a QStackedWidget
@@ -524,6 +569,22 @@ class View3DPanel(QWidget):
     def _set_visible(self, idx, on):
         if 0 <= idx < len(self._volumes):
             self._volumes[idx].visible = on
+
+    def _on_labels_visible_toggled(self, on):
+        self._labels_visible = bool(on)
+        if self._labels_volume is not None:
+            self._labels_volume.visible = self._labels_visible
+
+    def _on_labels_opacity_changed(self, val):
+        self._labels_opacity = val / 100.0
+        # Rebuilding is the cheapest way to restyle the Colormap's alpha
+        # channel; labels volumes are much smaller than intensity data so
+        # the upload cost is negligible.
+        self._rebuild_labels_overlay()
+
+    def refresh_labels(self):
+        """Public hook used by paint/fill tools after they mutate labels_3d."""
+        self._rebuild_labels_overlay()
 
     def _reset_view(self):
         if self._volumes:
@@ -603,12 +664,84 @@ class View3DPanel(QWidget):
         if budget_factor > 1 or self._oom_retry_factor > 1:
             reasons.append("memory")
         self._last_reason = "+".join(reasons)
+        self._last_total_ds = int(total)
         if total == 1:
             self._ds_label.setText("full")
         elif reasons:
             self._ds_label.setText(f"1/{total} ({self._last_reason})")
         else:
             self._ds_label.setText(f"1/{total}")
+
+        # Labels overlay is rebuilt in lock-step with intensity volumes so
+        # it picks up the same downsample stride.
+        self._rebuild_labels_overlay()
+
+    def _build_labels_colormap(self, labels_meta, max_id):
+        """Build a discrete Colormap: 0 → transparent, N → meta[N] color.
+
+        Uses ``interpolation='zero'`` so rendering is nearest-neighbor; any
+        lerp between slots would produce ghost labels on the boundary.
+        """
+        n_slots = int(max_id) + 1
+        colors = np.zeros((n_slots, 4), dtype=np.float32)
+        for lid, meta in labels_meta.items():
+            lid = int(lid)
+            if lid <= 0 or lid >= n_slots:
+                continue
+            r, g, b = meta.get('color', (255, 255, 255))
+            if max(r, g, b) > 1.0:
+                r, g, b = r / 255.0, g / 255.0, b / 255.0
+            base_alpha = meta.get('opacity', 128) / 255.0
+            visible = meta.get('visible', True)
+            a = (base_alpha * self._labels_opacity) if visible else 0.0
+            colors[lid] = (r, g, b, a)
+        # Zero-order interpolation needs N+1 control points (one per step
+        # boundary) for N color entries. Linear interp would blur between
+        # labels and create ghost colors at the boundary voxels, so we stay
+        # with step.
+        controls = np.linspace(0.0, 1.0, n_slots + 1, dtype=np.float32)
+        return Colormap(colors=colors, controls=controls, interpolation='zero')
+
+    def _rebuild_labels_overlay(self):
+        """(Re)create the labels overlay visual from ``primary_doc.labels_3d``.
+
+        Safe to call when no labels exist — tears down any stale overlay and
+        returns. Called at the end of every intensity rebuild so downsample
+        changes propagate, and from ``refresh_labels()`` after paint ops.
+        """
+        # Always drop the old visual first — it may be out of date.
+        if self._labels_volume is not None:
+            self._labels_volume.parent = None
+            self._labels_volume = None
+        if self._view is None:
+            return
+        doc = self._primary_doc
+        if doc is None or doc.labels_3d is None or not doc.labels_meta:
+            return
+        labels = doc.labels_3d
+        ds = max(1, int(self._last_total_ds))
+        if ds > 1:
+            labels = labels[::ds, ::ds, ::ds]
+        max_id = max(doc.labels_meta.keys())
+        if max_id <= 0:
+            return
+        cmap = self._build_labels_colormap(doc.labels_meta, max_id)
+        try:
+            vol = scene.visuals.Volume(
+                labels.astype(np.float32, copy=False),
+                parent=self._view.scene,
+                method='translucent',
+                cmap=cmap,
+                clim=(0, float(max_id)),
+            )
+        except Exception as e:  # noqa: BLE001 — GL upload can fail on edge dtypes
+            print(f"[view_3d] labels overlay failed: {e}")
+            return
+        vol.visible = self._labels_visible
+        # Render labels after intensity so they composite on top. Larger
+        # order = drawn later.
+        vol.order = 10
+        self._labels_volume = vol
 
     def capture_state(self):
         """Snapshot camera pose so it can be restored after a rebuild."""
@@ -675,6 +808,9 @@ class View3DPanel(QWidget):
         for vol in self._volumes:
             vol.parent = None
         self._volumes = []
+        if self._labels_volume is not None:
+            self._labels_volume.parent = None
+            self._labels_volume = None
         if self._canvas is not None:
             try:
                 self._canvas.close()
@@ -727,7 +863,7 @@ def open_view_3d(parent, documents):
             "No z-stack volumes loaded. Open one or more z-stack TIFFs first.",
         )
         return False
-    panel = View3DPanel(None, channels=channels)
+    panel = View3DPanel(None, channels=channels, documents=documents)
     panel.setWindowTitle("3D View")
     panel.setWindowFlags(
         Qt.Window

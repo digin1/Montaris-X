@@ -1816,7 +1816,9 @@ class MontarisApp(QMainWindow):
         # QMainWindow frame while vispy is wiring up its GL surface.
         self.setUpdatesEnabled(False)
         try:
-            panel = View3DPanel(self._central_stack, channels=channels)
+            panel = View3DPanel(
+                self._central_stack, channels=channels, documents=self._documents,
+            )
             self._view3d_panel = panel
             self._central_stack.addWidget(panel)
             self._central_stack.setCurrentWidget(panel)
