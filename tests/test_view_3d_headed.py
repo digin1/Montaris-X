@@ -5,7 +5,7 @@ Run with a real display (not offscreen):
     QT_QPA_PLATFORM=xcb .venv/bin/pytest tests/test_view_3d_headed.py -m headed -s
 
 Tests that opening a GQR183 z-stack goes through the new loader, attaches a
-3D volume to the MontageDocument, and that View3DDialog constructs + renders
+3D volume to the MontageDocument, and that View3DPanel constructs + renders
 at least one frame.
 """
 from __future__ import annotations
@@ -91,9 +91,9 @@ def test_open_zstack_attaches_volume(qapp, zstack_path):
 
 
 def test_view3d_dialog_renders_frame(qapp, zstack_path):
-    """Construct View3DDialog with a real volume, show it, and confirm a frame is drawn."""
+    """Construct View3DPanel with a real volume, show it, and confirm a frame is drawn."""
     from montaris.io.image_io import load_volume
-    from montaris.widgets.view_3d import View3DDialog, VISPY_AVAILABLE
+    from montaris.widgets.view_3d import View3DPanel, VISPY_AVAILABLE
 
     if not VISPY_AVAILABLE:
         pytest.skip("vispy not installed")
@@ -102,7 +102,7 @@ def test_view3d_dialog_renders_frame(qapp, zstack_path):
     # Downsample aggressively so the headless GL upload is cheap and fast
     vol_small = vol[::4, ::4, ::4]
 
-    dlg = View3DDialog(None, channels=[("ch0", vol_small, (0.0, 1.0, 1.0))])
+    dlg = View3DPanel(None, channels=[("ch0", vol_small, (0.0, 1.0, 1.0))])
     dlg.resize(640, 480)
     dlg.show()
 

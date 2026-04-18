@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QCheckBox, QSlider, QMessageBox, QWidget, QFrame,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontMetrics
 
 
@@ -355,27 +355,17 @@ def _to_uint8(volume, clim):
     return v.astype(np.uint8)
 
 
-class View3DDialog(QDialog):
-    """Embed a vispy SceneCanvas inside a Qt dialog and render volumes."""
+class View3DPanel(QWidget):
+    """Embed a vispy SceneCanvas and its controls as a reusable QWidget.
+
+    Designed to be dropped into a QStackedWidget (or any parent layout) so
+    the 3D view can live inside the main window. ``release_gl()`` must be
+    called before discarding the panel so volume textures are freed.
+    """
 
     def __init__(self, parent=None, channels=None):
         """channels: list of (name, volume_ndarray, tint_rgb_or_None)."""
         super().__init__(parent)
-        self.setWindowTitle("3D View")
-        # QDialog defaults to Qt.Dialog window type, which most X11/XWayland
-        # window managers refuse to maximize (they keep the button greyed).
-        # Override to Qt.Window so the viewer behaves like a regular top-level
-        # window and the WM honors minimize/maximize.
-        self.setWindowFlags(
-            Qt.Window
-            | Qt.WindowSystemMenuHint
-            | Qt.WindowTitleHint
-            | Qt.WindowMinimizeButtonHint
-            | Qt.WindowMaximizeButtonHint
-            | Qt.WindowCloseButtonHint
-        )
-        self.resize(960, 720)
-
         self._channels_raw = list(channels or [])
         self._volumes = []        # list of scene.visuals.Volume
         self._canvas = None
@@ -396,7 +386,7 @@ class View3DDialog(QDialog):
         root.addWidget(self._canvas.native, 1)
 
         self._view = self._canvas.central_widget.add_view()
-        self._view.camera = PanArcballCamera(fov=45)
+        self._view.camera = PanArcballCamera(fov=0)
 
         # Detect the real 3D-texture cap and GPU label once the context is live.
         # Runs here (not at module load) because the value is tied to the
@@ -483,8 +473,14 @@ class View3DDialog(QDialog):
         if self._channel_toggles:
             root.addLayout(ch_row)
 
-        # Initial render
-        self._rebuild_volumes()
+        # Defer the first GPU upload by one event-loop tick so the panel
+        # can lay out and paint before we block the thread with texture
+        # uploads. Without this, embedding the panel into a QStackedWidget
+        # freezes the main window for the duration of the upload (hundreds
+        # of ms to several seconds) — long enough for the Wayland
+        # compositor to paint the window blank and for clicks on other
+        # docks to queue up and feel like a freeze.
+        QTimer.singleShot(0, self._rebuild_volumes)
 
     def _sep(self):
         s = QFrame()
@@ -614,29 +610,90 @@ class View3DDialog(QDialog):
         else:
             self._ds_label.setText(f"1/{total}")
 
-    def closeEvent(self, event):
-        # Explicitly free GPU resources before Qt tears the widget down.
+    def capture_state(self):
+        """Snapshot camera pose so it can be restored after a rebuild."""
+        if self._view is None or self._view.camera is None:
+            return None
+        cam = self._view.camera
+        try:
+            quat = cam._quaternion
+            qx, qy, qz, qw = quat.x, quat.y, quat.z, quat.w
+        except Exception:
+            qx = qy = qz = qw = None
+        return {
+            'center': tuple(cam.center),
+            'scale_factor': float(cam._scale_factor),
+            'quaternion': (qx, qy, qz, qw),
+            'pan_sf_ref': float(getattr(cam, '_pan_sf_ref', 0.0)),
+            'mode': self._mode_combo.currentText(),
+            'downsample': int(self._ds_slider.value()),
+            'visible': [cb.isChecked() for cb in self._channel_toggles],
+        }
+
+    def apply_state(self, state):
+        """Restore a state dict produced by :meth:`capture_state`."""
+        if not state or self._view is None or self._view.camera is None:
+            return
+        if 'mode' in state:
+            idx = self._mode_combo.findText(state['mode'])
+            if idx >= 0:
+                self._mode_combo.blockSignals(True)
+                self._mode_combo.setCurrentIndex(idx)
+                self._mode_combo.blockSignals(False)
+                # Apply mode to visuals without triggering rebuild
+                method = next((m for m, lbl in self._mode_labels.items()
+                               if lbl == state['mode']), 'mip')
+                for vol in self._volumes:
+                    vol.method = method
+        if 'downsample' in state and state['downsample'] != self._downsample_factor:
+            self._ds_slider.blockSignals(True)
+            self._ds_slider.setValue(state['downsample'])
+            self._ds_slider.blockSignals(False)
+            self._downsample_factor = int(state['downsample'])
+            self._rebuild_volumes()
+        for i, on in enumerate(state.get('visible', [])):
+            if i < len(self._channel_toggles):
+                self._channel_toggles[i].blockSignals(True)
+                self._channel_toggles[i].setChecked(on)
+                self._channel_toggles[i].blockSignals(False)
+                self._set_visible(i, on)
+        cam = self._view.camera
+        try:
+            cam.center = state['center']
+            cam._scale_factor = float(state['scale_factor'])
+            cam._pan_sf_ref = float(state.get('pan_sf_ref', 0.0))
+            q = state.get('quaternion')
+            if q and all(v is not None for v in q):
+                from vispy.util.quaternion import Quaternion
+                cam._quaternion = Quaternion(q[3], q[0], q[1], q[2])
+            cam.view_changed()
+        except Exception:
+            pass
+
+    def release_gl(self):
+        """Free GPU resources held by this panel. Safe to call repeatedly."""
         for vol in self._volumes:
             vol.parent = None
         self._volumes = []
         if self._canvas is not None:
-            self._canvas.close()
+            try:
+                self._canvas.close()
+            except Exception:
+                pass
+            self._canvas = None
+        self._view = None
+
+    def closeEvent(self, event):
+        self.release_gl()
         super().closeEvent(event)
 
 
-def open_view_3d(parent, documents):
-    """Helper: collect volumes from a list of MontageDocument and show the dialog.
+def channels_from_documents(documents):
+    """Build the ``channels`` list View3DPanel expects from MontageDocuments.
 
-    Returns True if shown, False if nothing to render or vispy is unavailable.
+    Skips documents without a ``volume_data`` attribute. Returns an empty list
+    if no volumes are available.
     """
-    if not VISPY_AVAILABLE:
-        QMessageBox.information(
-            parent, "3D view unavailable",
-            "The 3D viewer needs the optional 'vispy' package.\n\n"
-            "Install it with:\n    pip install vispy\n\n"
-            "Then restart Montaris-X.",
-        )
-        return False
     channels = []
     for doc in documents:
         vol = getattr(doc, 'volume_data', None)
@@ -646,12 +703,40 @@ def open_view_3d(parent, documents):
         if tint is not None and max(tint) > 1.0:
             tint = tuple(c / 255.0 for c in tint)
         channels.append((doc.name, vol, tint))
+    return channels
+
+
+def open_view_3d(parent, documents):
+    """Legacy helper: open the 3D viewer as a standalone top-level window.
+
+    Kept for the headed smoke script and tests. The main app now embeds
+    :class:`View3DPanel` inside its central stack instead of calling this.
+    """
+    if not VISPY_AVAILABLE:
+        QMessageBox.information(
+            parent, "3D view unavailable",
+            "The 3D viewer needs the optional 'vispy' package.\n\n"
+            "Install it with:\n    pip install vispy\n\n"
+            "Then restart Montaris-X.",
+        )
+        return False
+    channels = channels_from_documents(documents)
     if not channels:
         QMessageBox.information(
             parent, "No 3D data",
             "No z-stack volumes loaded. Open one or more z-stack TIFFs first.",
         )
         return False
-    dlg = View3DDialog(parent, channels=channels)
-    dlg.show()
+    panel = View3DPanel(None, channels=channels)
+    panel.setWindowTitle("3D View")
+    panel.setWindowFlags(
+        Qt.Window
+        | Qt.WindowSystemMenuHint
+        | Qt.WindowTitleHint
+        | Qt.WindowMinimizeButtonHint
+        | Qt.WindowMaximizeButtonHint
+        | Qt.WindowCloseButtonHint
+    )
+    panel.resize(960, 720)
+    panel.show()
     return True

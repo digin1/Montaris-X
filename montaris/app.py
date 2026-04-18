@@ -276,7 +276,15 @@ class MontarisApp(QMainWindow):
         self._adjustments = cell.adjustments
         self._documents = cell.documents
         self._active_doc_index = cell.active_doc_index
-        self.setCentralWidget(self._canvas_grid)
+        # Central area is a stack so the 3D viewer can replace the 2D canvas
+        # in place. Index 0 holds the 2D canvas grid; the 3D panel is added
+        # on demand at index 1 and removed on exit to release VRAM.
+        from PySide6.QtWidgets import QStackedWidget
+        self._central_stack = QStackedWidget(self)
+        self._central_stack.addWidget(self._canvas_grid)
+        self._view3d_panel = None
+        self._view3d_saved_state = None
+        self.setCentralWidget(self._central_stack)
 
     def _setup_panels(self):
         # Layer panel
@@ -1762,9 +1770,67 @@ class MontarisApp(QMainWindow):
         self._auto_detect_session(folder)
 
     def _open_view_3d(self):
-        """Open the vispy-based 3D volume viewer for any loaded z-stacks."""
-        from montaris.widgets.view_3d import open_view_3d
-        open_view_3d(self, self._documents)
+        """Toggle the central area between the 2D canvas and the 3D panel.
+
+        Entering 3D builds a fresh View3DPanel from the loaded volumes and
+        restores any camera/mode state captured on the previous exit.
+        Leaving 3D captures that state, releases the GL resources, and drops
+        the panel so volume textures are freed.
+        """
+        from montaris.widgets.view_3d import (
+            View3DPanel, VISPY_AVAILABLE, channels_from_documents,
+        )
+        # Leaving 3D — tear down and return to 2D
+        if self._view3d_panel is not None:
+            try:
+                self._view3d_saved_state = self._view3d_panel.capture_state()
+            except Exception:
+                self._view3d_saved_state = None
+            self._central_stack.setCurrentIndex(0)
+            self._central_stack.removeWidget(self._view3d_panel)
+            try:
+                self._view3d_panel.release_gl()
+            finally:
+                self._view3d_panel.deleteLater()
+                self._view3d_panel = None
+            self._view3d_btn.setText(" View in 3D")
+            self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
+            return
+
+        # Entering 3D — validate, build, and show
+        if not VISPY_AVAILABLE:
+            QMessageBox.information(
+                self, "3D view unavailable",
+                "The 3D viewer needs the optional 'vispy' package.\n\n"
+                "Install it with:\n    pip install vispy\n\nThen restart Montaris-X.",
+            )
+            return
+        channels = channels_from_documents(self._documents)
+        if not channels:
+            QMessageBox.information(
+                self, "No 3D data",
+                "No z-stack volumes loaded. Open one or more z-stack TIFFs first.",
+            )
+            return
+        # Freeze repaints across the swap so Wayland doesn't show a bare
+        # QMainWindow frame while vispy is wiring up its GL surface.
+        self.setUpdatesEnabled(False)
+        try:
+            panel = View3DPanel(self._central_stack, channels=channels)
+            self._view3d_panel = panel
+            self._central_stack.addWidget(panel)
+            self._central_stack.setCurrentWidget(panel)
+        finally:
+            self.setUpdatesEnabled(True)
+        # Heavy GPU upload happens on the next event-loop tick (deferred
+        # inside View3DPanel). Run it under busy_cursor so the pointer
+        # reflects the wait and queued dock clicks drain predictably.
+        with busy_cursor("Preparing 3D view...", self, log_as="view.open_3d"):
+            QApplication.processEvents()
+        if self._view3d_saved_state is not None:
+            panel.apply_state(self._view3d_saved_state)
+        self._view3d_btn.setText(" Back to 2D")
+        self._view3d_btn.setToolTip("Return to the 2D canvas (releases 3D VRAM)")
 
     def _channels_from_path(self, path, z_mode, z_slice):
         """Return list of (name, data_2d, volume_or_None) for a given file path.

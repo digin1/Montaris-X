@@ -1,6 +1,6 @@
 """Headful smoke test for the 3D viewer.
 
-Loads one of the GQR183 z-stacks via the new loader, constructs View3DDialog
+Loads one of the GQR183 z-stacks via the new loader, constructs View3DPanel
 directly, forces a render, iterates render modes, saves screenshots, exits.
 
     QT_QPA_PLATFORM=wayland .venv/bin/python scripts/headed_3d_smoke.py
@@ -36,7 +36,7 @@ def main() -> int:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     from montaris.io.image_io import load_volume, probe_tiff
-    from montaris.widgets.view_3d import View3DDialog, VISPY_AVAILABLE
+    from montaris.widgets.view_3d import View3DPanel, VISPY_AVAILABLE
 
     if not VISPY_AVAILABLE:
         log("FAIL: vispy not available")
@@ -58,8 +58,8 @@ def main() -> int:
     log("creating QApplication...")
     app = QApplication.instance() or QApplication(sys.argv)
 
-    log("constructing View3DDialog...")
-    dlg = View3DDialog(None, channels=[("561", vol_small, (0.0, 1.0, 1.0))])
+    log("constructing View3DPanel...")
+    dlg = View3DPanel(None, channels=[("561", vol_small, (0.0, 1.0, 1.0))])
     dlg.resize(960, 720)
     dlg.show()
     app.processEvents()
