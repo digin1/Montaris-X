@@ -1461,6 +1461,11 @@ class MontarisApp(QMainWindow):
         tool_name = getattr(self.active_tool, 'name', 'None') if self.active_tool else 'None'
         roi_info = f"  |  {layer.name}" if layer and hasattr(layer, 'name') else ""
         self._tool_status_label.setText(f"Tool: {tool_name}{roi_info}")
+        # Push the selected 3D ROI id (if any) into the 3D viewer so the
+        # next paint stroke extends it instead of allocating a new id.
+        if self._view3d_panel is not None:
+            lid = getattr(layer, 'label_id', None) if getattr(layer, 'is_volume', False) else None
+            self._view3d_panel.set_active_volume_roi_id(lid)
 
     _NON_DRAWING_TOOLS = {'Hand', 'Select ROI', 'Transform (selected)', 'Transform All',
                           'Move (selected)', 'Move All'}
@@ -1914,6 +1919,11 @@ class MontarisApp(QMainWindow):
             self._view3d_panel = panel
             self._central_stack.addWidget(panel)
             self._central_stack.setCurrentWidget(panel)
+            # Carry the LayerPanel's current selection into the new panel so
+            # a paint stroke right after opening extends the selected ROI.
+            sel = self.canvas._active_layer
+            lid = getattr(sel, 'label_id', None) if getattr(sel, 'is_volume', False) else None
+            panel.set_active_volume_roi_id(lid)
         finally:
             self.setUpdatesEnabled(True)
         # Heavy GPU upload happens on the next event-loop tick (deferred

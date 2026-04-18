@@ -205,7 +205,7 @@ def test_brush_spin_enabled_only_in_paint_or_erase(qapp):
 
 
 def test_tool_switch_midstroke_aborts_without_emitting(qapp):
-    """Switching the tool dropdown during a drag shouldn't leak a label."""
+    """Switching the tool dropdown during a drag rolls back the fresh id."""
     doc, vol = _make_doc_with_volume((10, 20, 20))
     panel = _make_panel(qapp, doc, vol)
     try:
@@ -215,15 +215,128 @@ def test_tool_switch_midstroke_aborts_without_emitting(qapp):
         panel._tool_combo.setCurrentText("Paint")
         panel._drag_active = True
         panel._drag_mode = 'paint'
-        panel._drag_label_id = doc.reserve_label_id()
+        lid = doc.reserve_label_id()
+        panel._drag_label_id = lid
+        panel._drag_extends_existing = False
         panel._brush_radius = 2
         panel._stamp_brush((5, 10, 10))
 
-        # User flips to Navigate mid-stroke.
+        # User flips to Navigate mid-stroke — tool change should rollback.
         panel._tool_combo.setCurrentText("Navigate")
         QApplication.processEvents()
 
         assert panel._drag_active is False
         assert received == []
+        # Rollback drops the meta entry and zeros the voxels so no orphan
+        # appears in the LayerPanel after the abort.
+        assert lid not in doc.labels_meta
+        assert (doc.labels_3d == lid).sum() == 0
+    finally:
+        panel.close()
+
+
+def test_paint_extends_selected_volume_roi(qapp):
+    """Paint with an active id extends that ROI — no new reservation."""
+    doc, vol = _make_doc_with_volume((10, 20, 20))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        # Pre-reserve an id as if the user had painted once already and
+        # the LayerPanel selected its VolumeROILayer.
+        existing = doc.reserve_label_id(name="my_dendrite")
+        doc.labels_3d[5, 10, 10] = existing
+        panel.set_active_volume_roi_id(existing)
+
+        received = []
+        panel.label_added.connect(lambda d, lid: received.append((d, lid)))
+
+        panel._tool_combo.setCurrentText("Paint")
+        # Simulate the press-stamp-release lifecycle.
+        panel._drag_active = True
+        panel._drag_mode = 'paint'
+        panel._drag_extends_existing = True
+        panel._drag_label_id = existing
+        panel._brush_radius = 2
+        panel._stamp_brush((6, 12, 12))
+        panel._finish_drag(emit=False)
+
+        # No new id reserved → label count unchanged.
+        assert len(doc.labels_meta) == 1
+        assert existing in doc.labels_meta
+        # Extending an existing ROI must not emit label_added (would
+        # create a duplicate VolumeROILayer on MontarisApp's side).
+        assert received == []
+        # The stamp actually wrote with the existing id.
+        assert (doc.labels_3d == existing).sum() > 1
+    finally:
+        panel.close()
+
+
+def test_paint_without_selection_reserves_new_id(qapp):
+    """With no selected 3D ROI, paint stroke allocates a fresh id."""
+    doc, vol = _make_doc_with_volume((10, 20, 20))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel.set_active_volume_roi_id(None)
+        pre_count = len(doc.labels_meta)
+
+        received = []
+        panel.label_added.connect(lambda d, lid: received.append((d, lid)))
+
+        panel._tool_combo.setCurrentText("Paint")
+        panel._drag_active = True
+        panel._drag_mode = 'paint'
+        panel._drag_extends_existing = False
+        new_lid = doc.reserve_label_id()
+        panel._drag_label_id = new_lid
+        panel._brush_radius = 2
+        panel._stamp_brush((5, 10, 10))
+        panel._finish_drag(emit=True)
+
+        assert len(doc.labels_meta) == pre_count + 1
+        assert received == [(doc, new_lid)]
+    finally:
+        panel.close()
+
+
+def test_tool_switch_midstroke_preserves_extended_id(qapp):
+    """Aborting an extension stroke must NOT release the pre-existing ROI."""
+    doc, vol = _make_doc_with_volume((10, 20, 20))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        # Pre-existing ROI with a painted voxel the user wants to keep.
+        existing = doc.reserve_label_id()
+        doc.labels_3d[5, 10, 10] = existing
+        panel.set_active_volume_roi_id(existing)
+
+        panel._tool_combo.setCurrentText("Paint")
+        panel._drag_active = True
+        panel._drag_mode = 'paint'
+        panel._drag_extends_existing = True
+        panel._drag_label_id = existing
+        panel._brush_radius = 1
+        panel._stamp_brush((3, 3, 3))
+
+        panel._tool_combo.setCurrentText("Navigate")
+        QApplication.processEvents()
+
+        # The id is still alive — the extension's partial stamps stay in
+        # place (consistent with fire-and-forget paint semantics).
+        assert existing in doc.labels_meta
+        assert doc.labels_3d[5, 10, 10] == existing
+    finally:
+        panel.close()
+
+
+def test_set_active_volume_roi_id_accepts_none(qapp):
+    """None/0 clears the active id so subsequent strokes allocate fresh."""
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel.set_active_volume_roi_id(7)
+        assert panel._active_volume_roi_id == 7
+        panel.set_active_volume_roi_id(None)
+        assert panel._active_volume_roi_id is None
+        panel.set_active_volume_roi_id(0)
+        assert panel._active_volume_roi_id is None
     finally:
         panel.close()

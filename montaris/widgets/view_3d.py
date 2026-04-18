@@ -431,6 +431,11 @@ class View3DPanel(QWidget):
         self._drag_mode = None         # 'paint' or 'erase' during a stroke
         self._drag_label_id = None     # reserved on mouse_press for paint
         self._drag_dirty = False       # set by _stamp_brush, consumed by timer
+        # When non-None and the id exists in the active doc, paint strokes
+        # extend that ROI instead of allocating a new one. MontarisApp pushes
+        # this from the LayerPanel's selection_changed signal.
+        self._active_volume_roi_id = None
+        self._drag_extends_existing = False
         self._canvas = None
         self._view = None
         self._downsample_factor = 1
@@ -701,8 +706,10 @@ class View3DPanel(QWidget):
         self._brush_spin.setEnabled(self._tool_mode in ('paint', 'erase'))
         # A tool switch mid-drag (via keyboard shortcut etc.) should abandon
         # the stroke cleanly so we don't paint into the new mode's state.
+        # rollback=True drops a freshly-reserved paint id (and its voxels)
+        # so it doesn't appear in the LayerPanel as an orphan.
         if self._drag_active:
-            self._finish_drag(emit=False)
+            self._finish_drag(emit=False, rollback=True)
 
     def _on_fill_channel_changed(self, idx):
         self._fill_channel_idx = int(idx)
@@ -763,8 +770,17 @@ class View3DPanel(QWidget):
                 doc.ensure_labels_3d()
             self._drag_active = True
             self._drag_mode = self._tool_mode
+            self._drag_extends_existing = False
             if self._tool_mode == 'paint':
-                self._drag_label_id = doc.reserve_label_id()
+                # Extend the LayerPanel-selected 3D ROI when one is active;
+                # otherwise allocate a fresh id. Keeps successive strokes on
+                # the same ROI from spawning a new VolumeROILayer each time.
+                active = self._active_volume_roi_id
+                if active is not None and active in doc.labels_meta:
+                    self._drag_label_id = int(active)
+                    self._drag_extends_existing = True
+                else:
+                    self._drag_label_id = doc.reserve_label_id()
                 if self._drag_label_id > np.iinfo(doc.labels_3d.dtype).max:
                     doc.promote_labels_dtype(np.uint16)
             else:
@@ -789,25 +805,49 @@ class View3DPanel(QWidget):
             return
         if event.button != 1:
             return
-        emit = (self._drag_mode == 'paint' and self._drag_label_id)
+        # Only emit label_added for a freshly-reserved paint id. Extending an
+        # existing ROI reuses an id that already has a VolumeROILayer wrapper,
+        # so emitting again would create a duplicate row in the LayerPanel.
+        emit = (self._drag_mode == 'paint'
+                and self._drag_label_id
+                and not self._drag_extends_existing)
         self._finish_drag(emit=bool(emit))
 
-    def _finish_drag(self, emit):
+    def _finish_drag(self, emit, rollback=False):
         """Tear down drag state and refresh overlays once.
 
-        ``emit`` is True for a completed paint stroke (signals a new ROI to
-        MontarisApp), False for an erase stroke or an aborted drag.
+        ``emit`` is True for a completed paint stroke that allocated a new
+        id (signals a new ROI to MontarisApp). False for erase strokes,
+        existing-ROI extensions, and aborted drags.
+
+        ``rollback`` is True when the stroke was aborted mid-flight (e.g.,
+        tool switched) and we need to drop a freshly-reserved paint id so
+        it doesn't leak into the LayerPanel as an orphan.
         """
         self._drag_refresh_timer.stop()
         doc = self._primary_doc
         lid = self._drag_label_id
+        mode = self._drag_mode
+        extended = self._drag_extends_existing
         self._drag_active = False
         self._drag_mode = None
         self._drag_label_id = None
+        self._drag_extends_existing = False
         self._drag_dirty = False
+        # Rollback only applies to freshly-reserved paint ids — erase writes
+        # 0 and extensions reuse an id owned by an existing VolumeROILayer.
+        if (rollback and doc is not None and mode == 'paint'
+                and lid and not extended):
+            doc.release_label_id(int(lid))
         self.refresh_labels()
         if emit and doc is not None and lid:
             self.label_added.emit(doc, lid)
+
+    def set_active_volume_roi_id(self, lid):
+        """Tell the panel which 3D ROI id a subsequent paint stroke should
+        extend. ``None`` clears it so the next stroke allocates a new id.
+        """
+        self._active_volume_roi_id = int(lid) if lid else None
 
     def _on_drag_refresh_tick(self):
         """Coalesced overlay repaint while a stroke is in progress."""
