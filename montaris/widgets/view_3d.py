@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QCheckBox, QSlider, QMessageBox, QWidget, QFrame,
+    QCheckBox, QSlider, QMessageBox, QWidget, QFrame, QSpinBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics
@@ -414,13 +414,23 @@ class View3DPanel(QWidget):
         # Last total downsample applied to intensity volumes; labels overlay
         # re-uses the same factor so voxels line up.
         self._last_total_ds = 1
-        # Annotation tool state. ``_tool_mode`` is 'navigate' or 'fill' for
-        # Phase 3; paint/erase land in Phase 5. ``_fill_channel_idx`` selects
-        # which intensity channel the flood fill reads from (each channel is
-        # usually a different wavelength and they don't share intensities).
+        # Annotation tool state. ``_tool_mode`` is one of navigate/fill/paint/
+        # erase. ``_fill_channel_idx`` selects which intensity channel the flood
+        # fill reads from (each channel is usually a different wavelength and
+        # they don't share intensities). Paint/erase operate on ``labels_3d``
+        # directly and don't need a source channel.
         self._tool_mode = 'navigate'
         self._fill_channel_idx = 0
         self._fill_tolerance = 20  # 0..255 in uint8 space (auto-scaled per channel)
+        # Brush stroke state. ``_brush_radius`` is in voxels; the stamp is a
+        # true 3D sphere in voxel space (anisotropy is ignored — good enough
+        # at typical microscopy step ratios). The drag-* fields are reset at
+        # the end of every stroke.
+        self._brush_radius = 5
+        self._drag_active = False
+        self._drag_mode = None         # 'paint' or 'erase' during a stroke
+        self._drag_label_id = None     # reserved on mouse_press for paint
+        self._drag_dirty = False       # set by _stamp_brush, consumed by timer
         self._canvas = None
         self._view = None
         self._downsample_factor = 1
@@ -554,12 +564,13 @@ class View3DPanel(QWidget):
             labels_row.addStretch(1)
             root.addLayout(labels_row)
 
-            # Annotation tool row. Currently just Navigate + Fill (Phase 3).
+            # Annotation tool row. Navigate (orbit camera), Fill (magic-wand
+            # flood), Paint (spherical brush), Erase (spherical brush → 0).
             tool_row = QHBoxLayout()
             tool_row.setSpacing(8)
             tool_row.addWidget(QLabel("Tool:"))
             self._tool_combo = QComboBox()
-            self._tool_combo.addItems(["Navigate", "Fill"])
+            self._tool_combo.addItems(["Navigate", "Fill", "Paint", "Erase"])
             self._tool_combo.currentTextChanged.connect(self._on_tool_changed)
             tool_row.addWidget(self._tool_combo)
 
@@ -590,14 +601,36 @@ class View3DPanel(QWidget):
             self._tol_label = QLabel("20")
             tool_row.addWidget(self._tol_label)
 
+            tool_row.addWidget(self._sep())
+
+            tool_row.addWidget(QLabel("Brush:"))
+            self._brush_spin = QSpinBox()
+            self._brush_spin.setRange(1, 50)
+            self._brush_spin.setValue(self._brush_radius)
+            self._brush_spin.setSuffix(" vx")
+            self._brush_spin.valueChanged.connect(self._on_brush_radius_changed)
+            self._brush_spin.setEnabled(False)  # enabled only in Paint/Erase
+            tool_row.addWidget(self._brush_spin)
+
             tool_row.addStretch(1)
             root.addLayout(tool_row)
 
-            # Hook up the click-to-fill mouse handler. Vispy SceneCanvas
-            # emits mouse events independently of Qt's mousePressEvent so we
-            # attach via its events system. The handler itself short-circuits
-            # unless tool mode is 'fill'.
+            # Hook up annotation mouse handlers. Vispy SceneCanvas emits
+            # mouse events independently of Qt's mousePressEvent so we attach
+            # via its events system. Each handler short-circuits unless the
+            # active tool needs it.
             self._canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
+            self._canvas.events.mouse_move.connect(self._on_canvas_mouse_move)
+            self._canvas.events.mouse_release.connect(self._on_canvas_mouse_release)
+
+            # Throttle overlay refreshes during paint/erase drags. Each
+            # stamp marks ``_drag_dirty``; this timer coalesces dirty flags
+            # into one rebuild at ~30 fps while a stroke is active. Without
+            # this, large volumes rebuild + re-upload the labels Volume on
+            # every mouse_move and the drag stutters into the hundreds of ms.
+            self._drag_refresh_timer = QTimer(self)
+            self._drag_refresh_timer.setInterval(33)
+            self._drag_refresh_timer.timeout.connect(self._on_drag_refresh_tick)
 
         # Defer the first GPU upload by one event-loop tick so the panel
         # can lay out and paint before we block the thread with texture
@@ -653,15 +686,23 @@ class View3DPanel(QWidget):
 
     def _on_tool_changed(self, text):
         self._tool_mode = text.lower()
-        # Disable camera interaction in Fill mode so left-drag doesn't rotate
-        # while the user is trying to click-to-fill.
+        # Disable camera interaction in any annotation mode so left-drag
+        # doesn't rotate while the user is trying to click or paint.
         if self._view is not None and self._view.camera is not None:
             self._view.camera.interactive = (self._tool_mode == 'navigate')
         # Cursor hint
-        if self._tool_mode == 'fill':
+        if self._tool_mode in ('fill', 'paint', 'erase'):
             self._canvas.native.setCursor(Qt.CrossCursor)
         else:
             self._canvas.native.unsetCursor()
+        # Gate the mode-specific controls so it's visually obvious which
+        # parameter applies to the current tool.
+        self._tol_slider.setEnabled(self._tool_mode == 'fill')
+        self._brush_spin.setEnabled(self._tool_mode in ('paint', 'erase'))
+        # A tool switch mid-drag (via keyboard shortcut etc.) should abandon
+        # the stroke cleanly so we don't paint into the new mode's state.
+        if self._drag_active:
+            self._finish_drag(emit=False)
 
     def _on_fill_channel_changed(self, idx):
         self._fill_channel_idx = int(idx)
@@ -669,6 +710,9 @@ class View3DPanel(QWidget):
     def _on_tolerance_changed(self, val):
         self._fill_tolerance = int(val)
         self._tol_label.setText(str(val))
+
+    def _on_brush_radius_changed(self, val):
+        self._brush_radius = int(val)
 
     def _on_labels_visible_toggled(self, on):
         self._labels_visible = bool(on)
@@ -690,28 +734,122 @@ class View3DPanel(QWidget):
         """Route mouse press to the active annotation tool.
 
         In Navigate mode this is a no-op — the camera's own bindings
-        handle rotation/pan/zoom. In Fill mode, a left-click runs a
-        ray-pick → seed → flood fill sequence on the active channel.
+        handle rotation/pan/zoom. In Fill mode a left-click runs a
+        ray-pick → seed → flood fill. In Paint/Erase a left-press starts
+        a stroke: reserve a new label id (paint only), stamp the first
+        sphere immediately, then keep stamping on every mouse_move until
+        mouse_release.
         """
-        if self._tool_mode != 'fill':
-            return
-        if event.button != 1:  # only left button triggers fill
+        if event.button != 1:  # only left button starts an annotation
             return
         if self._primary_doc is None or not self._volumes:
             return
-        # event.pos is in canvas pixel space; for vispy ViewBox with the
-        # camera we configured, that equals viewbox pixel space.
-        seed = self._ray_pick_seed(event.pos)
+        if self._tool_mode == 'fill':
+            seed = self._ray_pick_seed(event.pos)
+            if seed is None:
+                return
+            self._run_fill(seed)
+            return
+        if self._tool_mode in ('paint', 'erase'):
+            # Paint/erase are allowed to start anywhere, including over
+            # empty voxels — users expect to pre-seed an empty region or
+            # clean up a stray voxel. The ray pick still needs a valid
+            # intersection with the volume's AABB though.
+            seed = self._ray_pick_seed(event.pos, require_bright=False)
+            if seed is None:
+                return
+            doc = self._primary_doc
+            if doc.labels_3d is None:
+                doc.ensure_labels_3d()
+            self._drag_active = True
+            self._drag_mode = self._tool_mode
+            if self._tool_mode == 'paint':
+                self._drag_label_id = doc.reserve_label_id()
+                if self._drag_label_id > np.iinfo(doc.labels_3d.dtype).max:
+                    doc.promote_labels_dtype(np.uint16)
+            else:
+                self._drag_label_id = 0  # erase writes background
+            self._stamp_brush(seed)
+            self._drag_refresh_timer.start()
+
+    def _on_canvas_mouse_move(self, event):
+        """Continue an in-progress paint/erase stroke."""
+        if not self._drag_active:
+            return
+        if self._primary_doc is None or not self._volumes:
+            return
+        seed = self._ray_pick_seed(event.pos, require_bright=False)
         if seed is None:
             return
-        self._run_fill(seed)
+        self._stamp_brush(seed)
 
-    def _ray_pick_seed(self, pos):
+    def _on_canvas_mouse_release(self, event):
+        """Finalize the current stroke on left-release."""
+        if not self._drag_active:
+            return
+        if event.button != 1:
+            return
+        emit = (self._drag_mode == 'paint' and self._drag_label_id)
+        self._finish_drag(emit=bool(emit))
+
+    def _finish_drag(self, emit):
+        """Tear down drag state and refresh overlays once.
+
+        ``emit`` is True for a completed paint stroke (signals a new ROI to
+        MontarisApp), False for an erase stroke or an aborted drag.
+        """
+        self._drag_refresh_timer.stop()
+        doc = self._primary_doc
+        lid = self._drag_label_id
+        self._drag_active = False
+        self._drag_mode = None
+        self._drag_label_id = None
+        self._drag_dirty = False
+        self.refresh_labels()
+        if emit and doc is not None and lid:
+            self.label_added.emit(doc, lid)
+
+    def _on_drag_refresh_tick(self):
+        """Coalesced overlay repaint while a stroke is in progress."""
+        if not self._drag_dirty:
+            return
+        self._drag_dirty = False
+        self._rebuild_labels_overlay()
+
+    def _stamp_brush(self, seed_zyx):
+        """Stamp a filled sphere of radius ``self._brush_radius`` into
+        ``labels_3d`` centered at ``seed_zyx``. Paint uses the drag's
+        reserved label id; erase writes 0 (background). Marks
+        ``_drag_dirty`` so the throttle timer issues a single rebuild at
+        the next tick.
+        """
+        doc = self._primary_doc
+        if doc is None or doc.labels_3d is None:
+            return
+        r = self._brush_radius
+        cz, cy, cx = seed_zyx
+        Z, Y, X = doc.labels_3d.shape
+        z0, z1 = max(0, cz - r), min(Z, cz + r + 1)
+        y0, y1 = max(0, cy - r), min(Y, cy + r + 1)
+        x0, x1 = max(0, cx - r), min(X, cx + r + 1)
+        if z0 >= z1 or y0 >= y1 or x0 >= x1:
+            return
+        zz, yy, xx = np.ogrid[z0:z1, y0:y1, x0:x1]
+        inside = ((zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx) ** 2) <= r * r
+        val = int(self._drag_label_id) if self._drag_mode == 'paint' else 0
+        region = doc.labels_3d[z0:z1, y0:y1, x0:x1]
+        region[inside] = val
+        self._drag_dirty = True
+
+    def _ray_pick_seed(self, pos, require_bright=True):
         """Cast a ray through canvas pixel ``pos`` and return the brightest
         voxel along it, as ``(z, y, x)`` indices into the active channel.
 
-        Returns ``None`` if the ray misses the volume or the volume is empty.
-        The active channel is the one selected in ``_fill_channel_combo``.
+        Returns ``None`` if the ray misses the volume. When ``require_bright``
+        is True (Fill mode) a ray whose brightest sample is 0 also returns
+        ``None`` — there's nothing to seed from. Paint/erase pass False so
+        strokes can start over empty regions (pre-seeding an ROI or cleaning
+        up a stray voxel).
         """
         if self._view is None or self._view.camera is None:
             return None
@@ -756,7 +894,7 @@ class View3DPanel(QWidget):
         iz = np.clip(pts[:, 2].astype(np.int64), 0, Z - 1)
         samples = volume[iz, iy, ix]
         best = int(np.argmax(samples))
-        if samples[best] <= 0:
+        if require_bright and samples[best] <= 0:
             return None
         return (int(iz[best]), int(iy[best]), int(ix[best]))
 
