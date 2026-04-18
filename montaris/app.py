@@ -644,6 +644,10 @@ class MontarisApp(QMainWindow):
         import_zip_act.triggered.connect(self.import_roi_zip)
         import_menu.addAction(import_zip_act)
 
+        import_labels_act = self._icon_act('fa6s.cube', "3D ROIs from labels TIFF...")
+        import_labels_act.triggered.connect(self.import_volume_labels)
+        import_menu.addAction(import_labels_act)
+
         # Export submenu
         export_menu = file_menu.addMenu("Export")
         _ico = _qta_icon('fa6s.file-export')
@@ -679,6 +683,15 @@ class MontarisApp(QMainWindow):
         export_all_grid_act.setShortcut(QKeySequence("Ctrl+Alt+E"))
         export_all_grid_act.triggered.connect(self.export_all_grid_zips)
         export_menu.addAction(export_all_grid_act)
+
+        export_menu.addSeparator()
+        export_labels_act = self._icon_act('fa6s.cube', "3D ROIs as labels TIFF...")
+        export_labels_act.triggered.connect(self.export_volume_labels)
+        export_menu.addAction(export_labels_act)
+
+        flatten_labels_act = self._icon_act('fa6s.layer-group', "Flatten 3D ROIs to 2D...")
+        flatten_labels_act.triggered.connect(self.flatten_volume_labels_to_2d)
+        export_menu.addAction(flatten_labels_act)
 
         file_menu.addSeparator()
 
@@ -1932,6 +1945,146 @@ class MontarisApp(QMainWindow):
         # Keep the 3D overlay's colormap in sync with the assigned color.
         if self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
+
+    def export_volume_labels(self):
+        """Save ``doc.labels_3d`` as a uint16 multi-page TIFF + sidecar JSON.
+
+        The TIFF is napari- and Fiji-compatible; the JSON records names and
+        colors so Montaris round-trips losslessly. Prompts the user when no
+        active document has a labels volume attached (no 3D ROIs to export).
+        """
+        doc = self._active_document()
+        if doc is None or getattr(doc, 'labels_3d', None) is None \
+                or not getattr(doc, 'labels_meta', {}):
+            QMessageBox.information(
+                self, "No 3D ROIs",
+                "The active document has no 3D ROIs yet. Use the 3D viewer's "
+                "Fill or Paint tools to create some first.",
+            )
+            return
+        default = os.path.join(self._last_dir(), f"{doc.name}_labels.tif")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export 3D ROIs", default,
+            "Labels TIFF (*.tif *.tiff);;All Files (*)",
+        )
+        if not path:
+            return
+        self._update_last_dir(path)
+        try:
+            from montaris.io.volume_labels import save_volume_labels
+            tiff_out, sidecar_out = save_volume_labels(
+                path, doc.labels_3d, doc.labels_meta,
+            )
+        except Exception as e:  # noqa: BLE001 — user-visible
+            QMessageBox.warning(self, "Export failed", str(e))
+            return
+        self.toast.show(
+            f"Exported 3D ROIs → {tiff_out.name} (+ {sidecar_out.name})",
+            "success",
+        )
+
+    def import_volume_labels(self):
+        """Load a labels TIFF + sidecar into the active document.
+
+        Any existing ``labels_3d`` on that document is replaced wholesale
+        along with its meta; stale :class:`VolumeROILayer` wrappers in the
+        layer stack are dropped and fresh ones created from the imported
+        labels. Refuses to import when the active doc has no backing volume
+        to attach the labels to (shape mismatch would be meaningless).
+        """
+        doc = self._active_document()
+        if doc is None:
+            QMessageBox.information(self, "No active document",
+                                     "Open an image before importing 3D ROIs.")
+            return
+        if getattr(doc, 'volume_data', None) is None:
+            QMessageBox.information(
+                self, "2D document",
+                "3D labels can only attach to a z-stack document. Open the "
+                "image as a z-stack first.",
+            )
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import 3D ROIs", self._last_dir(),
+            "Labels TIFF (*.tif *.tiff);;All Files (*)",
+        )
+        if not path:
+            return
+        self._update_last_dir(path)
+        try:
+            from montaris.io.volume_labels import load_volume_labels
+            labels, meta = load_volume_labels(path)
+        except Exception as e:  # noqa: BLE001 — user-visible
+            QMessageBox.warning(self, "Import failed", str(e))
+            return
+        if labels.shape != doc.volume_data.shape:
+            QMessageBox.warning(
+                self, "Shape mismatch",
+                f"Labels volume {labels.shape} does not match the active "
+                f"document's volume {doc.volume_data.shape}.",
+            )
+            return
+
+        # Drop stale volume wrappers from the layer stack first; keep 2D ROIs.
+        from montaris.layers import VolumeROILayer
+        self.layer_stack.roi_layers = [
+            r for r in self.layer_stack.roi_layers
+            if not getattr(r, 'is_volume', False)
+        ]
+        doc.labels_3d = labels
+        doc.labels_meta = dict(meta)
+        doc.labels_next_id = (max(meta.keys()) + 1) if meta else 1
+        # Mirror each imported label as a VolumeROILayer so the LayerPanel sees it.
+        for lid in sorted(meta.keys()):
+            self.layer_stack.roi_layers.append(VolumeROILayer(doc, int(lid)))
+        self.layer_stack.changed.emit()
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
+        self.toast.show(
+            f"Imported {len(meta)} 3D ROI(s) from {os.path.basename(path)}",
+            "success",
+        )
+
+    def flatten_volume_labels_to_2d(self):
+        """Convert each 3D ROI into a per-Z stack of 2D ``ROILayer`` items.
+
+        Names are ``{label_name}_z{z:03d}``; empty slices are skipped. The
+        resulting 2D ROIs round-trip through the existing ImageJ-ZIP export
+        path. The 3D wrappers themselves are left in place so the user can
+        still scrub Z in the 2D bridge view.
+        """
+        doc = self._active_document()
+        if doc is None or getattr(doc, 'labels_3d', None) is None \
+                or not getattr(doc, 'labels_meta', {}):
+            QMessageBox.information(
+                self, "No 3D ROIs",
+                "The active document has no 3D ROIs to flatten.",
+            )
+            return
+        from montaris.layers import ROILayer
+        labels = doc.labels_3d
+        Z, Y, X = labels.shape
+        added = 0
+        for lid, meta in sorted(doc.labels_meta.items()):
+            for z in range(Z):
+                slice_mask = (labels[z] == lid)
+                if not slice_mask.any():
+                    continue
+                roi = ROILayer(
+                    f"{meta.get('name', f'3D ROI {lid}')}_z{z:03d}",
+                    X, Y, color=tuple(meta.get('color', (255, 0, 0))),
+                )
+                roi.mask = slice_mask.astype(np.uint8)
+                roi.opacity = int(meta.get('opacity', 128))
+                roi.visible = bool(meta.get('visible', True))
+                self.layer_stack.roi_layers.append(roi)
+                added += 1
+        self.layer_stack.changed.emit()
+        self.canvas.refresh_overlays()
+        self.toast.show(
+            f"Flattened {len(doc.labels_meta)} 3D ROI(s) → {added} 2D slice(s)",
+            "success",
+        )
 
     def _channels_from_path(self, path, z_mode, z_slice):
         """Return list of (name, data_2d, volume_or_None) for a given file path.
