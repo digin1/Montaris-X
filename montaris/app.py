@@ -1942,6 +1942,10 @@ class MontarisApp(QMainWindow):
         wrapper = VolumeROILayer(doc, label_id)
         self.layer_stack.roi_layers.append(wrapper)
         self.layer_stack.changed.emit()
+        # LayerPanel doesn't subscribe to layer_stack.changed; the rest of
+        # MontarisApp calls refresh() explicitly after every roi_layers
+        # mutation, so do the same here or the new 3D ROI won't show up.
+        self.layer_panel.refresh()
         # Keep the 3D overlay's colormap in sync with the assigned color.
         if self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
@@ -2038,6 +2042,7 @@ class MontarisApp(QMainWindow):
         for lid in sorted(meta.keys()):
             self.layer_stack.roi_layers.append(VolumeROILayer(doc, int(lid)))
         self.layer_stack.changed.emit()
+        self.layer_panel.refresh()
         if self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
         self.toast.show(
@@ -2080,6 +2085,7 @@ class MontarisApp(QMainWindow):
                 self.layer_stack.roi_layers.append(roi)
                 added += 1
         self.layer_stack.changed.emit()
+        self.layer_panel.refresh()
         self.canvas.refresh_overlays()
         self.toast.show(
             f"Flattened {len(doc.labels_meta)} 3D ROI(s) → {added} 2D slice(s)",
