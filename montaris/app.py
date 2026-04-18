@@ -277,14 +277,91 @@ class MontarisApp(QMainWindow):
         self._documents = cell.documents
         self._active_doc_index = cell.active_doc_index
         # Central area is a stack so the 3D viewer can replace the 2D canvas
-        # in place. Index 0 holds the 2D canvas grid; the 3D panel is added
-        # on demand at index 1 and removed on exit to release VRAM.
-        from PySide6.QtWidgets import QStackedWidget
+        # in place. Index 0 holds the 2D canvas grid (wrapped with a Z slider
+        # for z-stack documents); the 3D panel is added on demand at index 1
+        # and removed on exit to release VRAM.
+        from PySide6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout
         self._central_stack = QStackedWidget(self)
-        self._central_stack.addWidget(self._canvas_grid)
+
+        # Wrap the grid so we can stack a Z-slider bar underneath when a
+        # z-stack document is active. Hidden by default; surfaces on demand.
+        canvas_wrapper = QWidget(self)
+        cw_layout = QVBoxLayout(canvas_wrapper)
+        cw_layout.setContentsMargins(0, 0, 0, 0)
+        cw_layout.setSpacing(0)
+        cw_layout.addWidget(self._canvas_grid, 1)
+        self._build_z_slider_bar(canvas_wrapper, cw_layout)
+        self._central_stack.addWidget(canvas_wrapper)
+
         self._view3d_panel = None
         self._view3d_saved_state = None
         self.setCentralWidget(self._central_stack)
+
+    def _build_z_slider_bar(self, parent, layout):
+        """Thin bar below the 2D canvas with a Z-slice slider for z-stacks.
+
+        Hidden whenever the active document has no volume_data. Moving the
+        slider updates ``doc.active_z`` so VolumeROILayer overlays show the
+        right slice, and refreshes the canvas overlays so the new slice
+        renders immediately.
+        """
+        from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QSlider
+        self._z_bar = QWidget(parent)
+        bar_row = QHBoxLayout(self._z_bar)
+        bar_row.setContentsMargins(6, 2, 6, 2)
+        bar_row.setSpacing(6)
+        bar_row.addWidget(QLabel("Z:"))
+        self._z_slider = QSlider(Qt.Horizontal)
+        self._z_slider.setRange(0, 0)
+        self._z_slider.valueChanged.connect(self._on_z_slider_changed)
+        bar_row.addWidget(self._z_slider, 1)
+        self._z_label = QLabel("—")
+        self._z_label.setStyleSheet("color: #888; padding: 0 4px;")
+        self._z_label.setMinimumWidth(60)
+        bar_row.addWidget(self._z_label)
+        self._z_bar.setVisible(False)
+        layout.addWidget(self._z_bar, 0)
+
+    def _on_z_slider_changed(self, val):
+        """Route Z-slider changes into the active document's labels overlay."""
+        doc = self._active_document()
+        if doc is None or getattr(doc, 'volume_data', None) is None:
+            return
+        z = int(val)
+        doc.active_z = z
+        n = doc.volume_data.shape[0]
+        self._z_label.setText(f"{z + 1} / {n}")
+        # VolumeROILayer caches bbox per slice; the active slice just changed
+        # so every volume-backed ROI needs its bbox recomputed before redraw.
+        for roi in self.layer_stack.roi_layers:
+            if getattr(roi, 'is_volume', False) and getattr(roi, '_doc', None) is doc:
+                roi.invalidate_bbox()
+        self.canvas.refresh_overlays()
+
+    def _active_document(self):
+        """Currently-focused document, or None if the active cell is empty."""
+        if not self._documents:
+            return None
+        idx = self._active_doc_index
+        if 0 <= idx < len(self._documents):
+            return self._documents[idx]
+        return self._documents[0]
+
+    def _update_z_slider_visibility(self):
+        """Show the Z slider iff the active doc is a z-stack."""
+        doc = self._active_document()
+        vol = getattr(doc, 'volume_data', None) if doc is not None else None
+        if vol is None or vol.ndim != 3:
+            self._z_bar.setVisible(False)
+            return
+        n = vol.shape[0]
+        self._z_bar.setVisible(True)
+        # block signals so setting the range doesn't trigger a redraw pass
+        self._z_slider.blockSignals(True)
+        self._z_slider.setRange(0, n - 1)
+        self._z_slider.setValue(int(getattr(doc, 'active_z', 0)))
+        self._z_slider.blockSignals(False)
+        self._z_label.setText(f"{int(doc.active_z) + 1} / {n}")
 
     def _setup_panels(self):
         # Layer panel
@@ -1017,6 +1094,7 @@ class MontarisApp(QMainWindow):
         # Update status
         self.canvas.refresh_overlays()
         self._update_tint_btn()
+        self._update_z_slider_visibility()
         tool_name = getattr(self.active_tool, 'name', 'None') if self.active_tool else 'None'
         roi_info = ""
         if active_layer and hasattr(active_layer, 'name'):
@@ -1935,6 +2013,7 @@ class MontarisApp(QMainWindow):
         self._doc_combo.blockSignals(False)
 
         self._update_display_channels()
+        self._update_z_slider_visibility()
         self.toast.show(f"Loaded: {name}  {data.shape}", "success")
 
     def _update_display_channels(self):
@@ -3533,6 +3612,7 @@ class MontarisApp(QMainWindow):
             self.minimap.set_image(doc.image_layer.data)
             self.adjustments_panel.set_image_data(doc.image_layer.data)
         self._update_tint_btn()
+        self._update_z_slider_visibility()
         self.toast.show(f"Switched to: {doc.name}", "info")
 
     def _get_active_tint(self):
