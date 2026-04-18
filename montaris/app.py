@@ -1819,6 +1819,7 @@ class MontarisApp(QMainWindow):
             panel = View3DPanel(
                 self._central_stack, channels=channels, documents=self._documents,
             )
+            panel.label_added.connect(self._on_3d_label_added)
             self._view3d_panel = panel
             self._central_stack.addWidget(panel)
             self._central_stack.setCurrentWidget(panel)
@@ -1833,6 +1834,26 @@ class MontarisApp(QMainWindow):
             panel.apply_state(self._view3d_saved_state)
         self._view3d_btn.setText(" Back to 2D")
         self._view3d_btn.setToolTip("Return to the 2D canvas (releases 3D VRAM)")
+
+    def _on_3d_label_added(self, doc, label_id):
+        """Mirror a newly-created 3D label into the 2D LayerStack.
+
+        The 3D viewer writes voxels into ``doc.labels_3d``; this handler
+        adds a :class:`VolumeROILayer` to ``layer_stack.roi_layers`` so the
+        LayerPanel shows the ROI like any other. The wrapper is lightweight
+        — all storage stays in the shared labels volume.
+        """
+        from montaris.layers import VolumeROILayer
+        # Assign a distinct color from the layer stack's palette so Fill
+        # clicks keep producing visually-separable ROIs.
+        color = self.layer_stack.next_color()
+        doc.labels_meta[label_id]["color"] = color
+        wrapper = VolumeROILayer(doc, label_id)
+        self.layer_stack.roi_layers.append(wrapper)
+        self.layer_stack.changed.emit()
+        # Keep the 3D overlay's colormap in sync with the assigned color.
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
 
     def _channels_from_path(self, path, z_mode, z_slice):
         """Return list of (name, data_2d, volume_or_None) for a given file path.

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QCheckBox, QSlider, QMessageBox, QWidget, QFrame,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics
 
 
@@ -338,6 +338,29 @@ def _fit_to_gpu(volume, max_dim=_MAX_3D_DIM_FALLBACK):
     return volume[::fz, ::fy, ::fx], factors
 
 
+def _ray_aabb(bmin, bmax, origin, direction):
+    """Ray vs. axis-aligned bounding box slab test.
+
+    Returns ``(t_enter, t_exit)`` — the parametric ``t`` values where the
+    ray first enters and finally leaves the box. If the ray misses the box,
+    the returned values satisfy ``t_exit < t_enter`` and the caller should
+    skip. ``origin`` and ``direction`` must be 3-vectors; ``direction`` need
+    not be unit but behaves best when normalized.
+    """
+    o = np.asarray(origin, dtype=float)
+    d = np.asarray(direction, dtype=float)
+    bmin = np.asarray(bmin, dtype=float)
+    bmax = np.asarray(bmax, dtype=float)
+    # Avoid /0 for rays parallel to an axis.
+    eps = 1e-12
+    inv = 1.0 / np.where(np.abs(d) < eps, eps, d)
+    t1 = (bmin - o) * inv
+    t2 = (bmax - o) * inv
+    t_min = np.minimum(t1, t2)
+    t_max = np.maximum(t1, t2)
+    return float(np.max(t_min)), float(np.min(t_max))
+
+
 def _to_uint8(volume, clim):
     """Normalise to uint8 using clim.
 
@@ -363,6 +386,12 @@ class View3DPanel(QWidget):
     called before discarding the panel so volume textures are freed.
     """
 
+    # Emitted after a fill/paint operation successfully writes voxels into
+    # ``doc.labels_3d``. Payload is (document, label_id). The main app listens
+    # and mirrors the new label into its LayerStack so the 2D LayerPanel picks
+    # it up.
+    label_added = Signal(object, int)
+
     def __init__(self, parent=None, channels=None, documents=None):
         """channels: list of (name, volume_ndarray, tint_rgb_or_None).
 
@@ -385,6 +414,13 @@ class View3DPanel(QWidget):
         # Last total downsample applied to intensity volumes; labels overlay
         # re-uses the same factor so voxels line up.
         self._last_total_ds = 1
+        # Annotation tool state. ``_tool_mode`` is 'navigate' or 'fill' for
+        # Phase 3; paint/erase land in Phase 5. ``_fill_channel_idx`` selects
+        # which intensity channel the flood fill reads from (each channel is
+        # usually a different wavelength and they don't share intensities).
+        self._tool_mode = 'navigate'
+        self._fill_channel_idx = 0
+        self._fill_tolerance = 20  # 0..255 in uint8 space (auto-scaled per channel)
         self._canvas = None
         self._view = None
         self._downsample_factor = 1
@@ -518,6 +554,51 @@ class View3DPanel(QWidget):
             labels_row.addStretch(1)
             root.addLayout(labels_row)
 
+            # Annotation tool row. Currently just Navigate + Fill (Phase 3).
+            tool_row = QHBoxLayout()
+            tool_row.setSpacing(8)
+            tool_row.addWidget(QLabel("Tool:"))
+            self._tool_combo = QComboBox()
+            self._tool_combo.addItems(["Navigate", "Fill"])
+            self._tool_combo.currentTextChanged.connect(self._on_tool_changed)
+            tool_row.addWidget(self._tool_combo)
+
+            tool_row.addWidget(self._sep())
+
+            tool_row.addWidget(QLabel("Channel:"))
+            self._fill_channel_combo = QComboBox()
+            for idx, (name, _vol, _tint) in enumerate(self._channels_raw):
+                fm = QFontMetrics(self._fill_channel_combo.font())
+                self._fill_channel_combo.addItem(
+                    fm.elidedText(name, Qt.ElideMiddle, 160), idx
+                )
+            self._fill_channel_combo.setCurrentIndex(0)
+            self._fill_channel_combo.currentIndexChanged.connect(
+                self._on_fill_channel_changed
+            )
+            tool_row.addWidget(self._fill_channel_combo)
+
+            tool_row.addWidget(self._sep())
+
+            tool_row.addWidget(QLabel("Tolerance:"))
+            self._tol_slider = QSlider(Qt.Horizontal)
+            self._tol_slider.setRange(0, 100)
+            self._tol_slider.setValue(20)
+            self._tol_slider.setFixedWidth(120)
+            self._tol_slider.valueChanged.connect(self._on_tolerance_changed)
+            tool_row.addWidget(self._tol_slider)
+            self._tol_label = QLabel("20")
+            tool_row.addWidget(self._tol_label)
+
+            tool_row.addStretch(1)
+            root.addLayout(tool_row)
+
+            # Hook up the click-to-fill mouse handler. Vispy SceneCanvas
+            # emits mouse events independently of Qt's mousePressEvent so we
+            # attach via its events system. The handler itself short-circuits
+            # unless tool mode is 'fill'.
+            self._canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
+
         # Defer the first GPU upload by one event-loop tick so the panel
         # can lay out and paint before we block the thread with texture
         # uploads. Without this, embedding the panel into a QStackedWidget
@@ -570,6 +651,25 @@ class View3DPanel(QWidget):
         if 0 <= idx < len(self._volumes):
             self._volumes[idx].visible = on
 
+    def _on_tool_changed(self, text):
+        self._tool_mode = text.lower()
+        # Disable camera interaction in Fill mode so left-drag doesn't rotate
+        # while the user is trying to click-to-fill.
+        if self._view is not None and self._view.camera is not None:
+            self._view.camera.interactive = (self._tool_mode == 'navigate')
+        # Cursor hint
+        if self._tool_mode == 'fill':
+            self._canvas.native.setCursor(Qt.CrossCursor)
+        else:
+            self._canvas.native.unsetCursor()
+
+    def _on_fill_channel_changed(self, idx):
+        self._fill_channel_idx = int(idx)
+
+    def _on_tolerance_changed(self, val):
+        self._fill_tolerance = int(val)
+        self._tol_label.setText(str(val))
+
     def _on_labels_visible_toggled(self, on):
         self._labels_visible = bool(on)
         if self._labels_volume is not None:
@@ -585,6 +685,135 @@ class View3DPanel(QWidget):
     def refresh_labels(self):
         """Public hook used by paint/fill tools after they mutate labels_3d."""
         self._rebuild_labels_overlay()
+
+    def _on_canvas_mouse_press(self, event):
+        """Route mouse press to the active annotation tool.
+
+        In Navigate mode this is a no-op — the camera's own bindings
+        handle rotation/pan/zoom. In Fill mode, a left-click runs a
+        ray-pick → seed → flood fill sequence on the active channel.
+        """
+        if self._tool_mode != 'fill':
+            return
+        if event.button != 1:  # only left button triggers fill
+            return
+        if self._primary_doc is None or not self._volumes:
+            return
+        # event.pos is in canvas pixel space; for vispy ViewBox with the
+        # camera we configured, that equals viewbox pixel space.
+        seed = self._ray_pick_seed(event.pos)
+        if seed is None:
+            return
+        self._run_fill(seed)
+
+    def _ray_pick_seed(self, pos):
+        """Cast a ray through canvas pixel ``pos`` and return the brightest
+        voxel along it, as ``(z, y, x)`` indices into the active channel.
+
+        Returns ``None`` if the ray misses the volume or the volume is empty.
+        The active channel is the one selected in ``_fill_channel_combo``.
+        """
+        if self._view is None or self._view.camera is None:
+            return None
+        volume = self._active_channel_volume()
+        if volume is None:
+            return None
+        # Build a ray in world space via the viewbox's scene transform.
+        try:
+            tr = self._view.scene.node_transform(self._view)
+            p_near = tr.imap(np.array([pos[0], pos[1], -1, 1], dtype=float))
+            p_far = tr.imap(np.array([pos[0], pos[1], 1, 1], dtype=float))
+            w_n = p_near[3] if p_near[3] else 1.0
+            w_f = p_far[3] if p_far[3] else 1.0
+            o = p_near[:3] / w_n
+            f = p_far[:3] / w_f
+        except Exception:
+            return None
+        d = f - o
+        nrm = float(np.linalg.norm(d))
+        if nrm < 1e-9:
+            return None
+        d = d / nrm
+
+        # Vispy's Volume visual places voxel (z, y, x) at world coords
+        # (x, y, z) — x and z get swapped on the way in. Sample world-space
+        # points along the ray, round to voxel indices on the fly.
+        Z, Y, X = volume.shape
+        # AABB in world space for Volume defaults: origin=(0,0,0), extent=
+        # (X, Y, Z). Compute ray vs AABB slab intersection to get t bounds.
+        t_enter, t_exit = _ray_aabb((0.0, 0.0, 0.0), (float(X), float(Y), float(Z)), o, d)
+        if t_exit <= t_enter:
+            return None
+        # March in ~half-voxel steps for seed-finding. Half-voxel is fine
+        # even at aggressive tilts; smaller costs more, larger risks
+        # skipping over thin bright structures.
+        step = 0.5
+        n_samples = max(2, int((t_exit - t_enter) / step) + 1)
+        ts = np.linspace(t_enter, t_exit, n_samples)
+        pts = o + np.outer(ts, d)  # (n, 3), world xyz
+        ix = np.clip(pts[:, 0].astype(np.int64), 0, X - 1)
+        iy = np.clip(pts[:, 1].astype(np.int64), 0, Y - 1)
+        iz = np.clip(pts[:, 2].astype(np.int64), 0, Z - 1)
+        samples = volume[iz, iy, ix]
+        best = int(np.argmax(samples))
+        if samples[best] <= 0:
+            return None
+        return (int(iz[best]), int(iy[best]), int(ix[best]))
+
+    def _active_channel_volume(self):
+        """Return the raw ndarray for the channel chosen in the Fill combo.
+
+        Uses the un-downsampled original from ``_channels_raw`` so flood
+        fills operate at full resolution regardless of quality slider.
+        """
+        idx = self._fill_channel_idx
+        if not (0 <= idx < len(self._channels_raw)):
+            return None
+        _, vol, _ = self._channels_raw[idx]
+        return None if vol is None else np.asarray(vol)
+
+    def _run_fill(self, seed_zyx):
+        """Run an intensity-tolerance flood fill from ``seed_zyx`` and write
+        the resulting mask into ``primary_doc.labels_3d`` under a fresh
+        label ID. Emits ``label_added(doc, lid)`` on success.
+        """
+        doc = self._primary_doc
+        volume = self._active_channel_volume()
+        if doc is None or volume is None:
+            return
+        # Flood tolerance: slider is 0..100 in percentage of the channel's
+        # observed dynamic range. 20 on a [0, 1000] volume → ±200 intensity.
+        vmin = float(volume.min())
+        vmax = float(volume.max())
+        drange = max(1.0, vmax - vmin)
+        tol = (self._fill_tolerance / 100.0) * drange
+
+        try:
+            from skimage.segmentation import flood
+        except Exception as e:  # noqa: BLE001 — surface to the user
+            QMessageBox.warning(
+                self, "Fill unavailable",
+                f"The Fill tool needs scikit-image installed:\n{e}",
+            )
+            return
+        # skimage.flood works on 3D arrays; returns bool mask.
+        mask = flood(volume, tuple(seed_zyx), tolerance=tol, connectivity=1)
+        if not mask.any():
+            return
+
+        # Allocate the labels volume on first fill (same shape as volume_data,
+        # which is what _primary_doc uses); reserve a label ID and stamp.
+        if doc.labels_3d is None:
+            doc.ensure_labels_3d()
+        lid = doc.reserve_label_id()
+        if lid > np.iinfo(doc.labels_3d.dtype).max:
+            doc.promote_labels_dtype(np.uint16)
+        # Write voxels. Voxels already owned by another label get overwritten
+        # — napari's behavior is the same (whichever label you fill last wins).
+        doc.labels_3d[mask] = lid
+
+        self.refresh_labels()
+        self.label_added.emit(doc, lid)
 
     def _reset_view(self):
         if self._volumes:
