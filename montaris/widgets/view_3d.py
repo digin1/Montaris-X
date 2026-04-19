@@ -453,8 +453,11 @@ class View3DPanel(QWidget):
         self._labels_volume = None  # scene.visuals.Volume for labels_3d overlay
         self._labels_visible = True
         self._labels_opacity = 0.6
-        # Last total downsample applied to intensity volumes; labels overlay
-        # re-uses the same factor so voxels line up.
+        # Last total downsample applied to intensity volumes, kept as
+        # per-axis ``(dz, dy, dx)`` so non-cubic stacks that only exceed the
+        # driver's 3D-texture limit on one axis render at correct scale.
+        # ``_last_total_ds`` retains the scalar max for display/heuristics.
+        self._last_total_ds_axes = (1, 1, 1)
         self._last_total_ds = 1
         # Annotation tool state. ``_tool_mode`` is one of navigate/fill/paint/
         # erase. ``_fill_channel_idx`` selects which intensity channel the flood
@@ -1227,7 +1230,7 @@ class View3DPanel(QWidget):
         if (self._labels_volume is not None
                 and labels is not None
                 and bbox is not None
-                and int(self._last_total_ds) == 1):
+                and tuple(int(a) for a in self._last_total_ds_axes) == (1, 1, 1)):
             z0, z1, y0, y1, x0, x1 = bbox
             sub = np.ascontiguousarray(labels[z0:z1, y0:y1, x0:x1])
             try:
@@ -1710,8 +1713,12 @@ class View3DPanel(QWidget):
         method = next((m for m, lbl in self._mode_labels.items() if lbl == label), 'mip')
 
         # -- Pass 1: per-channel prep (user stride + per-axis dim cap) --
-        prepped = []  # list of (idx, tint, clim, arr_after_gpu_cap, gpu_factor_max)
-        max_gpu_factor = 1
+        # prepped holds per-channel (idx, tint, clim, arr, per_axis_gpu_factors).
+        # Per-axis factors matter for non-cubic stacks: a (500, 3000, 4097)
+        # stack only needs striding on Y/X, so collapsing to the scalar max
+        # would also downsample Z and misalign overlays against the world.
+        prepped = []
+        max_gpu_axes = [1, 1, 1]
         for idx, (name, volume, tint) in enumerate(self._channels_raw):
             if volume is None:
                 continue
@@ -1719,8 +1726,8 @@ class View3DPanel(QWidget):
             clim = _percentile_clim(arr)
             arr = _downsample(arr, self._downsample_factor)
             arr, gpu_factors = _fit_to_gpu(arr, self._max_3d_dim)
-            max_gpu_factor = max(max_gpu_factor, max(gpu_factors))
-            prepped.append((idx, tint, clim, arr, max(gpu_factors)))
+            max_gpu_axes = [max(a, b) for a, b in zip(max_gpu_axes, gpu_factors)]
+            prepped.append((idx, tint, clim, arr, tuple(gpu_factors)))
 
         # -- Pass 2: budget fit across all channels together --
         shapes = [p[3].shape for p in prepped]
@@ -1735,7 +1742,7 @@ class View3DPanel(QWidget):
         from vispy.visuals.transforms import STTransform
         budget_total = budget_factor * self._oom_retry_factor
         try:
-            for idx, tint, clim, arr, gf in prepped:
+            for idx, tint, clim, arr, gpu_ax in prepped:
                 arr = _to_uint8(arr, clim)
                 rgb = self._tint_for(idx, tint)
                 cmap = _tinted_colormap(rgb)
@@ -1746,15 +1753,16 @@ class View3DPanel(QWidget):
                     cmap=cmap,
                     clim=(0, 255),
                 )
-                # Scale the visual back to full-resolution world coordinates
-                # so ray-picks, labels overlays, and paint tools — which all
-                # operate in full-res voxel space — line up with the voxel a
-                # user sees on screen. Per-channel stride because the
-                # GPU-cap step can apply different factors to different
-                # channels when their original shapes differ.
-                stride = self._downsample_factor * gf * budget_total
-                if stride > 1:
-                    vol.transform = STTransform(scale=(stride, stride, stride))
+                # Scale back to full-resolution world coordinates, per axis,
+                # so ray-picks, labels overlays, and paint tools (all of
+                # which work in full-res voxel space) line up with what the
+                # user sees. Array order is (Z, Y, X) but vispy's STTransform
+                # takes scale in (X, Y, Z) order.
+                dz = self._downsample_factor * gpu_ax[0] * budget_total
+                dy = self._downsample_factor * gpu_ax[1] * budget_total
+                dx = self._downsample_factor * gpu_ax[2] * budget_total
+                if (dz, dy, dx) != (1, 1, 1):
+                    vol.transform = STTransform(scale=(dx, dy, dz))
                 if idx < len(self._channel_toggles):
                     vol.visible = self._channel_toggles[idx].isChecked()
                 self._volumes.append(vol)
@@ -1777,13 +1785,19 @@ class View3DPanel(QWidget):
             self._view.camera.set_range()
 
         # Label: slider × GPU-cap × budget × OOM-retry, with a reason tag.
-        total = self._downsample_factor * max_gpu_factor * budget_factor * self._oom_retry_factor
+        # Per-axis total used by the labels overlay; display uses max(axes).
+        total_axes = tuple(
+            self._downsample_factor * gpu_ax * budget_factor * self._oom_retry_factor
+            for gpu_ax in max_gpu_axes
+        )
+        total = max(total_axes)
         reasons = []
-        if max_gpu_factor > 1:
+        if any(a > 1 for a in max_gpu_axes):
             reasons.append("GPU")
         if budget_factor > 1 or self._oom_retry_factor > 1:
             reasons.append("memory")
         self._last_reason = "+".join(reasons)
+        self._last_total_ds_axes = tuple(int(a) for a in total_axes)
         self._last_total_ds = int(total)
         if total == 1:
             self._ds_label.setText("full")
@@ -1839,9 +1853,9 @@ class View3DPanel(QWidget):
         if doc is None or doc.labels_3d is None or not doc.labels_meta:
             return
         labels = doc.labels_3d
-        ds = max(1, int(self._last_total_ds))
-        if ds > 1:
-            labels = labels[::ds, ::ds, ::ds]
+        dz, dy, dx = (max(1, int(a)) for a in self._last_total_ds_axes)
+        if (dz, dy, dx) != (1, 1, 1):
+            labels = labels[::dz, ::dy, ::dx]
         max_id = max(doc.labels_meta.keys())
         if max_id <= 0:
             return
@@ -1867,10 +1881,11 @@ class View3DPanel(QWidget):
         # order = drawn later.
         vol.order = 10
         # Scale into full-res world space to match the intensity visuals so
-        # label overlays line up with the voxels they describe.
-        if ds > 1:
+        # label overlays line up with the voxels they describe. Array order
+        # is (Z, Y, X); STTransform scale is (X, Y, Z).
+        if (dz, dy, dx) != (1, 1, 1):
             from vispy.visuals.transforms import STTransform
-            vol.transform = STTransform(scale=(ds, ds, ds))
+            vol.transform = STTransform(scale=(dx, dy, dz))
         self._labels_volume = vol
 
     def capture_state(self):

@@ -35,21 +35,28 @@ def _sidecar_path(tiff_path: str | Path) -> Path:
 
 def save_volume_labels(tiff_path: str | Path, labels_3d: np.ndarray,
                         labels_meta: dict[int, dict[str, Any]]) -> tuple[Path, Path]:
-    """Write ``labels_3d`` as a uint16 multi-page TIFF plus sidecar JSON.
+    """Write ``labels_3d`` as an unsigned integer multi-page TIFF plus sidecar.
 
-    Returns the two output paths. Promotes to uint16 on write so napari,
-    which assumes multi-class Labels layers are integer-typed, can load
-    without complaining even when only a handful of IDs are in use.
+    Returns the two output paths. The on-disk dtype is the smallest
+    unsigned type that can hold every ID (uint8 for ≤255, uint16 for
+    ≤65535, uint32 otherwise). uint16 is napari/Fiji's happy path but
+    sessions with >65k ROIs promote automatically instead of silently
+    wrapping.
     """
     import tifffile
 
     path = Path(tiff_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # uint16 is the interoperable default — napari and Fiji both read it as
-    # a Labels layer without prompting. uint8 would save bytes but breaks
-    # once more than 255 ROIs are in the session.
-    out = labels_3d.astype(np.uint16, copy=False)
+    max_id = max(int(labels_3d.max()) if labels_3d.size else 0,
+                 int(max(labels_meta.keys()) if labels_meta else 0))
+    if max_id <= np.iinfo(np.uint8).max:
+        out_dtype = np.uint16  # uint8 labels are noisy in napari; use uint16 for ≤255
+    elif max_id <= np.iinfo(np.uint16).max:
+        out_dtype = np.uint16
+    else:
+        out_dtype = np.uint32
+    out = labels_3d.astype(out_dtype, copy=False)
     tifffile.imwrite(str(path), out, photometric="minisblack")
 
     sidecar = _sidecar_path(path)
@@ -88,13 +95,36 @@ def load_volume_labels(tiff_path: str | Path) -> tuple[np.ndarray, dict[int, dic
     if arr.ndim != 3:
         raise ValueError(f"Expected 2D or 3D TIFF for labels, got shape {arr.shape}")
 
-    # uint16 is the on-disk type; downcast only if every ID fits in uint8.
-    if arr.dtype not in (np.uint8, np.uint16, np.uint32, np.int32, np.int64):
-        arr = arr.astype(np.uint16, copy=False)
-    if arr.dtype != np.uint8 and arr.max() <= np.iinfo(np.uint8).max:
-        arr = arr.astype(np.uint8, copy=False)
+    # Reject anything we can't faithfully represent as unsigned integer labels.
+    # Booleans collapse multi-class intent; floats/complex aren't label data.
+    if arr.dtype.kind not in ("u", "i"):
+        raise ValueError(
+            f"Labels TIFF must be an integer dtype, got {arr.dtype}. "
+            f"Booleans, floats, and complex arrays are not valid label data."
+        )
+    if arr.dtype.kind == "i":
+        min_val = int(arr.min()) if arr.size else 0
+        if min_val < 0:
+            raise ValueError(
+                f"Labels TIFF has negative values (min={min_val}); IDs must "
+                f"be non-negative. Re-export without signed-int casting."
+            )
+    max_val = int(arr.max()) if arr.size else 0
+    # Pick the narrowest unsigned dtype that fits without truncation. Most
+    # crucially, do NOT collapse uint32/int32 into uint16 — a napari label
+    # TIFF can hold IDs beyond 65535.
+    if max_val <= np.iinfo(np.uint8).max:
+        target = np.uint8
+    elif max_val <= np.iinfo(np.uint16).max:
+        target = np.uint16
+    elif max_val <= np.iinfo(np.uint32).max:
+        target = np.uint32
     else:
-        arr = arr.astype(np.uint16, copy=False)
+        raise ValueError(
+            f"Labels TIFF contains an ID ({max_val}) that exceeds uint32 "
+            f"range; Montaris-X only supports up to {np.iinfo(np.uint32).max}."
+        )
+    arr = arr.astype(target, copy=False)
 
     sidecar = _sidecar_path(path)
     meta: dict[int, dict[str, Any]] = {}

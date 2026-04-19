@@ -1104,7 +1104,6 @@ def test_session_roundtrip_through_app_api(app, qapp, tmp_path):
 
     session_dir = app._session_dir
     assert session_dir is not None and os.path.isdir(session_dir)
-    assert os.path.isfile(os.path.join(session_dir, 'labels.tif'))
 
     # Wipe and restore.
     doc.labels_3d = None
@@ -1113,6 +1112,11 @@ def test_session_roundtrip_through_app_api(app, qapp, tmp_path):
     import json as _json
     with open(os.path.join(session_dir, 'session.json')) as f:
         saved = _json.load(f)
+    # Session writes a multi-doc manifest; every listed file should exist.
+    manifest = saved.get('volume_labels') or []
+    assert manifest and all(
+        os.path.isfile(os.path.join(session_dir, e['file'])) for e in manifest
+    )
     added = app._restore_session_volume_labels(session_dir, saved, doc)
     assert added == 1
     assert doc.labels_meta[lid]["name"] == "persisted"

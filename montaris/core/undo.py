@@ -408,6 +408,41 @@ class UndoStack:
         self._index = -1
         self._total_bytes = 0
 
+    def purge_for_doc(self, doc):
+        """Drop commands that would replay patches into ``doc.labels_3d``.
+
+        Call after the doc's labels volume is replaced wholesale (label
+        import, session restore, dtype change into a fresh array). Those
+        commands hold a reference to ``doc`` but their patches are sized
+        for the *previous* labels array; replaying them would either
+        crash on a shape mismatch or silently corrupt the new volume.
+        Compound commands are dropped if any sub-command targets ``doc``.
+        """
+        from montaris.core.multi_undo import CompoundUndoCommand
+
+        def _touches(cmd):
+            if isinstance(cmd, CompoundUndoCommand):
+                return any(_touches(c) for c in cmd.commands)
+            return getattr(cmd, '_doc', None) is doc
+
+        kept = []
+        new_bytes = 0
+        removed_before_index = 0
+        for i, cmd in enumerate(self._stack):
+            if _touches(cmd):
+                if i <= self._index:
+                    removed_before_index += 1
+                continue
+            kept.append(cmd)
+            new_bytes += _cmd_byte_size(cmd)
+        self._stack = kept
+        self._total_bytes = new_bytes
+        self._index -= removed_before_index
+        if self._index >= len(self._stack):
+            self._index = len(self._stack) - 1
+        if self._index < -1:
+            self._index = -1
+
     @property
     def can_undo(self):
         return self._index >= 0

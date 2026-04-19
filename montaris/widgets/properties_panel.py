@@ -121,6 +121,13 @@ class PropertiesPanel(QWidget):
         if self._layer and hasattr(self._layer, 'opacity'):
             self._layer.opacity = value
             self.app.canvas.refresh_overlays_lut_only()
+            # A volume ROI's opacity lives in ``labels_meta`` and drives the
+            # label volume's cmap — refresh_labels rebuilds the cmap so the
+            # 3D overlay reflects the new alpha.
+            if getattr(self._layer, 'is_volume', False):
+                panel = getattr(self.app, '_view3d_panel', None)
+                if panel is not None:
+                    panel.refresh_labels()
 
     def _on_fill_mode_changed(self, text):
         _internal = {'Solid': 'solid', 'Boundary': 'boundary',

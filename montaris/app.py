@@ -174,14 +174,48 @@ def _save_session_from_snapshots(session_dir, snapshots, meta, volume_labels=Non
 
     meta['roi_files'] = roi_files
 
-    if volume_labels is not None:
-        labels_3d, labels_meta = volume_labels
-        if labels_3d is not None and labels_meta:
-            from montaris.io.volume_labels import save_volume_labels
-            labels_path = os.path.join(session_dir, 'labels.tif')
-            save_volume_labels(labels_path, labels_3d, labels_meta)
-            meta['labels_file'] = 'labels.tif'
-            meta['labels_shape'] = list(labels_3d.shape)
+    # ``volume_labels`` accepts two shapes:
+    #   - legacy 2-tuple ``(labels_3d, labels_meta)`` for a single doc,
+    #   - list of ``(doc_name, labels_3d, labels_meta)`` triples for
+    #     multi-doc sessions.
+    # Multi-doc writes one TIFF per labeled doc and records a manifest;
+    # the single-doc path keeps writing ``labels.tif`` so older readers
+    # still find it.
+    if volume_labels:
+        from montaris.io.volume_labels import save_volume_labels
+        if (isinstance(volume_labels, tuple) and len(volume_labels) == 2
+                and not isinstance(volume_labels[0], (list, tuple))):
+            # Legacy single-doc form.
+            labels_3d, labels_meta = volume_labels
+            if labels_3d is not None and labels_meta:
+                save_volume_labels(
+                    os.path.join(session_dir, 'labels.tif'),
+                    labels_3d, labels_meta,
+                )
+                meta['labels_file'] = 'labels.tif'
+                meta['labels_shape'] = list(labels_3d.shape)
+        else:
+            manifest = []
+            for i, entry in enumerate(volume_labels):
+                doc_name, labels_3d, labels_meta = entry
+                if labels_3d is None or not labels_meta:
+                    continue
+                safe = _sanitize_roi_filename(doc_name or f"doc_{i}")
+                fname = f"labels_{i:02d}_{safe}.tif"
+                save_volume_labels(
+                    os.path.join(session_dir, fname), labels_3d, labels_meta,
+                )
+                manifest.append({
+                    'doc_name': doc_name,
+                    'file': fname,
+                    'shape': list(labels_3d.shape),
+                })
+            if manifest:
+                meta['volume_labels'] = manifest
+                # Back-compat: also expose the first entry via the legacy
+                # fields so older builds keep finding at least one volume.
+                meta['labels_file'] = manifest[0]['file']
+                meta['labels_shape'] = manifest[0]['shape']
 
     with open(os.path.join(session_dir, 'session.json'), 'w') as f:
         _json.dump(meta, f, indent=2)
@@ -2041,21 +2075,7 @@ class MontarisApp(QMainWindow):
         )
         # Leaving 3D — tear down and return to 2D
         if self._view3d_panel is not None:
-            try:
-                self._view3d_saved_state = self._view3d_panel.capture_state()
-            except Exception:
-                self._view3d_saved_state = None
-            self._central_stack.setCurrentIndex(0)
-            self._central_stack.removeWidget(self._view3d_panel)
-            try:
-                self._view3d_panel.release_gl()
-            finally:
-                self._view3d_panel.deleteLater()
-                self._view3d_panel = None
-            self.layer_panel.set_3d_mode(False)
-            self.tool_panel.restore_tool_shortcuts()
-            self._view3d_btn.setText(" View in 3D")
-            self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
+            self._teardown_view_3d(capture_state=True)
             return
 
         # Entering 3D — validate, build, and show
@@ -2107,6 +2127,36 @@ class MontarisApp(QMainWindow):
             panel.apply_state(self._view3d_saved_state)
         self._view3d_btn.setText(" Back to 2D")
         self._view3d_btn.setToolTip("Return to the 2D canvas (releases 3D VRAM)")
+
+    def _teardown_view_3d(self, *, capture_state: bool):
+        """Dismount View3DPanel, release GL, and restore 2D chrome.
+
+        Centralised so ``close_image`` and the normal 3D toggle share the
+        same teardown path. ``capture_state=True`` saves the camera/mode
+        snapshot for a later re-entry; ``False`` drops it (image closed,
+        no meaningful state to restore into a different volume).
+        """
+        panel = self._view3d_panel
+        if panel is None:
+            return
+        if capture_state:
+            try:
+                self._view3d_saved_state = panel.capture_state()
+            except Exception:
+                self._view3d_saved_state = None
+        else:
+            self._view3d_saved_state = None
+        self._central_stack.setCurrentIndex(0)
+        self._central_stack.removeWidget(panel)
+        try:
+            panel.release_gl()
+        finally:
+            panel.deleteLater()
+            self._view3d_panel = None
+        self.layer_panel.set_3d_mode(False)
+        self.tool_panel.restore_tool_shortcuts()
+        self._view3d_btn.setText(" View in 3D")
+        self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
 
     def _on_3d_label_added(self, doc, label_id):
         """Mirror a newly-created 3D label into the 2D LayerStack.
@@ -2242,12 +2292,17 @@ class MontarisApp(QMainWindow):
             )
             return
 
-        # Drop stale volume wrappers from the layer stack first; keep 2D ROIs.
+        # Drop stale volume wrappers tied to THIS doc. Other docs' 3D ROIs
+        # stay so a per-doc import doesn't nuke neighbouring volumes.
         from montaris.layers import VolumeROILayer
         self.layer_stack.roi_layers = [
             r for r in self.layer_stack.roi_layers
-            if not getattr(r, 'is_volume', False)
+            if not (getattr(r, 'is_volume', False) and getattr(r, '_doc', None) is doc)
         ]
+        # Any undo entry whose patches were sized for the *previous* labels
+        # volume of this doc would either explode on a shape mismatch or
+        # silently scribble over the freshly imported data. Drop them.
+        self.undo_stack.purge_for_doc(doc)
         doc.labels_3d = labels
         doc.labels_meta = dict(meta)
         doc.labels_next_id = (max(meta.keys()) + 1) if meta else 1
@@ -2448,6 +2503,12 @@ class MontarisApp(QMainWindow):
             self._canvas_grid.active_cell._initial_session_saved = False
         self._session_dir = None
 
+        # If the 3D panel is up, tear it down BEFORE clearing documents so
+        # it releases GL and drops its per-doc references instead of being
+        # left holding handles to documents that no longer exist.
+        if self._view3d_panel is not None:
+            self._teardown_view_3d(capture_state=False)
+
         clear_rois = False
         if self.layer_stack.roi_layers:
             from montaris.widgets.alert_modal import AlertModal
@@ -2574,21 +2635,16 @@ class MontarisApp(QMainWindow):
     def save_session_progress(self):
         """Save all ROIs as ImageJ .roi files in a timestamped session folder."""
         doc = self._documents[self._active_doc_index] if self._documents else None
-        # In a synced-mode batch only one doc in the group holds labels_3d
-        # (the 3D viewer's primary). Fall back to whichever doc actually has
-        # labels so session save still captures 3D ROIs regardless of which
-        # channel is active.
-        labels_doc = doc if (
-            doc is not None
-            and getattr(doc, 'labels_3d', None) is not None
-            and bool(getattr(doc, 'labels_meta', {}))
-        ) else next(
-            (d for d in (self._documents or [])
-             if getattr(d, 'labels_3d', None) is not None
-             and bool(getattr(d, 'labels_meta', {}))),
-            None,
-        )
-        has_volume_labels = labels_doc is not None
+        # Collect every doc that carries labels_3d — not just the active one.
+        # In a synced-mode batch this is usually just the 3D viewer's primary,
+        # but two independent z-stacks in the same session each have their
+        # own labels volume that must round-trip.
+        labeled_docs = [
+            d for d in (self._documents or [])
+            if getattr(d, 'labels_3d', None) is not None
+            and bool(getattr(d, 'labels_meta', {}))
+        ]
+        has_volume_labels = bool(labeled_docs)
 
         if not self.layer_stack.roi_layers and not has_volume_labels:
             self.toast.show("No ROIs to save", "warning")
@@ -2657,7 +2713,9 @@ class MontarisApp(QMainWindow):
         channel_names = [d.name for d in self._documents]
         base_stem = get_base_stem(stem)
 
-        volume_label_count = len(labels_doc.labels_meta) if has_volume_labels else 0
+        volume_label_count = sum(
+            len(d.labels_meta) for d in labeled_docs
+        ) if has_volume_labels else 0
 
         meta = {
             'version': 1,
@@ -2677,11 +2735,13 @@ class MontarisApp(QMainWindow):
         volume_labels_arg = None
         if has_volume_labels:
             import copy as _copy
-            # Copy array so the worker writes a stable snapshot even if the
-            # user paints into labels_3d while the save is in-flight. Meta
-            # is small so deep-copying it is cheap.
-            volume_labels_arg = (labels_doc.labels_3d.copy(),
-                                  _copy.deepcopy(labels_doc.labels_meta))
+            # Copy each labels array so the worker writes a stable snapshot
+            # even if the user paints into labels_3d while the save is
+            # in-flight. Meta is small so deep-copying it is cheap.
+            volume_labels_arg = [
+                (d.name, d.labels_3d.copy(), _copy.deepcopy(d.labels_meta))
+                for d in labeled_docs
+            ]
 
         self.toast.show("Saving session...", "info")
 
@@ -2930,52 +2990,77 @@ class MontarisApp(QMainWindow):
         QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
 
     def _restore_session_volume_labels(self, folder, meta, doc):
-        """Hydrate ``doc.labels_3d`` + ``labels_meta`` from a session folder.
+        """Hydrate per-doc ``labels_3d`` + ``labels_meta`` from a session.
 
-        Returns the number of 3D ROIs added. Silently does nothing when the
-        session has no labels file, or when the active doc can't host the
-        volume (no z-stack, shape mismatch).
+        Sessions written by this build store a ``volume_labels`` manifest
+        listing one entry per labeled doc. Older sessions (or read-only
+        back-compat) store a single ``labels_file`` which is rehydrated
+        into ``doc``. Returns the total number of 3D ROIs added across all
+        docs; silently skips docs whose shape doesn't match.
         """
-        labels_file = meta.get('labels_file')
-        if not labels_file:
-            return 0
-        labels_path = os.path.join(folder, labels_file)
-        if not os.path.isfile(labels_path):
-            return 0
-        if doc is None or getattr(doc, 'volume_data', None) is None:
-            return 0
-        try:
-            from montaris.io.volume_labels import load_volume_labels
-            labels, labels_meta = load_volume_labels(labels_path)
-        except Exception:  # noqa: BLE001 — user-visible via toast below
-            self.toast.show(
-                f"Session labels TIFF could not be read: {labels_file}",
-                "warning",
-            )
-            return 0
-        if labels.shape != doc.volume_data.shape:
-            self.toast.show(
-                f"Session labels shape {labels.shape} doesn't match document "
-                f"volume {doc.volume_data.shape} — 3D ROIs skipped.",
-                "warning",
-            )
-            return 0
-
+        manifest = meta.get('volume_labels')
+        # Legacy fallback: sessions written before the multi-doc manifest
+        # only had ``labels_file`` pointing at a single TIFF, assumed to
+        # belong to the active doc.
+        if not manifest:
+            labels_file = meta.get('labels_file')
+            if not labels_file:
+                return 0
+            manifest = [{
+                'doc_name': doc.name if doc is not None else None,
+                'file': labels_file,
+                'shape': meta.get('labels_shape'),
+            }]
+        from montaris.io.volume_labels import load_volume_labels
         from montaris.layers import VolumeROILayer
-        # Drop any existing VolumeROILayers for this doc before rehydrating so
-        # a restore-into-loaded-session doesn't duplicate wrappers.
-        self.layer_stack.roi_layers = [
-            r for r in self.layer_stack.roi_layers
-            if not (getattr(r, 'is_volume', False) and getattr(r, '_doc', None) is doc)
-        ]
-        doc.labels_3d = labels
-        doc.labels_meta = dict(labels_meta)
-        doc.labels_next_id = (max(labels_meta.keys()) + 1) if labels_meta else 1
-        for lid in sorted(labels_meta.keys()):
-            self.layer_stack.roi_layers.append(VolumeROILayer(doc, int(lid)))
-        if self._view3d_panel is not None:
+
+        # Map doc_name → doc for manifest lookups; unnamed/legacy entries
+        # fall back to the active doc.
+        by_name = {d.name: d for d in (self._documents or [])}
+        total = 0
+        for entry in manifest:
+            fname = entry.get('file')
+            if not fname:
+                continue
+            labels_path = os.path.join(folder, fname)
+            if not os.path.isfile(labels_path):
+                continue
+            target = by_name.get(entry.get('doc_name')) if entry.get('doc_name') else doc
+            if target is None or getattr(target, 'volume_data', None) is None:
+                continue
+            try:
+                labels, labels_meta = load_volume_labels(labels_path)
+            except Exception:  # noqa: BLE001 — surfaced via toast
+                self.toast.show(
+                    f"Session labels TIFF could not be read: {fname}",
+                    "warning",
+                )
+                continue
+            if labels.shape != target.volume_data.shape:
+                self.toast.show(
+                    f"Session labels shape {labels.shape} doesn't match "
+                    f"document '{target.name}' — 3D ROIs skipped.",
+                    "warning",
+                )
+                continue
+            # Drop existing VolumeROILayers for this doc to avoid duplicates.
+            self.layer_stack.roi_layers = [
+                r for r in self.layer_stack.roi_layers
+                if not (getattr(r, 'is_volume', False)
+                        and getattr(r, '_doc', None) is target)
+            ]
+            # Previous-session undo patches would replay into the freshly
+            # rehydrated labels array; drop them.
+            self.undo_stack.purge_for_doc(target)
+            target.labels_3d = labels
+            target.labels_meta = dict(labels_meta)
+            target.labels_next_id = (max(labels_meta.keys()) + 1) if labels_meta else 1
+            for lid in sorted(labels_meta.keys()):
+                self.layer_stack.roi_layers.append(VolumeROILayer(target, int(lid)))
+            total += len(labels_meta)
+        if total and self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
-        return len(labels_meta)
+        return total
 
     def _on_save_progress_toggled(self, checked):
         self._save_progress_btn.setVisible(checked)
