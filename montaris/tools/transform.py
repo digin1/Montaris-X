@@ -90,8 +90,19 @@ class TransformTool(BaseTool):
         """Show transform handles immediately when tool is selected."""
         if layer is None or not getattr(layer, 'is_roi', False):
             return
+        # 3D ROIs live in a shared labels volume — the 2D transform semantics
+        # (translate/scale/rotate of a single RLE mask) don't map cleanly
+        # onto per-slice label ids, so we short-circuit here rather than
+        # silently scribbling into the volume.
+        if getattr(layer, 'is_volume', False):
+            return
         self._canvas = canvas
-        self._target_layers = self._get_target_layers(layer, canvas)
+        self._target_layers = [
+            l for l in self._get_target_layers(layer, canvas)
+            if not getattr(l, 'is_volume', False)
+        ]
+        if not self._target_layers:
+            return
         bbox = self._compute_union_bbox(self._target_layers)
         if bbox is None:
             self._clear_handles(canvas)
@@ -111,6 +122,8 @@ class TransformTool(BaseTool):
         if getattr(self, '_applying', False):
             return
         if layer is None or not getattr(layer, 'is_roi', False):
+            return
+        if getattr(layer, 'is_volume', False):
             return
         self._canvas = canvas
 

@@ -40,7 +40,11 @@ class MoveTool(BaseTool):
         """Called when the move tool is selected."""
         sel = canvas._selection.layers
         layers = sel if sel else ([layer] if layer is not None else [])
-        layers = [l for l in layers if getattr(l, 'is_roi', False) and l.get_bbox() is not None]
+        # Exclude 3D ROIs — they live in a shared labels volume with no
+        # per-layer offset, so "Move" has no meaning for them.
+        layers = [l for l in layers if getattr(l, 'is_roi', False)
+                  and not getattr(l, 'is_volume', False)
+                  and l.get_bbox() is not None]
         if layers:
             self._show_marching_ants_multi(layers, canvas)
         else:
@@ -54,6 +58,8 @@ class MoveTool(BaseTool):
 
     def on_press(self, pos, layer, canvas):
         if layer is None or not getattr(layer, 'is_roi', False):
+            return
+        if getattr(layer, 'is_volume', False):
             return
 
         from PySide6.QtWidgets import QApplication

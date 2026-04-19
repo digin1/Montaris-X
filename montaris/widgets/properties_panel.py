@@ -36,7 +36,8 @@ class PropertiesPanel(QWidget):
         form.addRow("Fill:", self.fill_mode_combo)
 
         self.pixel_count_label = QLabel("-")
-        form.addRow("Pixels:", self.pixel_count_label)
+        self.pixel_count_row_label = QLabel("Pixels:")
+        form.addRow(self.pixel_count_row_label, self.pixel_count_label)
 
         # Boundary settings
         self.thickness_spin = QSpinBox()
@@ -98,15 +99,22 @@ class PropertiesPanel(QWidget):
             self.fill_mode_combo.setCurrentText(_display.get(fill_mode, 'Solid'))
             self.fill_mode_combo.blockSignals(False)
             self.fill_mode_combo.setEnabled(True)
-            bbox = layer.get_bbox()
-            if bbox is None:
-                px = 0
+            if getattr(layer, 'is_volume', False):
+                # 3D ROI: report whole-volume voxel count, not a single slice.
+                self.pixel_count_row_label.setText("Voxels:")
+                self.pixel_count_label.setText(f"{layer.voxel_count():,}")
             else:
-                y1, y2, x1, x2 = bbox
-                px = int(np.count_nonzero(layer.get_mask_crop((y1, y2, x1, x2))))
-            self.pixel_count_label.setText(f"{px:,}")
+                self.pixel_count_row_label.setText("Pixels:")
+                bbox = layer.get_bbox()
+                if bbox is None:
+                    px = 0
+                else:
+                    y1, y2, x1, x2 = bbox
+                    px = int(np.count_nonzero(layer.get_mask_crop((y1, y2, x1, x2))))
+                self.pixel_count_label.setText(f"{px:,}")
         else:
             self.fill_mode_combo.setEnabled(False)
+            self.pixel_count_row_label.setText("Pixels:")
             self.pixel_count_label.setText("-")
 
     def _on_opacity_changed(self, value):

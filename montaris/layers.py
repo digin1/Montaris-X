@@ -514,6 +514,32 @@ class VolumeROILayer:
         return (y1 + self.offset_y, y2 + self.offset_y,
                 x1 + self.offset_x, x2 + self.offset_x)
 
+    def get_volume_bbox(self):
+        """Full 3D bbox ``(z1, z2, y1, y2, x1, x2)`` of this label, or None.
+
+        Used by the 3D nav bar + properties panel so sizing is reported in
+        whole-volume units rather than the current-slice 2D bbox.
+        """
+        lab = self._doc.labels_3d
+        if lab is None:
+            return None
+        mask = (lab == self._label_id)
+        if not mask.any():
+            return None
+        zs = np.where(mask.any(axis=(1, 2)))[0]
+        ys = np.where(mask.any(axis=(0, 2)))[0]
+        xs = np.where(mask.any(axis=(0, 1)))[0]
+        return (int(zs[0]), int(zs[-1]) + 1,
+                int(ys[0]), int(ys[-1]) + 1,
+                int(xs[0]), int(xs[-1]) + 1)
+
+    def voxel_count(self):
+        """Total voxel count for this label across the whole volume."""
+        lab = self._doc.labels_3d
+        if lab is None:
+            return 0
+        return int(np.count_nonzero(lab == self._label_id))
+
     def compress(self):
         """No-op. The shared labels volume is the canonical storage."""
         return
@@ -580,47 +606,93 @@ class LayerStack(QObject):
         return None
 
     def merge_rois(self, indices):
-        """Merge multiple ROI layers into one. Keep first, remove rest."""
+        """Merge multiple ROI layers into one. Keep first, remove rest.
+
+        Rejects mixed 2D+3D selections and 3D ROIs spanning multiple docs
+        (returns ``False`` without mutating state so the caller can toast).
+        """
         if len(indices) < 2:
-            return
-        target = self.roi_layers[indices[0]]
+            return True
+        layers = [self.roi_layers[i] for i in indices]
+        vols = [l for l in layers if getattr(l, 'is_volume', False)]
+        flats = [l for l in layers if not getattr(l, 'is_volume', False)]
+        if vols and flats:
+            return False
+        if vols:
+            doc_ids = {id(l._doc) for l in vols}
+            if len(doc_ids) != 1:
+                return False
+            target = vols[0]
+            target_lid = target._label_id
+            doc = target._doc
+            for roi in vols[1:]:
+                other_lid = roi._label_id
+                doc.labels_3d[doc.labels_3d == other_lid] = target_lid
+                doc.labels_meta.pop(other_lid, None)
+            target.invalidate_bbox()
+            for idx in sorted(indices[1:], reverse=True):
+                self.roi_layers.pop(idx)
+            self.changed.emit()
+            return True
+        target = layers[0]
         target.flatten_offset()
-        for idx in indices[1:]:
-            roi = self.roi_layers[idx]
+        for roi in layers[1:]:
             roi.flatten_offset()
             target.mask = np.maximum(target.mask, roi.mask)
         target.invalidate_bbox()
-        # Remove merged layers in reverse order
         for idx in sorted(indices[1:], reverse=True):
             self.roi_layers.pop(idx)
         self.changed.emit()
+        return True
 
     def duplicate_roi(self, index):
-        """Duplicate ROI layer with a new distinct color."""
-        if 0 <= index < len(self.roi_layers):
-            src = self.roi_layers[index]
-            # Copy compressed data directly if available (avoids full decompression)
-            new_roi = ROILayer.__new__(ROILayer)
-            new_roi.name = f"{src.name} (copy)"
-            if src._rle_data is not None:
-                new_roi._mask = None
-                new_roi._rle_data = src._rle_data  # bytes are immutable, safe to share
-                new_roi._mask_shape = src._mask_shape
-            else:
-                new_roi._mask = src._mask.copy()
-                new_roi._rle_data = None
-                new_roi._mask_shape = src._mask_shape
-            new_roi.color = self.next_color()
-            new_roi.opacity = src.opacity
-            new_roi.visible = True
-            new_roi.fill_mode = src.fill_mode
-            new_roi._dirty_rect = None
-            new_roi.offset_x = src.offset_x
-            new_roi.offset_y = src.offset_y
-            new_roi._cached_bbox = src._cached_bbox
-            new_roi._bbox_valid = src._bbox_valid
-            self.roi_layers.insert(index + 1, new_roi)
+        """Duplicate ROI layer with a new distinct color.
+
+        For 3D ROIs (:class:`VolumeROILayer`), a single labels volume only
+        lets one id occupy each voxel — a true voxel-level copy would have
+        to overwrite the source. Instead, duplicate reserves an *empty*
+        label with the source's display metadata so the user can paint or
+        fill into it; the source keeps all its voxels untouched.
+        """
+        if not (0 <= index < len(self.roi_layers)):
+            return
+        src = self.roi_layers[index]
+        if getattr(src, 'is_volume', False):
+            doc = src._doc
+            if doc.labels_3d is None:
+                return
+            new_lid = doc.reserve_label_id(
+                name=f"{src.name} (copy)",
+                color=self.next_color(),
+                opacity=src.opacity,
+                visible=True,
+                fill_mode=src.fill_mode,
+            )
+            self.roi_layers.insert(index + 1, VolumeROILayer(doc, new_lid))
             self.changed.emit()
+            return
+        # Copy compressed data directly if available (avoids full decompression)
+        new_roi = ROILayer.__new__(ROILayer)
+        new_roi.name = f"{src.name} (copy)"
+        if src._rle_data is not None:
+            new_roi._mask = None
+            new_roi._rle_data = src._rle_data  # bytes are immutable, safe to share
+            new_roi._mask_shape = src._mask_shape
+        else:
+            new_roi._mask = src._mask.copy()
+            new_roi._rle_data = None
+            new_roi._mask_shape = src._mask_shape
+        new_roi.color = self.next_color()
+        new_roi.opacity = src.opacity
+        new_roi.visible = True
+        new_roi.fill_mode = src.fill_mode
+        new_roi._dirty_rect = None
+        new_roi.offset_x = src.offset_x
+        new_roi.offset_y = src.offset_y
+        new_roi._cached_bbox = src._cached_bbox
+        new_roi._bbox_valid = src._bbox_valid
+        self.roi_layers.insert(index + 1, new_roi)
+        self.changed.emit()
 
     def reorder_roi(self, from_idx, to_idx):
         """Move ROI from one position to another."""
@@ -643,7 +715,15 @@ class LayerStack(QObject):
         from PySide6.QtWidgets import QApplication
         from PySide6.QtCore import Qt
         t0 = time.perf_counter()
-        targets = [r for r in self.roi_layers if r is not active_layer and r._mask is not None]
+        # VolumeROILayer stores its voxels in the shared labels volume, not
+        # in a per-layer RLE buffer, so it has no ``_mask`` attribute and
+        # no compression step. Skip it here instead of crashing.
+        targets = [
+            r for r in self.roi_layers
+            if r is not active_layer
+            and not getattr(r, 'is_volume', False)
+            and getattr(r, '_mask', None) is not None
+        ]
         if not targets:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)

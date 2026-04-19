@@ -172,6 +172,10 @@ class LayerPanel(QWidget):
         self.layer_stack = layer_stack
         self._updating = False
         self._selection_model = None
+        # When True the panel shows only VolumeROILayers — toggled by the
+        # main app while the 3D viewer is open, so 2D-only ROIs don't clutter
+        # the list (they can't be painted/erased in 3D anyway).
+        self._mode_3d = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -314,9 +318,20 @@ class LayerPanel(QWidget):
         self.list_widget.clear()
 
         roi_layers = self.layer_stack.roi_layers
+        # In 3D mode, hide 2D-only ROIs — they can't be painted/erased in
+        # the 3D view and would just be dead rows for the user. The full
+        # roi_layers list is still what ``data[1]`` indexes into below, so
+        # downstream handlers (remove, selection sync) keep working.
+        visible_rois = [
+            (i, roi) for i, roi in enumerate(roi_layers)
+            if not self._mode_3d or getattr(roi, 'is_volume', False)
+        ]
 
-        # Header with count (G.22)
-        self.header.setText(f"  ROI Layers ({len(roi_layers)})")
+        # Header with count (G.22) — reflect filtered count when in 3D mode.
+        if self._mode_3d:
+            self.header.setText(f"  3D ROI Layers ({len(visible_rois)})")
+        else:
+            self.header.setText(f"  ROI Layers ({len(roi_layers)})")
 
         if self.layer_stack.image_layer:
             item = QListWidgetItem(self.layer_stack.image_layer.name)
@@ -327,9 +342,30 @@ class LayerPanel(QWidget):
         px_counts = []
         # For large ROI sets, use bbox area as proxy to avoid
         # O(n) RLE decodes just for the layer panel pixel counts.
-        use_bbox_area = len(roi_layers) > 20
-        for i, roi in enumerate(roi_layers):
-            icon = self._color_icon(roi.color, number=i + 1)
+        use_bbox_area = len(visible_rois) > 20
+        for display_idx, (i, roi) in enumerate(visible_rois):
+            icon = self._color_icon(roi.color, number=display_idx + 1)
+            # 3D ROIs: report voxel count (whole volume), not current slice.
+            # Use the volume bbox as a proxy in bulk mode so we don't pay for
+            # a full labels_3d scan per layer.
+            if getattr(roi, 'is_volume', False):
+                if use_bbox_area:
+                    vbbox = roi.get_volume_bbox()
+                    if vbbox is None:
+                        px_count = 0
+                    else:
+                        z1, z2, y1, y2, x1, x2 = vbbox
+                        px_count = (z2 - z1) * (y2 - y1) * (x2 - x1)
+                else:
+                    px_count = roi.voxel_count()
+                px_counts.append(px_count)
+                item = QListWidgetItem(roi.name)
+                item.setIcon(icon)
+                item.setData(Qt.UserRole, ("roi", i))
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                item.setCheckState(Qt.Checked if roi.visible else Qt.Unchecked)
+                self.list_widget.addItem(item)
+                continue
             bbox = roi.get_bbox()
             if bbox is None:
                 px_count = 0
@@ -358,10 +394,25 @@ class LayerPanel(QWidget):
 
     def _update_nav_bar(self, px_counts=None):
         roi_layers = self.layer_stack.roi_layers
+        visible_rois = [
+            (i, roi) for i, roi in enumerate(roi_layers)
+            if not self._mode_3d or getattr(roi, 'is_volume', False)
+        ]
         if px_counts is None:
             px_counts = []
-            use_bbox_area = len(roi_layers) > 20
-            for roi in roi_layers:
+            use_bbox_area = len(visible_rois) > 20
+            for _i, roi in visible_rois:
+                if getattr(roi, 'is_volume', False):
+                    if use_bbox_area:
+                        vbbox = roi.get_volume_bbox()
+                        if vbbox is None:
+                            px_counts.append(0)
+                        else:
+                            z1, z2, y1, y2, x1, x2 = vbbox
+                            px_counts.append((z2 - z1) * (y2 - y1) * (x2 - x1))
+                    else:
+                        px_counts.append(roi.voxel_count())
+                    continue
                 bbox = roi.get_bbox()
                 if bbox is None:
                     px_counts.append(0)
@@ -373,8 +424,8 @@ class LayerPanel(QWidget):
                     px_counts.append(int(np.count_nonzero(roi.get_mask_crop((y1, y2, x1, x2)))))
         total = sum(max(1, c) for c in px_counts) if px_counts else 1
         segments = []
-        for i, roi in enumerate(roi_layers):
-            frac = max(1, px_counts[i]) / total
+        for display_idx, (i, roi) in enumerate(visible_rois):
+            frac = max(1, px_counts[display_idx]) / total
             segments.append((frac, roi.color, i))
         self.nav_bar.set_segments(segments)
 
@@ -390,6 +441,18 @@ class LayerPanel(QWidget):
         self.list_widget.clearSelection()
         self.list_widget.setCurrentRow(-1)
         self._updating = False
+        self.refresh()
+
+    def set_3d_mode(self, enabled):
+        """Filter list to VolumeROILayers only while the 3D viewer is open.
+
+        Called from MontarisApp on 3D-view enter/exit. Idempotent — safe to
+        call with the current state.
+        """
+        enabled = bool(enabled)
+        if self._mode_3d == enabled:
+            return
+        self._mode_3d = enabled
         self.refresh()
 
     def set_selection_model(self, model):
@@ -690,18 +753,42 @@ class LayerPanel(QWidget):
         if hasattr(app, 'canvas'):
             app.canvas._active_layer = None
             app.canvas._selection._layers.clear()
+
+        # Construct the undo command BEFORE releasing 3D labels — its
+        # __init__ snapshots labels_3d voxels + labels_meta for any
+        # VolumeROILayers in the entries, and that snapshot must happen
+        # while the volume is still intact.
+        undo_cmd = None
+        if entries and hasattr(app, 'undo_stack'):
+            from montaris.core.undo import RemoveROIUndoCommand
+            undo_cmd = RemoveROIUndoCommand(self.layer_stack, entries)
+
+        # Zero voxels + drop meta for any 3D ROIs in the deletion set so
+        # the labels volume stays consistent with the sidebar. Without
+        # this, the wrapper disappears from the list but the voxels
+        # linger in labels_3d → visible in the 3D viewer + written to
+        # the next session save.
+        for _i, roi in entries:
+            if getattr(roi, 'is_volume', False):
+                doc = getattr(roi, '_doc', None)
+                lid = getattr(roi, 'label_id', None)
+                if doc is not None and lid is not None:
+                    doc.release_label_id(int(lid))
+
         for idx in sorted(indices, reverse=True):
             if 0 <= idx < len(self.layer_stack.roi_layers):
                 self.layer_stack.roi_layers.pop(idx)
 
-        # Push undo command so deleted ROIs can be recovered
-        if entries and hasattr(app, 'undo_stack'):
-            from montaris.core.undo import RemoveROIUndoCommand
-            app.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
+        if undo_cmd is not None:
+            app.undo_stack.push(undo_cmd)
         # Now emit signals after state is consistent
         self.layer_stack.changed.emit()
         if hasattr(app, 'canvas'):
             app.canvas.refresh_overlays()
+        # Keep the 3D overlay in sync so deleted voxels disappear from
+        # the vispy viewer, not just the sidebar.
+        if getattr(app, '_view3d_panel', None) is not None:
+            app._view3d_panel.refresh_labels()
         self.refresh()
         if hasattr(app, 'properties_panel'):
             app.properties_panel.set_layer(None)
@@ -716,15 +803,26 @@ class LayerPanel(QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        # Build undo entries before clearing
+        # Build undo entries before clearing.
         entries = list(enumerate(self.layer_stack.roi_layers))
-        self.layer_stack.roi_layers.clear()
-        self.layer_stack._color_index = 0
-        # Push undo so all ROIs can be recovered
         app = self.window()
+        # Construct the undo command first — its __init__ snapshots 3D
+        # voxels + meta while the labels volume is still intact. Releasing
+        # the 3D labels before the snapshot would lose voxels permanently.
+        undo_cmd = None
         if entries and hasattr(app, 'undo_stack'):
             from montaris.core.undo import RemoveROIUndoCommand
-            app.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
+            undo_cmd = RemoveROIUndoCommand(self.layer_stack, entries)
+        for _i, roi in entries:
+            if getattr(roi, 'is_volume', False):
+                doc = getattr(roi, '_doc', None)
+                lid = getattr(roi, 'label_id', None)
+                if doc is not None and lid is not None:
+                    doc.release_label_id(int(lid))
+        self.layer_stack.roi_layers.clear()
+        self.layer_stack._color_index = 0
+        if undo_cmd is not None:
+            app.undo_stack.push(undo_cmd)
         self.all_cleared.emit()
 
     def _duplicate_selected(self):
@@ -742,7 +840,26 @@ class LayerPanel(QWidget):
         if len(indices) < 2:
             QMessageBox.information(self, "Merge", "Select at least 2 ROIs to merge.")
             return
-        self.layer_stack.merge_rois(indices)
+        layers = [self.layer_stack.roi_layers[i] for i in indices]
+        has_vol = any(getattr(l, 'is_volume', False) for l in layers)
+        has_flat = any(not getattr(l, 'is_volume', False) for l in layers)
+        if has_vol and has_flat:
+            QMessageBox.information(
+                self, "Merge",
+                "Cannot merge 2D ROIs with 3D ROIs. Select only 2D ROIs, "
+                "or only 3D ROIs from the same document.")
+            return
+        if has_vol:
+            doc_ids = {id(l._doc) for l in layers}
+            if len(doc_ids) != 1:
+                QMessageBox.information(
+                    self, "Merge",
+                    "Cannot merge 3D ROIs across different documents.")
+                return
+        ok = self.layer_stack.merge_rois(indices)
+        if ok is False:
+            QMessageBox.information(self, "Merge", "Merge not supported for this selection.")
+            return
         self.refresh()
         self.visibility_changed.emit()
 

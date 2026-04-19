@@ -102,11 +102,15 @@ def _sanitize_roi_filename(name):
     return re.sub(r'[/\\:*?"<>|]', '_', name)
 
 
-def _save_session_from_snapshots(session_dir, snapshots, meta):
+def _save_session_from_snapshots(session_dir, snapshots, meta, volume_labels=None):
     """Write ROI snapshots to a session folder (runs in background thread).
 
     Snapshots contain bbox-cropped masks ('crop' + 'bbox') to avoid holding
     full-resolution masks in memory.
+
+    *volume_labels* is an optional ``(labels_3d, labels_meta)`` pair. When
+    present, the labels volume is written as ``labels.tif`` + its sidecar so
+    3D ROIs survive the save/restore round-trip alongside 2D ``.roi`` files.
     """
     import json as _json
     from montaris.io.imagej_roi import mask_to_imagej_roi, write_imagej_roi
@@ -118,6 +122,15 @@ def _save_session_from_snapshots(session_dir, snapshots, meta):
         if existing.lower().endswith('.roi'):
             try:
                 os.remove(os.path.join(session_dir, existing))
+            except OSError:
+                pass
+    # Also clear stale labels files so a doc that lost its labels_3d doesn't
+    # leave a misleading volume behind on the next restore.
+    for stale in ('labels.tif', 'labels.labels.json'):
+        stale_path = os.path.join(session_dir, stale)
+        if os.path.isfile(stale_path):
+            try:
+                os.remove(stale_path)
             except OSError:
                 pass
 
@@ -160,6 +173,15 @@ def _save_session_from_snapshots(session_dir, snapshots, meta):
         roi_files.append(filename)
 
     meta['roi_files'] = roi_files
+
+    if volume_labels is not None:
+        labels_3d, labels_meta = volume_labels
+        if labels_3d is not None and labels_meta:
+            from montaris.io.volume_labels import save_volume_labels
+            labels_path = os.path.join(session_dir, 'labels.tif')
+            save_volume_labels(labels_path, labels_3d, labels_meta)
+            meta['labels_file'] = 'labels.tif'
+            meta['labels_shape'] = list(labels_3d.shape)
 
     with open(os.path.join(session_dir, 'session.json'), 'w') as f:
         _json.dump(meta, f, indent=2)
@@ -323,14 +345,34 @@ class MontarisApp(QMainWindow):
         layout.addWidget(self._z_bar, 0)
 
     def _on_z_slider_changed(self, val):
-        """Route Z-slider changes into the active document's labels overlay."""
+        """Route Z-slider changes into the active document's 2D image + overlays.
+
+        Swaps ``doc.image_layer.data`` to the z'th plane of ``volume_data`` so
+        scrolling the slider actually scans through the stack. Rotate/flip are
+        baked into ``volume_data`` at load time, so only the on-the-fly
+        downsample is applied here.
+        """
         doc = self._active_document()
-        if doc is None or getattr(doc, 'volume_data', None) is None:
+        vol = getattr(doc, 'volume_data', None) if doc is not None else None
+        if doc is None or vol is None or vol.ndim != 3:
             return
         z = int(val)
+        z = max(0, min(vol.shape[0] - 1, z))
         doc.active_z = z
-        n = doc.volume_data.shape[0]
+        n = vol.shape[0]
         self._z_label.setText(f"{z + 1} / {n}")
+        ds = int(doc.downsample_factor or 1)
+        plane = vol[z]
+        if ds > 1:
+            plane = plane[::ds, ::ds]
+        # Keep image_layer.data a contiguous array — downstream adjustment /
+        # minimap / canvas refresh paths assume writeable ndarrays, and a
+        # non-contiguous view here triggers subtle colormap artifacts.
+        doc.image_layer.data = np.ascontiguousarray(plane)
+        if doc is self._active_document():
+            self.canvas.refresh_image()
+            self.minimap.set_image(doc.image_layer.data)
+            self.adjustments_panel.set_image_data(doc.image_layer.data)
         # VolumeROILayer caches bbox per slice; the active slice just changed
         # so every volume-backed ROI needs its bbox recomputed before redraw.
         for roi in self.layer_stack.roi_layers:
@@ -575,7 +617,7 @@ class MontarisApp(QMainWindow):
         self.tool_panel.view_instructions_requested.connect(self._view_instructions)
         self.tool_panel.fit_to_window_requested.connect(lambda: self.canvas.fit_to_window())
         self.layer_panel.selection_changed.connect(self._on_layer_selected)
-        self.layer_panel.visibility_changed.connect(lambda: self.canvas.refresh_overlays())
+        self.layer_panel.visibility_changed.connect(self._on_layers_changed)
         self.layer_panel.roi_added.connect(self._on_roi_added)
         self.layer_panel.roi_removed.connect(self._on_roi_removed)
         self.layer_panel.all_cleared.connect(self._on_all_cleared)
@@ -1454,6 +1496,17 @@ class MontarisApp(QMainWindow):
         for name, act in self._left_tool_actions.items():
             act.setChecked(name == tool_name)
 
+    def _on_layers_changed(self):
+        """Refresh 2D and 3D overlays after any LayerPanel mutation.
+
+        Replaces the bare ``canvas.refresh_overlays`` connection so 3D ROI
+        changes (duplicate, merge, reorder, visibility, opacity) also
+        redraw the vispy labels overlay in lockstep with the sidebar.
+        """
+        self.canvas.refresh_overlays()
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
+
     def _on_layer_selected(self, layer):
         self.canvas.set_active_layer(layer)
         self.properties_panel.set_layer(layer)
@@ -1471,6 +1524,12 @@ class MontarisApp(QMainWindow):
                           'Move (selected)', 'Move All'}
 
     def _on_roi_added(self):
+        # While the 3D viewer is open, "Add ROI" reserves a new 3D label so
+        # the next paint stroke extends it — a fresh 2D ROILayer here would
+        # be useless in 3D (label id None, can't be painted into labels_3d).
+        if self._view3d_panel is not None:
+            self._add_volume_roi()
+            return
         if self.layer_stack.image_layer is None:
             QMessageBox.information(self, "Info", "Load an image first.")
             return
@@ -1492,12 +1551,49 @@ class MontarisApp(QMainWindow):
         if current is None or current in self._NON_DRAWING_TOOLS:
             self.tool_panel._select_tool('Brush')
 
+    def _add_volume_roi(self):
+        """Create an empty 3D ROI and register it with the 3D viewer.
+
+        Invoked by the Add ROI button while the 3D panel is open. Reserves
+        a label id in the primary volume doc, wraps it as a VolumeROILayer,
+        and auto-selects it so the user's next paint stroke fills into that
+        label instead of allocating a new one.
+        """
+        doc = next(
+            (d for d in self._documents if getattr(d, 'volume_data', None) is not None),
+            None,
+        )
+        if doc is None:
+            QMessageBox.information(self, "Info", "Load a z-stack first.")
+            return
+        try:
+            doc.ensure_labels_3d()
+        except Exception:
+            return
+        lid = doc.reserve_label_id()
+        doc.labels_meta[lid]["name"] = generate_unique_roi_name(
+            f"3D ROI {lid}", self.layer_stack.roi_layers,
+        )
+        # _on_3d_label_added handles color assignment, wrapper creation,
+        # LayerPanel refresh, and auto-select.
+        self._on_3d_label_added(doc, lid)
+
     def _on_roi_removed(self, index):
         removed = self.layer_stack.get_roi(index)
         if removed is not None:
             entries = [(index, removed)]
         else:
             entries = []
+        # For 3D ROIs, also drop the voxels from labels_3d and the meta entry.
+        # Without this the 3D overlay keeps showing the deleted ROI because
+        # its label id is still live in the labels volume. Note: undo will
+        # restore the wrapper but not the voxels — an accepted tradeoff vs.
+        # snapshotting the full 3D mask in the undo record.
+        if removed is not None and getattr(removed, 'is_volume', False):
+            doc = getattr(removed, '_doc', None)
+            lid = getattr(removed, 'label_id', None)
+            if doc is not None and lid is not None:
+                doc.release_label_id(int(lid))
         self.layer_stack.remove_roi(index)
         # Push undo command so deleted ROI can be recovered
         if entries:
@@ -1510,6 +1606,10 @@ class MontarisApp(QMainWindow):
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()
         self.properties_panel.set_layer(None)
+        # Rebuild the 3D labels overlay so the deleted ROI's voxels disappear
+        # from the vispy view. Cheap when no 3D panel is open.
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
 
     def _on_all_cleared(self):
         tool = self.canvas._tool
@@ -1520,6 +1620,8 @@ class MontarisApp(QMainWindow):
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()
         self.properties_panel.set_layer(None)
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
 
     # -- Display mode callbacks (Phase 2) --
 
@@ -1889,6 +1991,7 @@ class MontarisApp(QMainWindow):
             finally:
                 self._view3d_panel.deleteLater()
                 self._view3d_panel = None
+            self.layer_panel.set_3d_mode(False)
             self._view3d_btn.setText(" View in 3D")
             self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
             return
@@ -1916,6 +2019,7 @@ class MontarisApp(QMainWindow):
                 self._central_stack, channels=channels, documents=self._documents,
             )
             panel.label_added.connect(self._on_3d_label_added)
+            panel.undo_pushed.connect(self._on_3d_undo_pushed)
             self._view3d_panel = panel
             self._central_stack.addWidget(panel)
             self._central_stack.setCurrentWidget(panel)
@@ -1924,6 +2028,9 @@ class MontarisApp(QMainWindow):
             sel = self.canvas._active_layer
             lid = getattr(sel, 'label_id', None) if getattr(sel, 'is_volume', False) else None
             panel.set_active_volume_roi_id(lid)
+            # Filter the sidebar to 3D ROIs only so 2D-only ROIs don't show
+            # up as dead rows while the 3D viewer is active.
+            self.layer_panel.set_3d_mode(True)
         finally:
             self.setUpdatesEnabled(True)
         # Heavy GPU upload happens on the next event-loop tick (deferred
@@ -1968,6 +2075,10 @@ class MontarisApp(QMainWindow):
         if self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
 
+    def _on_3d_undo_pushed(self, command):
+        """Route a 3D viewer undo command onto the app's UndoStack."""
+        self.undo_stack.push(command)
+
     def export_volume_labels(self):
         """Save ``doc.labels_3d`` as a uint16 multi-page TIFF + sidecar JSON.
 
@@ -1975,13 +2086,28 @@ class MontarisApp(QMainWindow):
         colors so Montaris round-trips losslessly. Prompts the user when no
         active document has a labels volume attached (no 3D ROIs to export).
         """
-        doc = self._active_document()
-        if doc is None or getattr(doc, 'labels_3d', None) is None \
-                or not getattr(doc, 'labels_meta', {}):
+        # Prefer the active doc, but in z-stack "all" mode only the 3D
+        # viewer's primary doc actually holds labels_3d — the other slice
+        # wrappers are empty. Fall back to whichever doc has a populated
+        # labels volume so Export still works when the user is scrolling
+        # through a different 2D slice at the time.
+        active = self._active_document()
+        candidates = []
+        if active is not None:
+            candidates.append(active)
+        if self._documents:
+            candidates.extend(d for d in self._documents if d is not active)
+        doc = next(
+            (d for d in candidates
+             if getattr(d, 'labels_3d', None) is not None
+             and getattr(d, 'labels_meta', {})),
+            None,
+        )
+        if doc is None:
             QMessageBox.information(
                 self, "No 3D ROIs",
-                "The active document has no 3D ROIs yet. Use the 3D viewer's "
-                "Fill or Paint tools to create some first.",
+                "No document has 3D ROIs yet. Use the 3D viewer's Fill or "
+                "Paint tools to create some first.",
             )
             return
         default = os.path.join(self._last_dir(), f"{doc.name}_labels.tif")
@@ -2006,24 +2132,31 @@ class MontarisApp(QMainWindow):
         )
 
     def import_volume_labels(self):
-        """Load a labels TIFF + sidecar into the active document.
+        """Load a labels TIFF + sidecar into the target volume document.
 
-        Any existing ``labels_3d`` on that document is replaced wholesale
+        Targets the active doc when it has ``volume_data``; otherwise picks
+        the first doc that does — the same document ``View3DPanel`` uses as
+        its ``_primary_doc``. This matters in z-stack 'all' mode where the
+        active doc is often an empty slice wrapper: importing there would
+        attach the labels to a different document than the 3D view reads.
+        Any existing ``labels_3d`` on the target is replaced wholesale
         along with its meta; stale :class:`VolumeROILayer` wrappers in the
         layer stack are dropped and fresh ones created from the imported
-        labels. Refuses to import when the active doc has no backing volume
-        to attach the labels to (shape mismatch would be meaningless).
+        labels.
         """
-        doc = self._active_document()
+        active = self._active_document()
+        doc = active if (active is not None and getattr(active, 'volume_data', None) is not None) else None
         if doc is None:
-            QMessageBox.information(self, "No active document",
-                                     "Open an image before importing 3D ROIs.")
-            return
-        if getattr(doc, 'volume_data', None) is None:
+            doc = next(
+                (d for d in self._documents
+                 if getattr(d, 'volume_data', None) is not None),
+                None,
+            )
+        if doc is None:
             QMessageBox.information(
-                self, "2D document",
-                "3D labels can only attach to a z-stack document. Open the "
-                "image as a z-stack first.",
+                self, "No z-stack loaded",
+                "3D labels can only attach to a z-stack document. Open a "
+                "z-stack first.",
             )
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -2116,26 +2249,40 @@ class MontarisApp(QMainWindow):
         z_mode is one of 'max', 'slice', 'all', or None for non-z-stack files.
         The 3D volume is attached to every channel tuple produced from a z-stack
         so the 3D viewer can access it regardless of which 2D projection was chosen.
+
+        Multi-channel volumetric TIFFs (``CZYX``/``TZYX``) are split into one
+        entry per channel/timepoint — each gets its own ``MontageDocument``
+        with its own ``volume_data``, matching how separate-file channels
+        are treated elsewhere.
         """
+        from montaris.io.image_io import load_volume_channels
         stem = os.path.splitext(os.path.basename(path))[0]
         if z_mode is None:
             return [(name, data, None) for name, data in load_image_stack(path)]
-        volume, _axes = load_volume(path)  # (Z, H, W)
-        if z_mode == 'max':
-            return [(stem, max_projection(volume, axis=0), volume)]
-        if z_mode == 'slice':
-            z = max(0, min(volume.shape[0] - 1, int(z_slice)))
-            return [(f"{stem}_z{z}", volume[z], volume)]
-        if z_mode == 'all':
-            return [(f"{stem}_z{i}", volume[i], volume) for i in range(volume.shape[0])]
-        return [(stem, max_projection(volume, axis=0), volume)]
+        channels = load_volume_channels(path)
+        results = []
+        for suffix, volume in channels:
+            base = f"{stem}{suffix}"
+            if z_mode == 'slice':
+                z = max(0, min(volume.shape[0] - 1, int(z_slice)))
+                results.append((f"{base}_z{z}", volume[z], volume))
+            elif z_mode == 'all':
+                for i in range(volume.shape[0]):
+                    results.append((f"{base}_z{i}", volume[i], volume))
+            else:  # 'max' or fallback
+                results.append((base, max_projection(volume, axis=0), volume))
+        return results
 
     def _load_single_channel(self, name, data, ds_factor, skipped, image_path=None, volume_data=None):
         """Load one image/channel into the image stack."""
         if self._flip_on_load_act.isChecked():
             data = np.flip(data, axis=1).copy()
+            if volume_data is not None and volume_data.ndim == 3:
+                volume_data = np.flip(volume_data, axis=2).copy()
         if self._rotate_on_load_act.isChecked():
             data = np.rot90(data, k=-1).copy()
+            if volume_data is not None and volume_data.ndim == 3:
+                volume_data = np.rot90(volume_data, k=-1, axes=(1, 2)).copy()
         original_shape = data.shape
         if ds_factor > 1:
             data = data[::ds_factor, ::ds_factor]
@@ -2331,7 +2478,24 @@ class MontarisApp(QMainWindow):
 
     def save_session_progress(self):
         """Save all ROIs as ImageJ .roi files in a timestamped session folder."""
-        if not self.layer_stack.roi_layers:
+        doc = self._documents[self._active_doc_index] if self._documents else None
+        # In z-stack "all" mode the active doc might be an empty slice
+        # wrapper while the real labels live on a sibling doc. Fall back
+        # to whichever doc actually holds labels so session save still
+        # captures 3D ROIs regardless of which slice is showing.
+        labels_doc = doc if (
+            doc is not None
+            and getattr(doc, 'labels_3d', None) is not None
+            and bool(getattr(doc, 'labels_meta', {}))
+        ) else next(
+            (d for d in (self._documents or [])
+             if getattr(d, 'labels_3d', None) is not None
+             and bool(getattr(d, 'labels_meta', {}))),
+            None,
+        )
+        has_volume_labels = labels_doc is not None
+
+        if not self.layer_stack.roi_layers and not has_volume_labels:
             self.toast.show("No ROIs to save", "warning")
             return
         if self.layer_stack.image_layer is None:
@@ -2339,7 +2503,6 @@ class MontarisApp(QMainWindow):
             return
 
         # Determine image directory
-        doc = self._documents[self._active_doc_index] if self._documents else None
         image_path = doc.image_path if doc and doc.image_path else None
         if image_path:
             image_dir = os.path.dirname(image_path)
@@ -2359,6 +2522,11 @@ class MontarisApp(QMainWindow):
         from montaris.io.session import build_session_folder_name, get_base_stem
         snapshots = []
         for roi in self.layer_stack.roi_layers:
+            # VolumeROILayers are persisted through the labels.tif volume
+            # below, not as per-slice .roi files — skip them here so we
+            # don't accidentally materialise a 2D contour from a 3D ROI.
+            if getattr(roi, 'is_volume', False):
+                continue
             bbox = roi.get_bbox()
             if bbox is None:
                 continue  # skip empty masks
@@ -2377,7 +2545,7 @@ class MontarisApp(QMainWindow):
         _cv = self.canvas
         QTimer.singleShot(0, lambda: _ls.compress_inactive(_cv._active_layer))
 
-        if not snapshots:
+        if not snapshots and not has_volume_labels:
             self.toast.show("All ROIs are empty — nothing to save", "warning")
             return
 
@@ -2394,6 +2562,8 @@ class MontarisApp(QMainWindow):
         channel_names = [d.name for d in self._documents]
         base_stem = get_base_stem(stem)
 
+        volume_label_count = len(labels_doc.labels_meta) if has_volume_labels else 0
+
         meta = {
             'version': 1,
             'timestamp': datetime.now().isoformat(),
@@ -2403,20 +2573,30 @@ class MontarisApp(QMainWindow):
             'original_shape': list(original_shape) if original_shape else None,
             'canvas_shape': canvas_shape,
             'channel_names': channel_names,
-            'roi_count': len(snapshots),
+            'roi_count': len(snapshots) + volume_label_count,
             'roi_names': [s['name'] for s in snapshots],
             'roi_colors': [s['color'] for s in snapshots],
             'roi_opacities': [s['opacity'] for s in snapshots],
         }
 
+        volume_labels_arg = None
+        if has_volume_labels:
+            import copy as _copy
+            # Copy array so the worker writes a stable snapshot even if the
+            # user paints into labels_3d while the save is in-flight. Meta
+            # is small so deep-copying it is cheap.
+            volume_labels_arg = (labels_doc.labels_3d.copy(),
+                                  _copy.deepcopy(labels_doc.labels_meta))
+
         self.toast.show("Saving session...", "info")
 
         from montaris.core.workers import get_pool
         future = get_pool().submit(
-            _save_session_from_snapshots, session_dir, snapshots, meta
+            _save_session_from_snapshots, session_dir, snapshots, meta,
+            volume_labels_arg,
         )
 
-        n_saved = len(snapshots)
+        n_saved = len(snapshots) + volume_label_count
 
         def _poll_save():
             if not future.done():
@@ -2634,15 +2814,73 @@ class MontarisApp(QMainWindow):
             progress.setValue(i + 1)
             QApplication.processEvents()
 
+        # Labels volume (3D ROIs) — rehydrate if the session wrote one.
+        volume_count = self._restore_session_volume_labels(folder, meta, doc)
+
         progress.close()
         self.canvas.refresh_overlays()
         self.layer_panel.refresh()
 
-        msg = f"Restored {count} ROI(s)"
+        parts = []
+        if count:
+            parts.append(f"{count} 2D ROI(s)")
+        if volume_count:
+            parts.append(f"{volume_count} 3D ROI(s)")
+        if not parts:
+            parts.append("0 ROIs")
+        msg = "Restored " + ", ".join(parts)
         if need_scale:
             msg += f" (scaled from ds={session_ds}x to ds={current_ds}x)"
         self.toast.show(msg, "success")
         QTimer.singleShot(0, lambda: self.layer_stack.compress_inactive(self.canvas._active_layer))
+
+    def _restore_session_volume_labels(self, folder, meta, doc):
+        """Hydrate ``doc.labels_3d`` + ``labels_meta`` from a session folder.
+
+        Returns the number of 3D ROIs added. Silently does nothing when the
+        session has no labels file, or when the active doc can't host the
+        volume (no z-stack, shape mismatch).
+        """
+        labels_file = meta.get('labels_file')
+        if not labels_file:
+            return 0
+        labels_path = os.path.join(folder, labels_file)
+        if not os.path.isfile(labels_path):
+            return 0
+        if doc is None or getattr(doc, 'volume_data', None) is None:
+            return 0
+        try:
+            from montaris.io.volume_labels import load_volume_labels
+            labels, labels_meta = load_volume_labels(labels_path)
+        except Exception:  # noqa: BLE001 — user-visible via toast below
+            self.toast.show(
+                f"Session labels TIFF could not be read: {labels_file}",
+                "warning",
+            )
+            return 0
+        if labels.shape != doc.volume_data.shape:
+            self.toast.show(
+                f"Session labels shape {labels.shape} doesn't match document "
+                f"volume {doc.volume_data.shape} — 3D ROIs skipped.",
+                "warning",
+            )
+            return 0
+
+        from montaris.layers import VolumeROILayer
+        # Drop any existing VolumeROILayers for this doc before rehydrating so
+        # a restore-into-loaded-session doesn't duplicate wrappers.
+        self.layer_stack.roi_layers = [
+            r for r in self.layer_stack.roi_layers
+            if not (getattr(r, 'is_volume', False) and getattr(r, '_doc', None) is doc)
+        ]
+        doc.labels_3d = labels
+        doc.labels_meta = dict(labels_meta)
+        doc.labels_next_id = (max(labels_meta.keys()) + 1) if labels_meta else 1
+        for lid in sorted(labels_meta.keys()):
+            self.layer_stack.roi_layers.append(VolumeROILayer(doc, int(lid)))
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
+        return len(labels_meta)
 
     def _on_save_progress_toggled(self, checked):
         self._save_progress_btn.setVisible(checked)
@@ -4009,6 +4247,15 @@ class MontarisApp(QMainWindow):
             for idx in sorted(indices):
                 if 0 <= idx < len(self.layer_stack.roi_layers):
                     entries.append((idx, self.layer_stack.roi_layers[idx]))
+            # Build the undo command FIRST — it snapshots 3D voxels + meta
+            # while the labels volume still carries them. Releasing before
+            # the snapshot would leave undo with nothing to restore.
+            undo_cmd = None
+            if entries:
+                from montaris.core.undo import RemoveROIUndoCommand
+                undo_cmd = RemoveROIUndoCommand(self.layer_stack, entries)
+            # Drop voxels + meta so the 3D overlay stops rendering the ROI.
+            self._release_volume_labels_for(layer for _, layer in entries)
             # Block signals during batch removal to prevent cascading updates
             # on stale layer references
             self.canvas._active_layer = None
@@ -4017,10 +4264,8 @@ class MontarisApp(QMainWindow):
             for idx in sorted(indices, reverse=True):
                 if 0 <= idx < len(self.layer_stack.roi_layers):
                     self.layer_stack.roi_layers.pop(idx)
-            # Push undo command so deleted ROIs can be recovered via Ctrl+Z
-            if entries:
-                from montaris.core.undo import RemoveROIUndoCommand
-                self.undo_stack.push(RemoveROIUndoCommand(self.layer_stack, entries))
+            if undo_cmd is not None:
+                self.undo_stack.push(undo_cmd)
             # Now emit signals after state is consistent
             self.layer_stack.changed.emit()
             # Select adjacent ROI if available
@@ -4030,9 +4275,26 @@ class MontarisApp(QMainWindow):
             self.canvas.refresh_overlays()
             self.layer_panel.refresh()
             self.properties_panel.set_layer(self.canvas._active_layer)
+            if self._view3d_panel is not None:
+                self._view3d_panel.refresh_labels()
         except Exception:
             import traceback
             traceback.print_exc()
+
+    def _release_volume_labels_for(self, layers):
+        """Zero voxels + drop meta for any VolumeROILayers in ``layers``.
+
+        Centralized so every delete path (clear_active_roi, _clear_all, the
+        unused _on_roi_removed) uses the same cleanup and the vispy labels
+        overlay stays consistent with the sidebar.
+        """
+        for layer in layers:
+            if not getattr(layer, 'is_volume', False):
+                continue
+            doc = getattr(layer, '_doc', None)
+            lid = getattr(layer, 'label_id', None)
+            if doc is not None and lid is not None:
+                doc.release_label_id(int(lid))
 
     def undo(self):
         # If polygon tool is mid-drawing, undo last vertex instead
@@ -4115,25 +4377,53 @@ class MontarisApp(QMainWindow):
     @staticmethod
     def _contains_structural_cmd(cmd):
         """Recursively check if cmd contains an AddROI or RemoveROI command."""
-        from montaris.core.undo import AddROIUndoCommand, RemoveROIUndoCommand
-        if isinstance(cmd, (AddROIUndoCommand, RemoveROIUndoCommand)):
+        from montaris.core.undo import (
+            AddROIUndoCommand, RemoveROIUndoCommand, AddVolumeROIUndoCommand,
+        )
+        if isinstance(cmd, (AddROIUndoCommand, RemoveROIUndoCommand,
+                            AddVolumeROIUndoCommand)):
             return True
         if hasattr(cmd, 'commands'):
             return any(MontarisApp._contains_structural_cmd(c) for c in cmd.commands)
         return False
 
+    @staticmethod
+    def _contains_volume_cmd(cmd):
+        """Recursively check if cmd mutates labels_3d (paint/erase/fill)."""
+        from montaris.core.undo import (
+            VolumeStrokeUndoCommand, VolumeFillUndoCommand,
+            AddVolumeROIUndoCommand,
+        )
+        if isinstance(cmd, (VolumeStrokeUndoCommand, VolumeFillUndoCommand,
+                            AddVolumeROIUndoCommand)):
+            return True
+        if hasattr(cmd, 'commands'):
+            return any(MontarisApp._contains_volume_cmd(c) for c in cmd.commands)
+        return False
+
     def _refresh_affected_layers(self, cmd):
         """Refresh only the layers affected by an undo/redo command."""
         from montaris.core.undo import AddROIUndoCommand, RemoveROIUndoCommand
+        # 3D commands need the vispy labels overlay rebuilt; a 2D refresh
+        # alone would leave the 3D panel out of sync with labels_3d.
+        if self._contains_volume_cmd(cmd):
+            self.canvas.refresh_overlays()
+            if self._view3d_panel is not None:
+                self._view3d_panel.refresh_labels()
+            return
         if isinstance(cmd, (AddROIUndoCommand, RemoveROIUndoCommand)):
             # ROI added/removed — need full refresh
             self.canvas.refresh_overlays()
+            if self._view3d_panel is not None:
+                self._view3d_panel.refresh_labels()
             return
 
         # Compound that contains an AddROI (create+first-edit merge) also
         # needs full refresh so the overlay is properly added/removed.
         if self._contains_structural_cmd(cmd):
             self.canvas.refresh_overlays()
+            if self._view3d_panel is not None:
+                self._view3d_panel.refresh_labels()
             return
 
         layers = set()

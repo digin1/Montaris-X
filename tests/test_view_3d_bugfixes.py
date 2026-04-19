@@ -1,0 +1,1118 @@
+"""Regression tests for 3D viewer + z-slider bug fixes.
+
+Covers three bugs surfaced in the 2026-04-18 code review:
+
+- ``channels_from_documents`` duplicated a shared z-stack across N docs
+  (z-stack 'all' mode), making the 3D viewer render tiled copies.
+- ``_on_drag_refresh_tick`` uploaded the sub-region with xyz offset where
+  vispy's Texture3D expects zyx.
+- The bottom Z-slider only nudged ROI bboxes; it never swapped
+  ``image_layer.data`` to ``volume_data[z]``, so the 2D image was frozen
+  outside MIP mode.
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+
+from montaris.layers import (
+    ImageLayer,
+    MontageDocument,
+    ROILayer,
+    VolumeROILayer,
+)
+from montaris.widgets.view_3d import (
+    VISPY_AVAILABLE,
+    View3DPanel,
+    channels_from_documents,
+)
+
+
+def _doc_with_volume(name, vol):
+    """Build a MontageDocument whose 2D image is the volume's MIP."""
+    mp = vol.max(axis=0)
+    doc = MontageDocument(name=name, image_layer=ImageLayer(name, mp))
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    return doc
+
+
+def test_channels_from_documents_dedupes_shared_volume():
+    """Z-stack 'all' mode creates N docs sharing one volume; only one entry."""
+    vol = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+    docs = [_doc_with_volume(f"stack_z{i}", vol) for i in range(vol.shape[0])]
+    # Each doc's 2D image is a distinct slice but all share the same `vol`.
+    assert all(d.volume_data is vol for d in docs)
+    channels = channels_from_documents(docs)
+    assert len(channels) == 1
+    assert channels[0][0] == "stack_z0"
+    assert channels[0][1] is vol
+
+
+def test_channels_from_documents_keeps_distinct_volumes():
+    """Two independently-loaded stacks still produce two channels."""
+    vol_a = np.zeros((2, 3, 4), dtype=np.uint8)
+    vol_b = np.ones((2, 3, 4), dtype=np.uint8)
+    docs = [_doc_with_volume("A", vol_a), _doc_with_volume("B", vol_b)]
+    channels = channels_from_documents(docs)
+    assert len(channels) == 2
+    assert {c[0] for c in channels} == {"A", "B"}
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_drag_refresh_tick_uploads_with_zyx_offset(qapp, monkeypatch):
+    """Sub-region upload must pass offset=(z0, y0, x0) to Texture3D.set_data."""
+    vol = np.zeros((8, 16, 20), dtype=np.uint8)
+    doc = _doc_with_volume("zyxdoc", vol)
+    doc.ensure_labels_3d()
+    panel = View3DPanel(None, channels=[("ch", vol, (1.0, 1.0, 1.0))], documents=[doc])
+    try:
+        captured = {}
+
+        class FakeTex:
+            def set_data(self, data, offset):
+                captured['data_shape'] = data.shape
+                captured['offset'] = offset
+
+        class FakeVolume:
+            def __init__(self):
+                self._texture = FakeTex()
+
+            def update(self):
+                captured['updated'] = True
+
+        panel._labels_volume = FakeVolume()
+        panel._last_total_ds = 1
+        panel._drag_dirty = True
+        # bbox = (z0, z1, y0, y1, x0, x1)
+        panel._dirty_bbox = (2, 5, 4, 10, 6, 14)
+
+        panel._on_drag_refresh_tick()
+
+        assert captured.get('offset') == (2, 4, 6)
+        # The data uploaded must match the bbox shape in zyx order.
+        assert captured.get('data_shape') == (3, 6, 8)
+        assert captured.get('updated') is True
+    finally:
+        panel.close()
+
+
+def test_z_slider_swaps_image_data_to_slice(app, qapp):
+    """Moving the z-slider must replace image_layer.data with volume_data[z]."""
+    vol = np.zeros((6, 4, 5), dtype=np.uint8)
+    for z in range(vol.shape[0]):
+        vol[z] = z * 10  # distinct fingerprint per slice
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    app._documents = [doc]
+    app._active_doc_index = 0
+    app._update_z_slider_visibility()
+
+    # Slider exists and is wired to the doc.
+    assert app._z_bar.isVisible()
+    app._z_slider.setValue(3)
+
+    assert doc.active_z == 3
+    np.testing.assert_array_equal(doc.image_layer.data, vol[3])
+
+    app._z_slider.setValue(0)
+    np.testing.assert_array_equal(doc.image_layer.data, vol[0])
+
+
+def test_layer_panel_3d_mode_filters_2d_rois(app, qapp):
+    """In 3D mode the panel must show only VolumeROILayers."""
+    h, w = 10, 12
+    vol = np.zeros((4, h, w), dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+
+    # Mix a 2D ROI and a 3D ROI
+    app.layer_stack.add_roi(ROILayer("flat", w, h))
+    lid = doc.reserve_label_id()
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid))
+    app.layer_panel.refresh()
+
+    # 2D mode — both rows visible + the image row.
+    assert app.layer_panel.list_widget.count() == 3
+
+    app.layer_panel.set_3d_mode(True)
+    # 3D mode — image row + VolumeROILayer only.
+    assert app.layer_panel.list_widget.count() == 2
+    assert "3D ROI" in app.layer_panel.header.text()
+
+    app.layer_panel.set_3d_mode(False)
+    assert app.layer_panel.list_widget.count() == 3
+
+
+def test_add_roi_while_3d_open_creates_volume_roi(app, qapp):
+    """Clicking Add ROI while the 3D panel is open must allocate a 3D label."""
+    h, w = 8, 9
+    vol = np.zeros((3, h, w), dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+
+    # Simulate 3D panel being open without actually constructing vispy.
+    app._view3d_panel = MagicMock()
+    try:
+        app._on_roi_added()
+    finally:
+        app._view3d_panel = None
+
+    rois = app.layer_stack.roi_layers
+    assert len(rois) == 1
+    assert getattr(rois[0], 'is_volume', False)
+    assert rois[0].label_id in doc.labels_meta
+
+
+def test_remove_volume_roi_clears_voxels_and_meta(app, qapp):
+    """Deleting a 3D ROI must zero its voxels and drop its meta entry.
+
+    Exercises the real delete path (``clear_active_roi``) rather than the
+    orphaned ``_on_roi_removed`` handler (no caller emits ``roi_removed``).
+    """
+    h, w = 8, 9
+    vol = np.zeros((4, h, w), dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+
+    lid = doc.reserve_label_id()
+    # Paint a few voxels into this label so we can verify they're cleared.
+    doc.labels_3d[1, 2:5, 3:6] = lid
+    vroi = VolumeROILayer(doc, lid)
+    app.layer_stack.roi_layers.append(vroi)
+    app.layer_panel.refresh()
+
+    assert (doc.labels_3d == lid).any()
+    assert lid in doc.labels_meta
+
+    # Pretend the 3D panel is open so the refresh hook fires, and select
+    # the 3D ROI so clear_active_roi sees it as the deletion target.
+    app._view3d_panel = MagicMock()
+    app.canvas.set_active_layer(vroi)
+    try:
+        app.clear_active_roi()
+    finally:
+        app._view3d_panel = None
+
+    assert not (doc.labels_3d == lid).any()
+    assert lid not in doc.labels_meta
+    assert len(app.layer_stack.roi_layers) == 0
+
+
+def _setup_3d_app(app, shape=(4, 8, 9)):
+    """Build a doc with a labels volume attached and register it on app."""
+    Z, H, W = shape
+    vol = np.zeros(shape, dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+    return doc
+
+
+def test_duplicate_3d_roi_reserves_empty_label_with_src_metadata(app, qapp):
+    """3D duplicate creates an empty sibling label (source voxels untouched).
+
+    A single labels volume can't hold two ids at the same voxel, so duplicate
+    reserves an empty label carrying the source's color/opacity/fill_mode and
+    a ``(copy)`` name — the user paints into it from there.
+    """
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="src", opacity=200, fill_mode="solid")
+    doc.labels_3d[1, 2:5, 3:6] = lid
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid))
+
+    app.layer_stack.duplicate_roi(0)
+
+    assert len(app.layer_stack.roi_layers) == 2
+    dup = app.layer_stack.roi_layers[1]
+    assert dup.is_volume
+    assert dup._label_id != lid
+    assert dup.name == "src (copy)"
+    assert dup.opacity == 200
+    assert dup.fill_mode == "solid"
+    # Source voxels preserved; dup starts empty.
+    assert (doc.labels_3d == lid).sum() == 9
+    assert not (doc.labels_3d == dup._label_id).any()
+
+
+def test_duplicate_3d_roi_promotes_dtype_past_255(app, qapp):
+    """Duplicate at id boundary (255→256) must promote labels_3d to uint16."""
+    doc = _setup_3d_app(app)
+    doc.labels_next_id = 255
+    lid = doc.reserve_label_id()  # id 255
+    doc.labels_3d[0, 0, 0] = lid
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid))
+    assert doc.labels_3d.dtype == np.uint8
+
+    app.layer_stack.duplicate_roi(0)
+
+    # reserve_label_id inside duplicate promotes the dtype so id 256 fits.
+    assert doc.labels_3d.dtype == np.uint16
+    dup = app.layer_stack.roi_layers[1]
+    assert dup._label_id == 256
+    assert doc.labels_3d[0, 0, 0] == 255  # source preserved
+
+
+def test_merge_3d_rois_relabels_voxels(app, qapp):
+    """Merging two 3D ROIs: target absorbs other's voxels, other's id released."""
+    doc = _setup_3d_app(app)
+    lid_a = doc.reserve_label_id(name="A")
+    lid_b = doc.reserve_label_id(name="B")
+    doc.labels_3d[0, 0:2, 0:2] = lid_a
+    doc.labels_3d[2, 5:7, 5:7] = lid_b
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid_a))
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid_b))
+
+    assert app.layer_stack.merge_rois([0, 1]) is True
+
+    assert len(app.layer_stack.roi_layers) == 1
+    assert app.layer_stack.roi_layers[0]._label_id == lid_a
+    assert not (doc.labels_3d == lid_b).any()
+    assert lid_b not in doc.labels_meta
+    # A's original voxels + B's voxels now both carry lid_a.
+    assert (doc.labels_3d == lid_a).sum() == 4 + 4
+
+
+def test_merge_mixed_2d_3d_rejected(app, qapp):
+    """Mixing 2D and 3D ROIs in merge must no-op and return False."""
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id()
+    doc.labels_3d[0, 0, 0] = lid
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid))
+    app.layer_stack.add_roi(ROILayer("flat", doc.labels_3d.shape[2], doc.labels_3d.shape[1]))
+
+    ok = app.layer_stack.merge_rois([0, 1])
+
+    assert ok is False
+    assert len(app.layer_stack.roi_layers) == 2
+    assert (doc.labels_3d == lid).any()
+    assert lid in doc.labels_meta
+
+
+def test_remove_3d_roi_undo_restores_voxels(app, qapp):
+    """RemoveROIUndoCommand.undo() must rehydrate voxels + meta for 3D ROIs."""
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="restored", opacity=180)
+    doc.labels_3d[1, 2:5, 3:6] = lid
+    vroi = VolumeROILayer(doc, lid)
+    app.layer_stack.roi_layers.append(vroi)
+
+    app._view3d_panel = MagicMock()
+    app.canvas.set_active_layer(vroi)
+    try:
+        app.clear_active_roi()
+        # Voxels and meta must be gone.
+        assert not (doc.labels_3d == lid).any()
+        assert lid not in doc.labels_meta
+        app.undo()
+    finally:
+        app._view3d_panel = None
+
+    assert len(app.layer_stack.roi_layers) == 1
+    assert lid in doc.labels_meta
+    assert doc.labels_meta[lid]["name"] == "restored"
+    assert doc.labels_meta[lid]["opacity"] == 180
+    # Voxels in the bbox are restored exactly.
+    mask = (doc.labels_3d == lid)
+    assert mask.sum() == 9
+    assert mask[1, 2:5, 3:6].all()
+
+
+def test_volume_stroke_undo_round_trip():
+    """VolumeStrokeUndoCommand must restore before-state on undo, after on redo."""
+    from montaris.core.undo import VolumeStrokeUndoCommand
+    vol = np.zeros((4, 6, 6), dtype=np.uint16)
+    doc = _doc_with_volume("d", vol)
+    doc.ensure_labels_3d()
+    # Simulate a stroke that wrote label 7 into a 2x3x3 region.
+    bbox = (1, 3, 2, 5, 1, 4)
+    before = np.ascontiguousarray(doc.labels_3d[1:3, 2:5, 1:4])
+    doc.labels_3d[1:3, 2:5, 1:4] = 7
+    after = np.ascontiguousarray(doc.labels_3d[1:3, 2:5, 1:4])
+
+    cmd = VolumeStrokeUndoCommand(doc, bbox, before, after)
+    cmd.undo()
+    assert not (doc.labels_3d == 7).any()
+    cmd.redo()
+    assert (doc.labels_3d == 7).sum() == 2 * 3 * 3
+
+
+def test_volume_fill_undo_round_trip():
+    """VolumeFillUndoCommand must swap old_label/new_label on the mask voxels."""
+    from montaris.core.undo import VolumeFillUndoCommand
+    vol = np.zeros((3, 5, 5), dtype=np.uint16)
+    doc = _doc_with_volume("d", vol)
+    doc.ensure_labels_3d()
+    # Pretend old_label=3 was there; fill relabeled to new_label=9.
+    doc.labels_3d[1, 1:4, 1:4] = 9
+    bbox = (1, 2, 1, 4, 1, 4)
+    mask_crop = np.ones((1, 3, 3), dtype=bool)
+    cmd = VolumeFillUndoCommand(doc, bbox, mask_crop, old_label=3, new_label=9)
+
+    cmd.undo()
+    assert (doc.labels_3d[1, 1:4, 1:4] == 3).all()
+    assert not (doc.labels_3d == 9).any()
+    cmd.redo()
+    assert (doc.labels_3d[1, 1:4, 1:4] == 9).all()
+
+
+def test_stroke_before_snapshot_grows_across_non_contiguous_stamps(app, qapp):
+    """``_extend_stroke_before`` must preserve pre-stroke values as the bbox grows.
+
+    Regression guard for the ``_dirty_bbox`` trap — the render-throttle
+    bbox is cleared every tick, which previously dropped voxels touched
+    across non-contiguous drags. ``_stroke_before`` must retain the
+    original pre-stroke values even after the stroke expands into new
+    regions.
+    """
+    if not VISPY_AVAILABLE:
+        pytest.skip("vispy not installed")
+    vol = np.zeros((6, 12, 12), dtype=np.uint8)
+    doc = _doc_with_volume("d", vol)
+    doc.ensure_labels_3d()
+    # Seed some distinctive pre-stroke values the test can verify survived.
+    doc.labels_3d[1, 1, 1] = 11
+    doc.labels_3d[4, 8, 8] = 22
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))], documents=[doc])
+    try:
+        panel._primary_doc = doc
+        # First stamp at (1,1,1) captures the "11" value.
+        panel._extend_stroke_before(doc.labels_3d, (1, 2, 1, 2, 1, 2))
+        doc.labels_3d[1, 1, 1] = 99  # simulate stamp writing the region
+        # Second stamp at (4,8,8) extends bbox. The pre-stroke value 22
+        # must be captured from labels_3d (still 22 there), and the
+        # first stamp's original 11 must NOT be overwritten by the post-
+        # stroke 99.
+        panel._extend_stroke_before(doc.labels_3d, (4, 5, 8, 9, 8, 9))
+        z0, z1, y0, y1, x0, x1 = panel._stroke_bbox
+        # Union bbox covers both stamps.
+        assert (z0, z1, y0, y1, x0, x1) == (1, 5, 1, 9, 1, 9)
+        before = panel._stroke_before
+        # (1,1,1) in absolute coords → (0,0,0) in stroke-bbox coords.
+        assert before[0, 0, 0] == 11
+        # (4,8,8) in absolute → (3,7,7) in stroke-bbox coords.
+        assert before[3, 7, 7] == 22
+    finally:
+        panel.close()
+
+
+def test_paint_stroke_undo_push_emits_compound_for_new_roi(app, qapp):
+    """A new-ROI paint stroke must push a CompoundUndo[Add+Stroke] command."""
+    if not VISPY_AVAILABLE:
+        pytest.skip("vispy not installed")
+    from montaris.core.undo import (
+        VolumeStrokeUndoCommand, AddVolumeROIUndoCommand,
+    )
+    from montaris.core.multi_undo import CompoundUndoCommand
+
+    vol = np.zeros((4, 10, 10), dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+
+    panel = View3DPanel(
+        app._central_stack, channels=[("c", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        panel.label_added.connect(app._on_3d_label_added)
+        pushed = []
+        panel.undo_pushed.connect(pushed.append)
+
+        # Simulate a new-ROI paint: reserve a label id, pretend _stamp_brush
+        # snapshotted pre-stroke + wrote voxels, then run _finish_drag(emit=True).
+        lid = doc.reserve_label_id()
+        panel._primary_doc = doc
+        panel._drag_active = True
+        panel._drag_mode = 'paint'
+        panel._drag_label_id = lid
+        panel._drag_extends_existing = False
+        # Pretend we stamped: set stroke_before to pre-stroke crop, write
+        # voxels, then finish.
+        bbox = (1, 2, 2, 5, 3, 6)
+        panel._stroke_bbox = bbox
+        panel._stroke_before = np.ascontiguousarray(doc.labels_3d[1:2, 2:5, 3:6])
+        doc.labels_3d[1, 2:5, 3:6] = lid
+
+        panel._finish_drag(emit=True)
+
+        assert len(pushed) == 1
+        cmd = pushed[0]
+        assert isinstance(cmd, CompoundUndoCommand)
+        kinds = [type(c).__name__ for c in cmd.commands]
+        assert "AddVolumeROIUndoCommand" in kinds
+        assert "VolumeStrokeUndoCommand" in kinds
+
+        # Ctrl+Z must reverse both voxels AND the wrapper/meta.
+        cmd.undo()
+        assert not (doc.labels_3d == lid).any()
+        assert lid not in doc.labels_meta
+        assert all(getattr(r, '_label_id', None) != lid for r in app.layer_stack.roi_layers)
+
+        cmd.redo()
+        assert (doc.labels_3d == lid).sum() == 9
+        assert lid in doc.labels_meta
+    finally:
+        panel.close()
+
+
+def test_erase_stroke_undo_restores_voxels(app, qapp):
+    """Erase stroke: Ctrl+Z must put the erased voxels back (no Add)."""
+    if not VISPY_AVAILABLE:
+        pytest.skip("vispy not installed")
+    from montaris.core.undo import VolumeStrokeUndoCommand
+
+    vol = np.zeros((3, 8, 8), dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+
+    lid = doc.reserve_label_id()
+    doc.labels_3d[1, 2:5, 2:5] = lid
+
+    panel = View3DPanel(
+        app._central_stack, channels=[("c", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        pushed = []
+        panel.undo_pushed.connect(pushed.append)
+
+        # Simulate an erase stroke over those voxels.
+        panel._primary_doc = doc
+        panel._drag_active = True
+        panel._drag_mode = 'erase'
+        panel._drag_label_id = 0
+        panel._drag_extends_existing = False
+        bbox = (1, 2, 2, 5, 2, 5)
+        panel._stroke_bbox = bbox
+        panel._stroke_before = np.ascontiguousarray(doc.labels_3d[1:2, 2:5, 2:5])
+        doc.labels_3d[1, 2:5, 2:5] = 0
+
+        panel._finish_drag(emit=False)
+
+        assert len(pushed) == 1
+        assert isinstance(pushed[0], VolumeStrokeUndoCommand)
+        pushed[0].undo()
+        assert (doc.labels_3d == lid).sum() == 9
+    finally:
+        panel.close()
+
+
+# ─── Phase 3: session persistence for 3D ROIs ────────────────────────
+
+
+def test_save_session_skips_volume_roi_from_roi_files(app, qapp, tmp_path):
+    """VolumeROILayers don't leak into the per-slice .roi file list."""
+    import os
+    from montaris.app import _save_session_from_snapshots
+
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="vol3d", color=(10, 20, 30))
+    doc.labels_3d[1, 2:5, 2:5] = lid
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid))
+
+    session_dir = tmp_path / "session"
+    # Matches the real code path: VolumeROILayers are filtered out of
+    # snapshots before the worker runs.
+    snapshots = []
+    meta = {
+        'version': 1, 'timestamp': 'now', 'image_stem': 'stack',
+        'image_path': '', 'downsample_factor': 1, 'original_shape': None,
+        'canvas_shape': None, 'channel_names': ['stack'], 'roi_count': 1,
+        'roi_names': [], 'roi_colors': [], 'roi_opacities': [],
+    }
+    _save_session_from_snapshots(
+        str(session_dir), snapshots, meta,
+        (doc.labels_3d.copy(), dict(doc.labels_meta)),
+    )
+
+    # No .roi files should have been written for the 3D ROI.
+    roi_files = [f for f in os.listdir(session_dir) if f.endswith('.roi')]
+    assert roi_files == []
+    assert (session_dir / "labels.tif").exists()
+    assert (session_dir / "labels.labels.json").exists()
+
+
+def test_session_round_trip_restores_labels_and_meta(app, qapp, tmp_path):
+    """Save + restore reconstructs labels_3d, labels_meta, and VolumeROILayer wrappers."""
+    import os
+    import json as _json
+    from montaris.app import _save_session_from_snapshots
+
+    doc = _setup_3d_app(app)
+    # Promote to uint16 so we also cover the dtype-preservation path on reload.
+    doc.promote_labels_dtype(np.uint16)
+    lid_a = doc.reserve_label_id(name="alpha", color=(10, 20, 30), opacity=150)
+    lid_b = doc.reserve_label_id(name="beta", color=(40, 50, 60), opacity=200)
+    doc.labels_3d[1, 2:5, 2:5] = lid_a
+    doc.labels_3d[2, 4:7, 4:7] = lid_b
+    expected_a = (doc.labels_3d == lid_a).sum()
+    expected_b = (doc.labels_3d == lid_b).sum()
+    labels_snapshot = doc.labels_3d.copy()
+
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid_a))
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid_b))
+
+    session_dir = tmp_path / "session_rt"
+    meta = {
+        'version': 1, 'timestamp': 'now', 'image_stem': 'stack',
+        'image_path': '', 'downsample_factor': 1, 'original_shape': None,
+        'canvas_shape': None, 'channel_names': ['stack'], 'roi_count': 2,
+        'roi_names': [], 'roi_colors': [], 'roi_opacities': [],
+    }
+    _save_session_from_snapshots(
+        str(session_dir), [], meta,
+        (labels_snapshot, dict(doc.labels_meta)),
+    )
+
+    # Read back the session.json written by the worker.
+    with open(session_dir / 'session.json') as f:
+        saved_meta = _json.load(f)
+    assert saved_meta.get('labels_file') == 'labels.tif'
+    assert list(saved_meta.get('labels_shape', [])) == list(doc.labels_3d.shape)
+
+    # Wipe live state to simulate a fresh session — but keep the doc
+    # attached so _restore_session_volume_labels can target it.
+    app.layer_stack.roi_layers.clear()
+    doc.labels_3d = None
+    doc.labels_meta = {}
+    doc.labels_next_id = 1
+
+    added = app._restore_session_volume_labels(str(session_dir), saved_meta, doc)
+    assert added == 2
+    assert doc.labels_3d is not None
+    assert doc.labels_3d.shape == labels_snapshot.shape
+    assert (doc.labels_3d == lid_a).sum() == expected_a
+    assert (doc.labels_3d == lid_b).sum() == expected_b
+
+    # labels_meta values survive round-trip (names, colors, opacities).
+    assert doc.labels_meta[lid_a]['name'] == "alpha"
+    assert tuple(doc.labels_meta[lid_a]['color']) == (10, 20, 30)
+    assert doc.labels_meta[lid_a]['opacity'] == 150
+    assert doc.labels_meta[lid_b]['name'] == "beta"
+
+    # labels_next_id advanced past both ids so new paints don't collide.
+    assert doc.labels_next_id == max(lid_a, lid_b) + 1
+
+    # VolumeROILayer wrappers were re-created for each restored id.
+    vol_layers = [r for r in app.layer_stack.roi_layers if getattr(r, 'is_volume', False)]
+    assert {l.label_id for l in vol_layers} == {lid_a, lid_b}
+
+
+def test_restore_session_volume_labels_noop_without_labels_file(app, qapp, tmp_path):
+    """A session meta without labels_file leaves the doc untouched."""
+    doc = _setup_3d_app(app)
+    original = doc.labels_3d
+    result = app._restore_session_volume_labels(str(tmp_path), {}, doc)
+    assert result == 0
+    assert doc.labels_3d is original
+
+
+# ─── Phase 4: nav/properties + 2D-only tool guards ─────────────────────
+
+
+def test_volume_roi_voxel_count_reflects_whole_volume(app, qapp):
+    """voxel_count() counts voxels across every Z-slice, not the current one."""
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="full")
+    doc.labels_3d[0, 1:3, 1:3] = lid  # 4 voxels on z=0
+    doc.labels_3d[2, 4:6, 4:7] = lid  # 6 voxels on z=2
+    layer = VolumeROILayer(doc, lid)
+    assert layer.voxel_count() == 10
+
+
+def test_volume_roi_get_volume_bbox_spans_all_occupied_axes(app, qapp):
+    """get_volume_bbox returns (z1,z2,y1,y2,x1,x2) over all occupied voxels."""
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="bbox")
+    doc.labels_3d[1, 2, 3] = lid
+    doc.labels_3d[3, 5, 7] = lid
+    layer = VolumeROILayer(doc, lid)
+    assert layer.get_volume_bbox() == (1, 4, 2, 6, 3, 8)
+
+
+def test_volume_roi_get_volume_bbox_none_for_empty_label(app, qapp):
+    """Empty label returns None so callers can distinguish zero-sized ROIs."""
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="empty")
+    layer = VolumeROILayer(doc, lid)
+    assert layer.get_volume_bbox() is None
+    assert layer.voxel_count() == 0
+
+
+def test_properties_panel_shows_voxels_for_volume_roi(app, qapp):
+    """Properties panel swaps the label 'Pixels:' → 'Voxels:' for 3D ROIs."""
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="vol")
+    doc.labels_3d[1, 0:3, 0:3] = lid
+    wrapper = VolumeROILayer(doc, lid)
+
+    app.properties_panel.set_layer(wrapper)
+    assert app.properties_panel.pixel_count_row_label.text() == "Voxels:"
+    assert app.properties_panel.pixel_count_label.text() == "9"
+
+    # Swap to a 2D ROI — label should flip back to 'Pixels:'.
+    roi2d = ROILayer("r", 8, 9)
+    roi2d.mask[0, 0] = 1
+    app.properties_panel.set_layer(roi2d)
+    assert app.properties_panel.pixel_count_row_label.text() == "Pixels:"
+
+
+def test_move_tool_ignores_volume_layers(app, qapp):
+    """Move tool shouldn't register a 3D ROI as a drag target."""
+    from montaris.tools.move import MoveTool
+
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="vol")
+    doc.labels_3d[1, 0:3, 0:3] = lid
+    wrapper = VolumeROILayer(doc, lid)
+    app.layer_stack.roi_layers.append(wrapper)
+
+    tool = MoveTool(app)
+    # on_press is a no-op for volume layers — nothing to move.
+    tool.on_press(MagicMock(x=lambda: 1, y=lambda: 1), wrapper, app.canvas)
+    # No marching-ants items should have been registered for the volume layer.
+    assert not getattr(tool, '_dragging', False)
+
+
+def test_transform_tool_ignores_volume_layers(app, qapp):
+    """Transform tool refuses to build handles for a 3D ROI."""
+    from montaris.tools.transform import TransformTool
+
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="vol")
+    doc.labels_3d[1, 0:3, 0:3] = lid
+    wrapper = VolumeROILayer(doc, lid)
+
+    tool = TransformTool(app)
+    tool.on_activate(wrapper, app.canvas)
+    # Handles are only created for 2D ROIs; volume layers short-circuit.
+    assert tool._bbox_item is None
+    assert tool._target_layers == []
+
+
+def test_restore_session_volume_labels_rejects_shape_mismatch(app, qapp, tmp_path):
+    """Mismatched labels shape is skipped with a warning, not raised."""
+    from montaris.io.volume_labels import save_volume_labels
+
+    doc = _setup_3d_app(app)
+    # Write a labels file with a deliberately wrong shape.
+    bad = np.zeros((doc.volume_data.shape[0] + 1,) + doc.volume_data.shape[1:],
+                    dtype=np.uint16)
+    bad[0, 0, 0] = 1
+    save_volume_labels(str(tmp_path / "labels.tif"), bad, {1: {
+        'name': 'x', 'color': (1, 2, 3), 'opacity': 128,
+        'visible': True, 'fill_mode': 'solid',
+    }})
+
+    meta = {'labels_file': 'labels.tif'}
+    added = app._restore_session_volume_labels(str(tmp_path), meta, doc)
+    assert added == 0
+    # doc.labels_3d shape was left matching the doc volume (not the bad file).
+    assert doc.labels_3d.shape == doc.volume_data.shape
+
+
+# ─── Phase 5: additional regression coverage ────────────────────────
+
+
+def test_merge_cross_doc_3d_rois_rejected(app, qapp):
+    """Merge across distinct 3D docs must no-op and leave both docs intact."""
+    doc_a = _setup_3d_app(app)
+    # Spin up a second volume-bearing doc with its own labels volume.
+    vol_b = np.zeros((3, 6, 7), dtype=np.uint8)
+    mp_b = vol_b.max(axis=0)
+    layer_b = ImageLayer("stack_b", mp_b)
+    doc_b = MontageDocument(
+        name="stack_b",
+        image_layer=layer_b,
+        downsample_factor=1,
+        original_shape=mp_b.shape,
+        volume_data=vol_b,
+        volume_axes='ZYX',
+    )
+    doc_b.ensure_labels_3d()
+    app._documents.append(doc_b)
+
+    lid_a = doc_a.reserve_label_id(name="alpha")
+    lid_b = doc_b.reserve_label_id(name="beta")
+    doc_a.labels_3d[0, 0, 0] = lid_a
+    doc_b.labels_3d[0, 0, 0] = lid_b
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc_a, lid_a))
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc_b, lid_b))
+
+    ok = app.layer_stack.merge_rois([0, 1])
+
+    assert ok is False
+    assert len(app.layer_stack.roi_layers) == 2
+    assert lid_a in doc_a.labels_meta
+    assert lid_b in doc_b.labels_meta
+    assert (doc_a.labels_3d == lid_a).any()
+    assert (doc_b.labels_3d == lid_b).any()
+
+
+def test_paint_refuses_when_no_3d_roi_selected(app, qapp, monkeypatch):
+    """Paint with no active 3D ROI must not auto-reserve a new label id.
+
+    Regression: paint used to silently allocate a fresh label id + wrapper
+    whenever no ROI was selected, surprising users who expected paint
+    strokes to extend the ROI they had highlighted in the sidebar.
+    """
+    if not VISPY_AVAILABLE:
+        pytest.skip("vispy not installed")
+    from PySide6.QtWidgets import QMessageBox
+
+    doc = _setup_3d_app(app)
+    panel = View3DPanel(
+        None, channels=[("c", doc.volume_data, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        # Force the panel into paint mode with NO selected 3D ROI. Stub out
+        # the ray pick so we don't need a real GL context to produce a seed.
+        panel._tool_mode = 'paint'
+        panel._primary_doc = doc
+        panel._active_volume_roi_id = None
+        panel._volumes = [MagicMock()]  # _on_canvas_mouse_press early-outs if empty
+        panel._ray_pick_seed = lambda *a, **k: np.array([1, 1, 1])
+
+        # Capture the "No 3D ROI selected" dialog call so it doesn't pop up.
+        info_calls = []
+        monkeypatch.setattr(
+            QMessageBox, "information",
+            lambda *a, **k: info_calls.append(a) or QMessageBox.Ok,
+        )
+
+        pre_next_id = doc.labels_next_id
+        pre_meta = dict(doc.labels_meta)
+
+        event = MagicMock()
+        event.button = 1
+        event.pos = (0, 0)
+        panel._on_canvas_mouse_press(event)
+
+        # No label id was reserved, no voxels were written, and a dialog
+        # was shown guiding the user to add/select a 3D ROI first.
+        assert doc.labels_next_id == pre_next_id
+        assert doc.labels_meta == pre_meta
+        assert not panel._drag_active
+        assert len(info_calls) == 1
+
+        # Now select a 3D ROI — the next press should go through.
+        lid = doc.reserve_label_id(name="existing")
+        panel._active_volume_roi_id = lid
+        info_calls.clear()
+        panel._on_canvas_mouse_press(event)
+        assert panel._drag_active
+        assert panel._drag_label_id == lid
+        assert panel._drag_extends_existing is True
+        assert info_calls == []  # no dialog this time
+        # Teardown the drag so the panel can close cleanly.
+        panel._finish_drag(emit=False)
+    finally:
+        panel.close()
+
+
+def test_remove_selected_drops_volume_roi_voxels_and_meta(app, qapp, monkeypatch):
+    """Delete button on a 3D ROI must zero voxels + drop meta, not just the wrapper.
+
+    Regression: before the fix, _remove_selected popped the wrapper from
+    roi_layers but left the voxels in labels_3d — so the ROI vanished from
+    the sidebar but kept rendering in the 3D viewer and got written to
+    the next session save.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="to-delete", opacity=180)
+    doc.labels_3d[1, 2:4, 2:4] = lid
+    wrapper = VolumeROILayer(doc, lid)
+    app.layer_stack.roi_layers.append(wrapper)
+
+    # Auto-accept the Delete confirmation dialog.
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.Yes)
+
+    # Populate the sidebar so the Delete button can find the wrapper, then
+    # select its row. Row 0 is the image layer header; row 1 is the ROI.
+    app.layer_panel.refresh()
+    row = 1 if app.layer_stack.image_layer else 0
+    app.layer_panel.list_widget.setCurrentRow(row)
+
+    app._view3d_panel = MagicMock()
+    try:
+        app.layer_panel._remove_selected()
+        # Wrapper gone from the sidebar AND voxels gone from the volume AND
+        # meta dropped. The 3D panel was told to refresh so vispy reuploads.
+        assert app.layer_stack.roi_layers == []
+        assert lid not in doc.labels_meta
+        assert not (doc.labels_3d == lid).any()
+        assert app._view3d_panel.refresh_labels.called
+
+        # Undo brings voxels + meta + wrapper back.
+        app.undo()
+        assert lid in doc.labels_meta
+        assert doc.labels_meta[lid]["opacity"] == 180
+        assert (doc.labels_3d == lid).sum() == 4
+        assert len(app.layer_stack.roi_layers) == 1
+    finally:
+        app._view3d_panel = None
+
+
+def test_clear_all_removes_volume_rois_and_is_undoable(app, qapp, monkeypatch):
+    """Layer panel's Clear All must drop VolumeROILayers and be reversible."""
+    from PySide6.QtWidgets import QMessageBox
+
+    doc = _setup_3d_app(app)
+    lid = doc.reserve_label_id(name="go-and-come-back", opacity=180)
+    doc.labels_3d[1, 2:4, 2:4] = lid
+    wrapper = VolumeROILayer(doc, lid)
+    app.layer_stack.roi_layers.append(wrapper)
+    # Also drop a flat ROI so we verify the mixed-path clear.
+    flat = ROILayer("flat", doc.labels_3d.shape[2], doc.labels_3d.shape[1])
+    flat.mask[0, 0] = 1
+    app.layer_stack.add_roi(flat)
+
+    # Auto-accept the "Clear All" confirmation dialog.
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.Yes)
+
+    app._view3d_panel = MagicMock()
+    try:
+        app.layer_panel._clear_all()
+        assert app.layer_stack.roi_layers == []
+        assert lid not in doc.labels_meta
+        assert not (doc.labels_3d == lid).any()
+
+        app.undo()
+        # 3D ROI restored with its voxels + meta.
+        assert lid in doc.labels_meta
+        assert doc.labels_meta[lid]["opacity"] == 180
+        assert (doc.labels_3d == lid).sum() == 4
+        # Wrapper + flat are back.
+        assert len(app.layer_stack.roi_layers) == 2
+    finally:
+        app._view3d_panel = None
+
+
+def test_first_paint_vs_extend_undo_is_differentiated(app, qapp):
+    """First paint pushes a compound; extending an existing ROI pushes just a stroke."""
+    if not VISPY_AVAILABLE:
+        pytest.skip("vispy not installed")
+    from montaris.core.undo import VolumeStrokeUndoCommand
+    from montaris.core.multi_undo import CompoundUndoCommand
+
+    vol = np.zeros((4, 10, 10), dtype=np.uint8)
+    mp = vol.max(axis=0)
+    layer = ImageLayer("stack", mp)
+    app.layer_stack.set_image(layer)
+    doc = MontageDocument(
+        name="stack",
+        image_layer=layer,
+        downsample_factor=1,
+        original_shape=mp.shape,
+        volume_data=vol,
+        volume_axes='ZYX',
+    )
+    doc.ensure_labels_3d()
+    app._documents = [doc]
+    app._active_doc_index = 0
+
+    panel = View3DPanel(
+        app._central_stack, channels=[("c", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        panel.label_added.connect(app._on_3d_label_added)
+        pushed = []
+        panel.undo_pushed.connect(pushed.append)
+
+        # First paint: brand-new label, no existing wrapper.
+        lid = doc.reserve_label_id()
+        panel._primary_doc = doc
+        panel._drag_active = True
+        panel._drag_mode = 'paint'
+        panel._drag_label_id = lid
+        panel._drag_extends_existing = False
+        panel._stroke_bbox = (1, 2, 1, 4, 1, 4)
+        panel._stroke_before = doc.labels_3d[1:2, 1:4, 1:4].copy()
+        doc.labels_3d[1, 1:4, 1:4] = lid
+        panel._finish_drag(emit=True)
+        assert isinstance(pushed[-1], CompoundUndoCommand)
+
+        # Second paint on the SAME id: extending an existing wrapper
+        # should push only a VolumeStrokeUndoCommand (no Add wrapping).
+        panel._drag_active = True
+        panel._drag_mode = 'paint'
+        panel._drag_label_id = lid
+        panel._drag_extends_existing = True
+        panel._stroke_bbox = (2, 3, 5, 7, 5, 7)
+        panel._stroke_before = doc.labels_3d[2:3, 5:7, 5:7].copy()
+        doc.labels_3d[2, 5:7, 5:7] = lid
+        panel._finish_drag(emit=True)
+
+        assert isinstance(pushed[-1], VolumeStrokeUndoCommand)
+    finally:
+        panel.close()
+
+
+def test_export_volume_labels_falls_back_to_sibling_doc(app, qapp, tmp_path, monkeypatch):
+    """Export works when active doc is an empty z-stack slice wrapper.
+
+    In z-stack "all" mode, each Z-slice gets its own MontageDocument but
+    only the 3D viewer's primary doc actually holds the labels. Export
+    used to fail with "No 3D ROIs" whenever the user had scrolled off
+    that primary doc — we now search all docs for one with labels.
+    """
+    import os
+    from PySide6.QtWidgets import QFileDialog
+
+    # doc_a is the "primary" — where 3D paint wrote labels.
+    doc_a = _setup_3d_app(app)
+    doc_a.name = "primary"
+    lid = doc_a.reserve_label_id(name="painted", color=(5, 6, 7), opacity=128)
+    doc_a.labels_3d[1, 1:3, 1:3] = lid
+
+    # doc_b simulates a sibling slice doc with no labels attached (the one
+    # the user happens to be viewing in 2D when they hit Export).
+    vol_b = doc_a.volume_data  # shared volume in "all" mode
+    layer_b = ImageLayer("slice", vol_b[0])
+    doc_b = MontageDocument(
+        name="slice_z0",
+        image_layer=layer_b,
+        downsample_factor=1,
+        original_shape=vol_b[0].shape,
+        volume_data=vol_b,
+        volume_axes='ZYX',
+    )
+    app._documents = [doc_a, doc_b]
+    app._active_doc_index = 1  # active doc is the empty sibling
+
+    out_path = str(tmp_path / "exported.tif")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (out_path, "")))
+
+    app.export_volume_labels()
+    # The labels.tif should exist — export did not bail with "No 3D ROIs".
+    assert os.path.isfile(out_path)
+    # Sidecar was written too.
+    assert os.path.isfile(str(tmp_path / "exported.labels.json"))
+
+    # Round-trip verifies the right doc's labels were exported.
+    from montaris.io.volume_labels import load_volume_labels
+    loaded, loaded_meta = load_volume_labels(out_path)
+    assert (loaded == lid).sum() == 4
+    assert loaded_meta[lid]["name"] == "painted"
+
+
+def test_session_roundtrip_through_app_api(app, qapp, tmp_path):
+    """End-to-end: app.save_session_progress + _restore_session_volume_labels."""
+    import os
+
+    doc = _setup_3d_app(app)
+    doc.image_path = str(tmp_path / "stack.tif")
+    # Make the session code think the image lives here — the folder is
+    # the one it'll write the timestamped session into.
+    lid = doc.reserve_label_id(name="persisted", color=(7, 8, 9), opacity=123)
+    doc.labels_3d[1, 1:4, 2:5] = lid
+    app.layer_stack.roi_layers.append(VolumeROILayer(doc, lid))
+
+    app.save_session_progress()
+    # The worker writes asynchronously; drain the pool before inspecting.
+    from montaris.core.workers import get_pool
+    get_pool().shutdown(wait=True)
+    # Revive the pool so subsequent tests aren't starved.
+    import montaris.core.workers as _w
+    _w._pool = None
+
+    session_dir = app._session_dir
+    assert session_dir is not None and os.path.isdir(session_dir)
+    assert os.path.isfile(os.path.join(session_dir, 'labels.tif'))
+
+    # Wipe and restore.
+    doc.labels_3d = None
+    doc.labels_meta = {}
+    app.layer_stack.roi_layers.clear()
+    import json as _json
+    with open(os.path.join(session_dir, 'session.json')) as f:
+        saved = _json.load(f)
+    added = app._restore_session_volume_labels(session_dir, saved, doc)
+    assert added == 1
+    assert doc.labels_meta[lid]["name"] == "persisted"
+    assert (doc.labels_3d == lid).sum() == 9

@@ -169,34 +169,45 @@ def test_tool_combo_has_paint_and_erase(qapp):
     try:
         items = [panel._tool_combo.itemText(i)
                  for i in range(panel._tool_combo.count())]
-        assert items == ["Navigate", "Fill", "Paint", "Erase"]
+        assert items == ["Navigate", "Fill", "Wand", "Paint", "Erase"]
     finally:
         panel.close()
 
 
 def test_brush_spin_enabled_only_in_paint_or_erase(qapp):
-    """Brush radius control gates on/off with the tool mode."""
+    """Brush + Wand controls gate on/off with the tool mode."""
     doc, vol = _make_doc_with_volume((4, 8, 8))
     panel = _make_panel(qapp, doc, vol)
     try:
-        # Navigate → disabled
+        # Navigate → everything off
         panel._tool_combo.setCurrentText("Navigate")
         QApplication.processEvents()
         assert panel._brush_spin.isEnabled() is False
+        assert panel._tol_slider.isEnabled() is False
+        assert panel._fill_channel_combo.isEnabled() is False
 
-        # Fill → disabled (napari-style Fill is label-based, no tolerance)
+        # Fill → everything off (napari-style Fill is label-based, no tolerance)
         panel._tool_combo.setCurrentText("Fill")
         QApplication.processEvents()
         assert panel._brush_spin.isEnabled() is False
         assert panel._tol_slider.isEnabled() is False
+        assert panel._fill_channel_combo.isEnabled() is False
 
-        # Paint → enabled
+        # Wand → Channel + Tolerance on, Brush off
+        panel._tool_combo.setCurrentText("Wand")
+        QApplication.processEvents()
+        assert panel._brush_spin.isEnabled() is False
+        assert panel._tol_slider.isEnabled() is True
+        assert panel._fill_channel_combo.isEnabled() is True
+
+        # Paint → Brush on, Wand off
         panel._tool_combo.setCurrentText("Paint")
         QApplication.processEvents()
         assert panel._brush_spin.isEnabled() is True
         assert panel._tol_slider.isEnabled() is False
+        assert panel._fill_channel_combo.isEnabled() is False
 
-        # Erase → enabled
+        # Erase → Brush on
         panel._tool_combo.setCurrentText("Erase")
         QApplication.processEvents()
         assert panel._brush_spin.isEnabled() is True
@@ -438,6 +449,444 @@ def test_fill_only_affects_connected_component(qapp):
         assert doc.labels_3d[2, 3, 3] == lid_b
         # Blob 2 untouched.
         assert doc.labels_3d[4, 8, 16] == lid_a
+    finally:
+        panel.close()
+
+
+def test_wand_refuses_without_selected_roi(qapp, monkeypatch):
+    """Wand requires a selected 3D ROI — no auto-reserve."""
+    doc, vol = _make_doc_with_volume((6, 12, 12))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel.set_active_volume_roi_id(None)
+        infos = []
+        monkeypatch.setattr(
+            QMessageBox, "information",
+            staticmethod(lambda *a, **k: infos.append(a)),
+        )
+        panel._tool_combo.setCurrentText("Wand")
+        panel._run_wand((3, 6, 6))
+        assert infos, "expected guidance popup when nothing is selected"
+        assert len(doc.labels_meta) == 0
+    finally:
+        panel.close()
+
+
+def test_wand_flood_fills_by_intensity_into_selected_roi(qapp):
+    """Wand flood-fills voxels within tolerance of the seed intensity,
+    writing the selected ROI's label id into currently-empty voxels."""
+    # Build a volume with a bright dendrite-like region surrounded by dark.
+    shape = (8, 16, 16)
+    vol = np.zeros(shape, dtype=np.uint8)
+    vol[3:6, 5:10, 5:10] = 200  # "dendrite" blob
+    vol[3:6, 5:10, 10:14] = 205  # continuation, within tolerance
+    # A disconnected bright blob — wand should NOT reach it.
+    vol[0:2, 0:3, 0:3] = 210
+    mp = vol.max(axis=0)
+    doc = MontageDocument(name="wand", image_layer=ImageLayer("w", mp))
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+
+    panel = View3DPanel(
+        None, channels=[("ch0", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        lid = doc.reserve_label_id(name="dendrite")
+        panel.set_active_volume_roi_id(lid)
+        panel._tool_combo.setCurrentText("Wand")
+        panel._fill_tolerance = 20  # 200±20 covers 200 and 205
+
+        panel._run_wand((4, 7, 7))
+
+        # Both connected bright slabs got labeled.
+        assert doc.labels_3d[4, 7, 7] == lid
+        assert doc.labels_3d[4, 7, 12] == lid
+        # Disconnected blob wasn't reached.
+        assert doc.labels_3d[1, 1, 1] == 0
+        # Background stayed 0.
+        assert doc.labels_3d[0, 15, 15] == 0
+    finally:
+        panel.close()
+
+
+def test_wand_does_not_clobber_other_rois(qapp):
+    """Wand writes only into background (0) voxels — existing ROIs survive."""
+    shape = (6, 12, 12)
+    vol = np.zeros(shape, dtype=np.uint8)
+    vol[2:5, 3:9, 3:9] = 180  # uniform bright region
+    doc = MontageDocument(
+        name="w", image_layer=ImageLayer("w", vol.max(axis=0)),
+    )
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+
+    panel = View3DPanel(
+        None, channels=[("ch0", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        lid_other = doc.reserve_label_id(name="other")
+        lid_target = doc.reserve_label_id(name="target")
+        doc.labels_3d[3, 5, 5] = lid_other  # one voxel already owned
+        panel.set_active_volume_roi_id(lid_target)
+
+        panel._tool_combo.setCurrentText("Wand")
+        panel._fill_tolerance = 5
+        panel._run_wand((3, 4, 4))
+
+        # Target ROI got voxels in the bright region...
+        assert (doc.labels_3d == lid_target).sum() > 0
+        # ...but the other ROI's claimed voxel was preserved.
+        assert doc.labels_3d[3, 5, 5] == lid_other
+    finally:
+        panel.close()
+
+
+def test_wand_aborts_when_tolerance_floods_half_the_volume(qapp, monkeypatch):
+    """Runaway guard: tolerance so high that >= 50% of voxels flood gets refused."""
+    shape = (6, 10, 10)
+    vol = np.full(shape, 100, dtype=np.uint8)  # uniform → any seed floods everything
+    doc = MontageDocument(
+        name="w", image_layer=ImageLayer("w", vol.max(axis=0)),
+    )
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+
+    panel = View3DPanel(
+        None, channels=[("ch0", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        lid = doc.reserve_label_id()
+        panel.set_active_volume_roi_id(lid)
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox, "warning",
+            staticmethod(lambda *a, **k: warnings.append(a)),
+        )
+        panel._tool_combo.setCurrentText("Wand")
+        panel._fill_tolerance = 100
+
+        panel._run_wand((3, 5, 5))
+
+        assert warnings, "expected runaway-guard warning"
+        # No voxels were written.
+        assert (doc.labels_3d == lid).sum() == 0
+    finally:
+        panel.close()
+
+
+def test_tolerance_slider_updates_label_and_value(qapp):
+    """Moving the slider changes _fill_tolerance and the numeric readout."""
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel._tool_combo.setCurrentText("Wand")
+        QApplication.processEvents()
+        panel._tol_slider.setValue(47)
+        QApplication.processEvents()
+        assert panel._fill_tolerance == 47
+        assert panel._tol_label.text() == "47"
+        panel._tol_slider.setValue(0)
+        QApplication.processEvents()
+        assert panel._fill_tolerance == 0
+        assert panel._tol_label.text() == "0"
+    finally:
+        panel.close()
+
+
+def test_channel_combo_selection_updates_active_channel(qapp):
+    """Changing Wand Channel flips which volume the Wand reads intensity from."""
+    # Two channels with different values at the same seed — picking channel
+    # 1 vs channel 0 should change what _fill_tolerance=0 can reach.
+    shape = (4, 8, 8)
+    ch0 = np.full(shape, 50, dtype=np.uint8)
+    ch1 = np.full(shape, 200, dtype=np.uint8)
+    ch0[2, 4, 4] = 51  # tiny deviation — within tol 0 only for ch1 path
+    ch1[2, 4, 4] = 200
+    mp = ch0.max(axis=0)
+    doc = MontageDocument(name="c", image_layer=ImageLayer("c", mp))
+    doc.volume_data = ch0
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+    panel = View3DPanel(
+        None,
+        channels=[("c0", ch0, (1.0, 1.0, 1.0)), ("c1", ch1, (1.0, 0.0, 0.0))],
+        documents=[doc],
+    )
+    try:
+        panel._tool_combo.setCurrentText("Wand")
+        panel._fill_channel_combo.setCurrentIndex(0)
+        QApplication.processEvents()
+        assert panel._fill_channel_idx == 0
+        assert panel._active_channel_volume() is ch0
+
+        panel._fill_channel_combo.setCurrentIndex(1)
+        QApplication.processEvents()
+        assert panel._fill_channel_idx == 1
+        assert panel._active_channel_volume() is ch1
+    finally:
+        panel.close()
+
+
+def test_tolerance_change_affects_wand_flood_size(qapp):
+    """Tightening tolerance shrinks the wand's reach; widening grows it.
+
+    Wand uses asymmetric flood — accepts voxels ``>= seed - tol``. Build a
+    graded slab that descends from the seed value so each tolerance step
+    pulls in additional columns. Seed at x=5 (val=130). tol=5 catches
+    ≥125 (2 cols), tol=30 catches ≥100 (all 7 cols).
+    """
+    shape = (4, 8, 20)
+    vol = np.zeros(shape, dtype=np.uint8)
+    # Graded slab along x: 130, 125, 120, 115, 110, 105, 100 (seed is the
+    # bright end; flood descends toward dimmer voxels).
+    for i, v in enumerate([130, 125, 120, 115, 110, 105, 100]):
+        vol[1:3, 2:6, 5 + i] = v
+    doc = MontageDocument(
+        name="g", image_layer=ImageLayer("g", vol.max(axis=0)),
+    )
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+    panel = View3DPanel(
+        None, channels=[("c0", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        lid = doc.reserve_label_id()
+        panel.set_active_volume_roi_id(lid)
+        panel._tool_combo.setCurrentText("Wand")
+
+        # Tight tolerance via the slider: 130 − 5 = 125 → 2 columns.
+        panel._tol_slider.setValue(5)
+        QApplication.processEvents()
+        panel._run_wand((2, 3, 5))  # seed at x=5 (value 130)
+        tight_count = int((doc.labels_3d == lid).sum())
+
+        # Reset and widen: 130 − 30 = 100 → all 7 columns.
+        doc.labels_3d[...] = 0
+        panel._tol_slider.setValue(30)
+        QApplication.processEvents()
+        panel._run_wand((2, 3, 5))
+        wide_count = int((doc.labels_3d == lid).sum())
+
+        assert tight_count > 0, "tight tolerance should still fill at least the seed"
+        assert wide_count > tight_count, (
+            f"widening tolerance must expand the flood "
+            f"(tight={tight_count}, wide={wide_count})"
+        )
+    finally:
+        panel.close()
+
+
+def test_wand_asymmetric_reaches_dim_boundary(qapp):
+    """Wand's asymmetric tolerance grows toward dimmer voxels.
+
+    Build a bright core surrounded by a dim boundary shell. Seed on the
+    core (255); the boundary (80) is 175 units dimmer. A properly
+    asymmetric flood with tol=175 must include both, even though the
+    boundary is far outside a symmetric ±tol window that clamps at 255.
+    """
+    shape = (6, 14, 14)
+    vol = np.zeros(shape, dtype=np.uint8)
+    # 3×3×3 dim shell wrapping the bright 1×1×1 core.
+    vol[2:5, 5:10, 5:10] = 80    # shell
+    vol[3, 7, 7] = 255            # bright core
+    doc = MontageDocument(
+        name="a", image_layer=ImageLayer("a", vol.max(axis=0)),
+    )
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+    panel = View3DPanel(
+        None, channels=[("c0", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        lid = doc.reserve_label_id()
+        panel.set_active_volume_roi_id(lid)
+        panel._tool_combo.setCurrentText("Wand")
+        # Seed on the bright core; tol = 175 → accepts val >= 255 - 175 = 80.
+        panel._tol_slider.setValue(175)
+        QApplication.processEvents()
+        panel._run_wand((3, 7, 7))
+
+        # Every shell voxel got claimed.
+        shell_mask = (vol == 80)
+        shell_filled = int(((doc.labels_3d == lid) & shell_mask).sum())
+        assert shell_filled == int(shell_mask.sum()), (
+            f"asymmetric flood must reach the dim shell: "
+            f"{shell_filled}/{int(shell_mask.sum())}"
+        )
+        # Nothing outside shell + core got labeled (background stays 0).
+        assert (doc.labels_3d[vol == 0] == 0).all()
+    finally:
+        panel.close()
+
+
+def test_keyboard_shortcuts_switch_tool(qapp):
+    """Tool-switch shortcuts (V/F/W/P/E) are wired to the combo.
+
+    We check the wiring by firing each QShortcut.activated signal directly
+    — QTest.keyClick doesn't reliably deliver to a panel that isn't shown,
+    so we exercise the slot wiring instead of the platform key path.
+    """
+    from PySide6.QtGui import QShortcut
+
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        shortcuts = {
+            sc.key().toString(): sc
+            for sc in panel.findChildren(QShortcut)
+        }
+        # Confirm all 5 tool keys are registered.
+        for key in ("V", "F", "W", "P", "E"):
+            assert key in shortcuts, f"missing shortcut for {key}; have {list(shortcuts)}"
+
+        mapping = [("F", "Fill"), ("W", "Wand"), ("P", "Paint"),
+                   ("E", "Erase"), ("V", "Navigate")]
+        for key, expected in mapping:
+            shortcuts[key].activated.emit()
+            QApplication.processEvents()
+            assert panel._tool_combo.currentText() == expected
+    finally:
+        panel.close()
+
+
+def test_space_hold_temporarily_navigates(qapp):
+    """Holding Space in Paint switches to Navigate; releasing restores Paint."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel.setFocus(Qt.OtherFocusReason)
+        panel._tool_combo.setCurrentText("Paint")
+        QApplication.processEvents()
+        assert panel._tool_mode == 'paint'
+
+        QTest.keyPress(panel, Qt.Key_Space)
+        QApplication.processEvents()
+        assert panel._tool_mode == 'navigate', "Space should swap to Navigate"
+        assert panel._space_prev_tool == "Paint"
+
+        QTest.keyRelease(panel, Qt.Key_Space)
+        QApplication.processEvents()
+        assert panel._tool_mode == 'paint', "Release should restore Paint"
+        assert panel._space_prev_tool is None
+    finally:
+        panel.close()
+
+
+def test_space_hold_is_noop_when_already_navigating(qapp):
+    """If tool is already Navigate, Space does not snapshot/restore."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        panel.setFocus(Qt.OtherFocusReason)
+        panel._tool_combo.setCurrentText("Navigate")
+        QApplication.processEvents()
+        QTest.keyPress(panel, Qt.Key_Space)
+        QTest.keyRelease(panel, Qt.Key_Space)
+        QApplication.processEvents()
+        assert panel._tool_mode == 'navigate'
+        assert panel._space_prev_tool is None
+    finally:
+        panel.close()
+
+
+def test_camera_zoom_button_changes_scale_factor(qapp):
+    """Zoom-in / Zoom-out buttons scale the camera's scale_factor."""
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        cam = panel._view.camera
+        cam._scale_factor = 100.0
+        panel._camera_zoom(0.5)
+        assert abs(cam._scale_factor - 50.0) < 1e-6
+        panel._camera_zoom(2.0)
+        assert abs(cam._scale_factor - 100.0) < 1e-6
+    finally:
+        panel.close()
+
+
+def test_camera_rotate_button_changes_orientation(qapp):
+    """Rotate-right button changes the camera's orientation quaternion
+    (or azimuth on turntable cameras). The exact change depends on the
+    camera type — we just assert that the orientation moved."""
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        cam = panel._view.camera
+        if hasattr(cam, 'azimuth'):
+            before = float(cam.azimuth)
+            panel._camera_rotate(15, 0)
+            assert abs(float(cam.azimuth) - (before + 15)) < 1e-6
+        elif hasattr(cam, '_quaternion'):
+            q0 = cam._quaternion
+            before = (q0.w, q0.x, q0.y, q0.z)
+            panel._camera_rotate(15, 0)
+            q1 = cam._quaternion
+            after = (q1.w, q1.x, q1.y, q1.z)
+            assert before != after, "quaternion should change after rotate"
+        else:
+            pytest.skip("camera exposes no rotation API we recognize")
+    finally:
+        panel.close()
+
+
+def test_cursor_readout_updates_with_position(qapp, monkeypatch):
+    """Moving the mouse (no drag) updates the readout with (z,y,x) + intensity."""
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        # _update_cursor_readout bails when _volumes is empty. In the
+        # offscreen test the deferred GPU upload hasn't run, so seed a
+        # sentinel so the path past the early-return actually executes.
+        panel._volumes = [object()]
+        monkeypatch.setattr(
+            panel, '_ray_pick_seed',
+            lambda pos, require_bright=True: (2, 3, 4),
+        )
+        panel._update_cursor_readout((0, 0))
+        text = panel._cursor_readout_label.text()
+        assert "z=2" in text and "y=3" in text and "x=4" in text
+        assert "intensity=" in text
+    finally:
+        panel._volumes = []
+        panel.close()
+
+
+def test_tool_cursor_changes_per_tool(qapp):
+    """Each tool sets a distinctive Qt stock cursor on the canvas.
+
+    Navigate = OpenHandCursor (grab metaphor), Fill = PointingHandCursor
+    (click this), Paint/Wand/Erase = CrossCursor (precision point).
+    """
+    from PySide6.QtCore import Qt
+
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        expected = {
+            "Navigate": Qt.OpenHandCursor,
+            "Fill": Qt.PointingHandCursor,
+            "Wand": Qt.CrossCursor,
+            "Paint": Qt.CrossCursor,
+            "Erase": Qt.CrossCursor,
+        }
+        for label, shape in expected.items():
+            panel._tool_combo.setCurrentText(label)
+            QApplication.processEvents()
+            got = panel._canvas.native.cursor().shape()
+            assert got == shape, (
+                f"{label}: expected cursor {shape}, got {got}"
+            )
     finally:
         panel.close()
 

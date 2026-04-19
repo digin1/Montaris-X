@@ -26,7 +26,15 @@ def probe_tiff(path):
         shape = tuple(s.shape)
         dtype = str(s.dtype)
         pages = len(tf.pages)
-        # Z-stack detection: explicit Z axis in series, or ImageJ slices > 1.
+        # Z-stack detection priority:
+        #   1. Explicit Z axis in the series
+        #   2. ImageJ metadata `slices > 1`
+        #   3. Any non-YX axis that actually iterates (shape > 1) — covers
+        #      `tifffile.imwrite(arr_3d)` which comes back as SYX/QYX with no
+        #      Z letter but is clearly a stack. Skip when the non-YX length
+        #      is one of the RGB(A) sample counts and the image looks like
+        #      a single color page (1 page, S axis with 3/4 channels) so we
+        #      don't misread a plain RGB TIFF as a 3-slice volume.
         n_slices = 1
         is_zstack = False
         if 'Z' in axes:
@@ -38,6 +46,18 @@ def probe_tiff(path):
             if slices > 1:
                 is_zstack = True
                 n_slices = int(slices)
+            elif 'Y' in axes and 'X' in axes:
+                other = [i for i, a in enumerate(axes) if a not in 'YX']
+                extent = int(np.prod([shape[i] for i in other])) if other else 1
+                looks_like_rgb = (
+                    pages == 1
+                    and len(other) == 1
+                    and shape[other[0]] in (3, 4)
+                    and axes[other[0]] == 'S'
+                )
+                if extent > 1 and not looks_like_rgb:
+                    is_zstack = True
+                    n_slices = extent
         return {
             'is_zstack': is_zstack,
             'shape': shape,
@@ -53,26 +73,65 @@ def load_volume(path):
 
     Returns (volume, axes) where axes is the tifffile series axes string.
     Raises ValueError if the file is not a 3D stack.
+
+    For multi-channel / multi-timepoint volumes (e.g. ``CZYX``, ``TZYX``),
+    this returns only the first channel/timepoint. Use
+    :func:`load_volume_channels` to recover every channel.
+    """
+    channels = load_volume_channels(path)
+    _suffix, vol = channels[0]
+    return vol, 'ZYX'
+
+
+def load_volume_channels(path):
+    """Load a TIFF as a list of ``(suffix, ZYX_volume)`` channels.
+
+    Splits any non-ZYX axes (``C``, ``T``, ``S`` used as a slice index,
+    etc.) into separate entries so callers don't silently drop channels on
+    ``CZYX`` / ``TZYX`` stacks. The suffix is empty for single-channel
+    stacks and a short axis-coded tag (e.g. ``"_C0"``) otherwise.
+
+    Raises ValueError if the file isn't a 3D stack.
     """
     import tifffile
     with tifffile.TiffFile(str(path)) as tf:
         s = tf.series[0]
         axes = s.axes or ''
         data = s.asarray()
-    # Reorder to ZYX. If no Z, fall back to treating leading axis as Z when ndim==3.
-    if 'Z' in axes and 'Y' in axes and 'X' in axes:
-        # Keep Z/Y/X; squeeze other axes (C, T, S) by indexing 0.
-        keep = {axes.index(a) for a in 'ZYX'}
-        slicer = [slice(None) if i in keep else 0 for i in range(data.ndim)]
-        data = data[tuple(slicer)]
-        cur_axes = ''.join(ax for i, ax in enumerate(axes) if isinstance(slicer[i], slice))
-        perm = [cur_axes.index(a) for a in 'ZYX']
-        data = np.transpose(data, perm)
-    elif data.ndim == 3:
-        axes = axes or 'ZYX'
-    else:
+
+    if 'Y' not in axes or 'X' not in axes:
+        if data.ndim == 3:
+            # No letters at all — assume the three axes are ZYX in order.
+            return [('', data)]
         raise ValueError(f"Not a 3D stack: shape={data.shape}, axes={axes!r}")
-    return data, 'ZYX'
+
+    # If the series has no explicit Z, promote the single non-YX axis to Z.
+    # That covers tifffile's default 'SYX'/'QYX' for plain 3D arrays.
+    if 'Z' not in axes:
+        other = [i for i, a in enumerate(axes) if a not in 'YX']
+        if len(other) == 1:
+            axes = ''.join('Z' if i == other[0] else a for i, a in enumerate(axes))
+        elif data.ndim == 3:
+            # Degenerate: YX only (2D image). Can't build a volume.
+            raise ValueError(f"Not a 3D stack: shape={data.shape}, axes={axes!r}")
+
+    zi, yi, xi = axes.index('Z'), axes.index('Y'), axes.index('X')
+    other_idxs = [i for i in range(data.ndim) if i not in (zi, yi, xi)]
+    # Move extra channel-like axes to the front, then ZYX trails.
+    perm = other_idxs + [zi, yi, xi]
+    data = np.transpose(data, perm)
+    other_axes = ''.join(axes[i] for i in other_idxs)
+    other_shape = tuple(data.shape[i] for i in range(len(other_idxs)))
+
+    if not other_idxs:
+        return [('', data)]
+    from itertools import product
+    results = []
+    for idx in product(*(range(s) for s in other_shape)):
+        sub = data[idx]
+        suffix = '_' + '_'.join(f"{other_axes[i]}{v}" for i, v in enumerate(idx))
+        results.append((suffix, sub))
+    return results
 
 
 def max_projection(volume, axis=0):

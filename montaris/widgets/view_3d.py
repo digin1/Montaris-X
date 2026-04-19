@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QSlider, QMessageBox, QWidget, QFrame, QSpinBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QFontMetrics, QKeySequence, QShortcut
 
 
 VISPY_AVAILABLE = True
@@ -391,6 +391,10 @@ class View3DPanel(QWidget):
     # and mirrors the new label into its LayerStack so the 2D LayerPanel picks
     # it up.
     label_added = Signal(object, int)
+    # Emitted after a stroke/fill with a ready-to-push undo command. App-
+    # level code connects this to its UndoStack.push() so Ctrl+Z can reverse
+    # 3D paint, erase, and fill operations.
+    undo_pushed = Signal(object)
 
     def __init__(self, parent=None, channels=None, documents=None):
         """channels: list of (name, volume_ndarray, tint_rgb_or_None).
@@ -421,7 +425,7 @@ class View3DPanel(QWidget):
         # directly and don't need a source channel.
         self._tool_mode = 'navigate'
         self._fill_channel_idx = 0
-        self._fill_tolerance = 20  # 0..255 in uint8 space (auto-scaled per channel)
+        self._fill_tolerance = 40  # 0..255 in uint8 space (auto-scaled per channel)
         # Brush stroke state. ``_brush_radius`` is in voxels; the stamp is a
         # true 3D sphere in voxel space (anisotropy is ignored — good enough
         # at typical microscopy step ratios). The drag-* fields are reset at
@@ -437,6 +441,15 @@ class View3DPanel(QWidget):
         # visual every frame — the difference is seconds vs. milliseconds on
         # a 50M+ voxel stack). Format: (z0, z1, y0, y1, x0, x1) or None.
         self._dirty_bbox = None
+        # Stroke-wide state for undo. The render-throttle ``_dirty_bbox``
+        # gets cleared every tick, which would miss voxels touched across
+        # non-contiguous drags. ``_stroke_bbox`` / ``_stroke_before`` accumulate
+        # for the whole stroke and are consumed by ``_finish_drag`` to build
+        # the VolumeStrokeUndoCommand. ``_stroke_dtype`` pins the before-patch
+        # dtype so later dtype promotions don't invalidate the snapshot.
+        self._stroke_bbox = None
+        self._stroke_before = None
+        self._stroke_dtype = None
         # When non-None and the id exists in the active doc, paint strokes
         # extend that ROI instead of allocating a new one. MontarisApp pushes
         # this from the LayerPanel's selection_changed signal.
@@ -575,19 +588,25 @@ class View3DPanel(QWidget):
             labels_row.addStretch(1)
             root.addLayout(labels_row)
 
-            # Annotation tool row. Navigate (orbit camera), Fill (magic-wand
-            # flood), Paint (spherical brush), Erase (spherical brush → 0).
+            # Annotation tools. Fill and Wand are intentionally separate —
+            # Fill is napari-style label relabel (no intensity, no tolerance);
+            # Wand is intensity-based 3D flood into the selected ROI using
+            # Channel + Tolerance. Paint/Erase are spherical brushes.
             tool_row = QHBoxLayout()
             tool_row.setSpacing(8)
             tool_row.addWidget(QLabel("Tool:"))
             self._tool_combo = QComboBox()
-            self._tool_combo.addItems(["Navigate", "Fill", "Paint", "Erase"])
+            self._tool_combo.addItems(
+                ["Navigate", "Fill", "Wand", "Paint", "Erase"]
+            )
             self._tool_combo.currentTextChanged.connect(self._on_tool_changed)
             tool_row.addWidget(self._tool_combo)
 
             tool_row.addWidget(self._sep())
 
-            tool_row.addWidget(QLabel("Channel:"))
+            # Wand group — Channel + Tolerance. Disabled unless Wand is active.
+            self._wand_channel_label = QLabel("Wand Channel:")
+            tool_row.addWidget(self._wand_channel_label)
             self._fill_channel_combo = QComboBox()
             for idx, (name, _vol, _tint) in enumerate(self._channels_raw):
                 fm = QFontMetrics(self._fill_channel_combo.font())
@@ -600,31 +619,92 @@ class View3DPanel(QWidget):
             )
             tool_row.addWidget(self._fill_channel_combo)
 
-            tool_row.addWidget(self._sep())
-
-            tool_row.addWidget(QLabel("Tolerance:"))
+            self._wand_tol_label_prefix = QLabel("Tolerance:")
+            tool_row.addWidget(self._wand_tol_label_prefix)
             self._tol_slider = QSlider(Qt.Horizontal)
-            self._tol_slider.setRange(0, 100)
-            self._tol_slider.setValue(20)
-            self._tol_slider.setFixedWidth(120)
+            # Tolerance is an absolute 0..255 intensity delta (not a percent).
+            # Max 255 lets the wand reach dim boundaries of a bright dendrite
+            # without asking users to understand the uint8 intensity space.
+            self._tol_slider.setRange(0, 255)
+            self._tol_slider.setValue(40)
+            self._tol_slider.setFixedWidth(140)
             self._tol_slider.valueChanged.connect(self._on_tolerance_changed)
             tool_row.addWidget(self._tol_slider)
-            self._tol_label = QLabel("20")
+            self._tol_label = QLabel("40")
             tool_row.addWidget(self._tol_label)
 
             tool_row.addWidget(self._sep())
 
-            tool_row.addWidget(QLabel("Brush:"))
+            # Brush group — Size. Disabled unless Paint/Erase is active.
+            self._brush_size_label = QLabel("Brush Size:")
+            tool_row.addWidget(self._brush_size_label)
             self._brush_spin = QSpinBox()
             self._brush_spin.setRange(1, 50)
             self._brush_spin.setValue(self._brush_radius)
             self._brush_spin.setSuffix(" vx")
             self._brush_spin.valueChanged.connect(self._on_brush_radius_changed)
-            self._brush_spin.setEnabled(False)  # enabled only in Paint/Erase
             tool_row.addWidget(self._brush_spin)
 
             tool_row.addStretch(1)
             root.addLayout(tool_row)
+
+            # Camera controls row — available while in Paint/Fill/Wand/Erase
+            # so the user can re-frame without switching to Navigate. Hold
+            # Space to temporarily orbit/pan with the mouse (released =
+            # resume annotation).
+            cam_row = QHBoxLayout()
+            cam_row.setSpacing(6)
+            cam_row.addWidget(QLabel("Camera:"))
+            self._cam_reset_btn = QPushButton("Reset View")
+            self._cam_reset_btn.setToolTip("Fit the volume to the view (R)")
+            self._cam_reset_btn.clicked.connect(self._reset_view)
+            cam_row.addWidget(self._cam_reset_btn)
+            self._cam_zoom_in_btn = QPushButton("Zoom +")
+            self._cam_zoom_in_btn.setToolTip("Zoom in (=)")
+            self._cam_zoom_in_btn.clicked.connect(lambda: self._camera_zoom(0.8))
+            cam_row.addWidget(self._cam_zoom_in_btn)
+            self._cam_zoom_out_btn = QPushButton("Zoom −")
+            self._cam_zoom_out_btn.setToolTip("Zoom out (-)")
+            self._cam_zoom_out_btn.clicked.connect(lambda: self._camera_zoom(1.25))
+            cam_row.addWidget(self._cam_zoom_out_btn)
+            self._cam_rot_left_btn = QPushButton("⟲")
+            self._cam_rot_left_btn.setToolTip("Rotate left 15° (Shift+Left)")
+            self._cam_rot_left_btn.clicked.connect(lambda: self._camera_rotate(-15, 0))
+            cam_row.addWidget(self._cam_rot_left_btn)
+            self._cam_rot_right_btn = QPushButton("⟳")
+            self._cam_rot_right_btn.setToolTip("Rotate right 15° (Shift+Right)")
+            self._cam_rot_right_btn.clicked.connect(lambda: self._camera_rotate(15, 0))
+            cam_row.addWidget(self._cam_rot_right_btn)
+            self._cam_rot_up_btn = QPushButton("⤒")
+            self._cam_rot_up_btn.setToolTip("Tilt up 15° (Shift+Up)")
+            self._cam_rot_up_btn.clicked.connect(lambda: self._camera_rotate(0, -15))
+            cam_row.addWidget(self._cam_rot_up_btn)
+            self._cam_rot_down_btn = QPushButton("⤓")
+            self._cam_rot_down_btn.setToolTip("Tilt down 15° (Shift+Down)")
+            self._cam_rot_down_btn.clicked.connect(lambda: self._camera_rotate(0, 15))
+            cam_row.addWidget(self._cam_rot_down_btn)
+            cam_row.addStretch(1)
+            # Cursor readout — shows voxel coordinates + intensity of the
+            # brightest voxel along the ray under the cursor. Updates from
+            # _on_canvas_mouse_move when not dragging, so the user can tell
+            # what seed the Wand is about to use before they click.
+            self._cursor_readout_label = QLabel("")
+            self._cursor_readout_label.setStyleSheet(
+                "color: #aaa; font-family: monospace;"
+            )
+            cam_row.addWidget(self._cursor_readout_label)
+            root.addLayout(cam_row)
+
+            # One-line hint under the tool row so it's obvious what the
+            # selected tool will do. Updated by _on_tool_changed.
+            self._tool_hint_label = QLabel()
+            self._tool_hint_label.setStyleSheet(
+                "color: #888; font-style: italic; padding-left: 36px;"
+            )
+            root.addWidget(self._tool_hint_label)
+
+            # Set initial enabled/disabled + hint to match the default tool.
+            self._apply_tool_ui_state()
 
             # Hook up annotation mouse handlers. Vispy SceneCanvas emits
             # mouse events independently of Qt's mousePressEvent so we attach
@@ -633,6 +713,16 @@ class View3DPanel(QWidget):
             self._canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
             self._canvas.events.mouse_move.connect(self._on_canvas_mouse_move)
             self._canvas.events.mouse_release.connect(self._on_canvas_mouse_release)
+
+            # Tool-switch keyboard shortcuts. Single-key when focus is in
+            # the 3D panel; match the dropdown items so we keep one source
+            # of truth. Space held = temporary Navigate (handled in
+            # keyPressEvent / keyReleaseEvent below).
+            self._install_tool_shortcuts()
+            # Space is handled via keyPressEvent so we can detect release;
+            # track the prior tool so we can restore it.
+            self._space_prev_tool = None
+            self.setFocusPolicy(Qt.StrongFocus)
 
             # Throttle overlay refreshes during paint/erase drags. Each
             # stamp marks ``_drag_dirty``; this timer coalesces dirty flags
@@ -701,24 +791,67 @@ class View3DPanel(QWidget):
         # doesn't rotate while the user is trying to click or paint.
         if self._view is not None and self._view.camera is not None:
             self._view.camera.interactive = (self._tool_mode == 'navigate')
-        # Cursor hint
-        if self._tool_mode in ('fill', 'paint', 'erase'):
-            self._canvas.native.setCursor(Qt.CrossCursor)
-        else:
-            self._canvas.native.unsetCursor()
-        # Gate the mode-specific controls so it's visually obvious which
-        # parameter applies to the current tool.
-        # Fill is napari-style (label-based, no tolerance) — the slider is
-        # kept visible as dead UI for now but never enabled. Remove when the
-        # next redesign pass cleans up the 3D toolbar.
-        self._tol_slider.setEnabled(False)
-        self._brush_spin.setEnabled(self._tool_mode in ('paint', 'erase'))
+        self._apply_tool_ui_state()
         # A tool switch mid-drag (via keyboard shortcut etc.) should abandon
         # the stroke cleanly so we don't paint into the new mode's state.
         # rollback=True drops a freshly-reserved paint id (and its voxels)
         # so it doesn't appear in the LayerPanel as an orphan.
         if self._drag_active:
             self._finish_drag(emit=False, rollback=True)
+
+    _TOOL_HINTS = {
+        'navigate': "Navigate (V) — left-drag rotates, right-drag pans, "
+                    "scroll zooms. Hold Space in any tool for the same.",
+        'fill': "Fill (F) — click a labelled region to recolor its connected "
+                "component into the selected ROI. Hold Space to rotate.",
+        'wand': "Wand (W) — click a dendrite to flood fill by image intensity. "
+                "Tune Tolerance; Hold Space to rotate without switching tools.",
+        'paint': "Paint (P) — sphere brush writes into the selected ROI. "
+                 "Hold Space to rotate; set size with Brush Size.",
+        'erase': "Erase (E) — sphere brush clears voxels from all ROIs. "
+                 "Hold Space to rotate.",
+    }
+
+    # Per-tool cursor. Uses Qt stock cursors so the mapping is consistent
+    # with platform conventions (open-hand = "grab to move the scene",
+    # pointing-hand = "click this", cross = "precision point"). Paint and
+    # Erase share the crosshair — the tool hint plus the Brush Size readout
+    # distinguish them without needing a custom pixmap.
+    _TOOL_CURSORS = {
+        'navigate': Qt.OpenHandCursor,
+        'fill': Qt.PointingHandCursor,
+        'wand': Qt.CrossCursor,
+        'paint': Qt.CrossCursor,
+        'erase': Qt.CrossCursor,
+    }
+
+    def _apply_tool_ui_state(self):
+        """Enable/disable per-tool controls and refresh the hint label.
+
+        Called on init and whenever the tool changes. Keeping it in one
+        place means the enabled state is always consistent with the hint.
+        """
+        wand_on = self._tool_mode == 'wand'
+        brush_on = self._tool_mode in ('paint', 'erase')
+        # Wand-only controls
+        self._wand_channel_label.setEnabled(wand_on)
+        self._fill_channel_combo.setEnabled(wand_on)
+        self._wand_tol_label_prefix.setEnabled(wand_on)
+        self._tol_slider.setEnabled(wand_on)
+        self._tol_label.setEnabled(wand_on)
+        # Brush-only controls
+        self._brush_size_label.setEnabled(brush_on)
+        self._brush_spin.setEnabled(brush_on)
+        # One-line hint
+        self._tool_hint_label.setText(self._TOOL_HINTS.get(self._tool_mode, ""))
+        # Tool cursor — set here (not in _on_tool_changed) so the initial
+        # panel state picks up the right cursor too, not just tool switches.
+        cursor = self._TOOL_CURSORS.get(self._tool_mode)
+        if self._canvas is not None:
+            if cursor is not None:
+                self._canvas.native.setCursor(cursor)
+            else:
+                self._canvas.native.unsetCursor()
 
     def _on_fill_channel_changed(self, idx):
         self._fill_channel_idx = int(idx)
@@ -766,6 +899,12 @@ class View3DPanel(QWidget):
                 return
             self._run_fill(seed)
             return
+        if self._tool_mode == 'wand':
+            seed = self._ray_pick_seed(event.pos)
+            if seed is None:
+                return
+            self._run_wand(seed)
+            return
         if self._tool_mode in ('paint', 'erase'):
             # Paint/erase are allowed to start anywhere, including over
             # empty voxels — users expect to pre-seed an empty region or
@@ -777,19 +916,30 @@ class View3DPanel(QWidget):
             doc = self._primary_doc
             if doc.labels_3d is None:
                 doc.ensure_labels_3d()
+            # Paint requires a LayerPanel-selected 3D ROI. Painting with
+            # nothing selected used to silently auto-reserve a label id,
+            # which surprised users — strokes spawned new rows in the
+            # sidebar instead of extending the ROI they meant to edit.
+            # Mirrors the Fill behavior: ask the user to Add/select an
+            # ROI first.
+            if self._tool_mode == 'paint':
+                active = self._active_volume_roi_id
+                if active is None or active not in doc.labels_meta:
+                    QMessageBox.information(
+                        self, "No 3D ROI selected",
+                        "Paint needs a 3D ROI to write into. Click '+' in "
+                        "the Layers panel to add one (or select an "
+                        "existing 3D ROI), then try again.",
+                    )
+                    return
             self._drag_active = True
             self._drag_mode = self._tool_mode
             self._drag_extends_existing = False
             if self._tool_mode == 'paint':
-                # Extend the LayerPanel-selected 3D ROI when one is active;
-                # otherwise allocate a fresh id. Keeps successive strokes on
-                # the same ROI from spawning a new VolumeROILayer each time.
-                active = self._active_volume_roi_id
-                if active is not None and active in doc.labels_meta:
-                    self._drag_label_id = int(active)
-                    self._drag_extends_existing = True
-                else:
-                    self._drag_label_id = doc.reserve_label_id()
+                # Extend the LayerPanel-selected 3D ROI. ``active`` was
+                # validated above, so it's always present in labels_meta.
+                self._drag_label_id = int(self._active_volume_roi_id)
+                self._drag_extends_existing = True
                 if self._drag_label_id > np.iinfo(doc.labels_3d.dtype).max:
                     doc.promote_labels_dtype(np.uint16)
             else:
@@ -798,15 +948,37 @@ class View3DPanel(QWidget):
             self._drag_refresh_timer.start()
 
     def _on_canvas_mouse_move(self, event):
-        """Continue an in-progress paint/erase stroke."""
-        if not self._drag_active:
+        """Continue an in-progress paint/erase stroke; update cursor readout."""
+        if self._drag_active:
+            if self._primary_doc is None or not self._volumes:
+                return
+            seed = self._ray_pick_seed(event.pos, require_bright=False)
+            if seed is None:
+                return
+            self._stamp_brush(seed)
             return
-        if self._primary_doc is None or not self._volumes:
+        # Not dragging — refresh the voxel-under-cursor readout so the user
+        # can see what seed the Wand (or Fill/Paint) is about to hit.
+        self._update_cursor_readout(event.pos)
+
+    def _update_cursor_readout(self, pos):
+        """Show (z, y, x) + active-channel intensity for the voxel under ``pos``."""
+        if not self._volumes or self._primary_doc is None:
+            self._cursor_readout_label.setText("")
             return
-        seed = self._ray_pick_seed(event.pos, require_bright=False)
+        seed = self._ray_pick_seed(pos, require_bright=False)
         if seed is None:
+            self._cursor_readout_label.setText("")
             return
-        self._stamp_brush(seed)
+        z, y, x = seed
+        vol = self._active_channel_volume()
+        val = int(vol[z, y, x]) if vol is not None else None
+        if val is None:
+            self._cursor_readout_label.setText(f"(z={z}, y={y}, x={x})")
+        else:
+            self._cursor_readout_label.setText(
+                f"(z={z}, y={y}, x={x})  intensity={val}"
+            )
 
     def _on_canvas_mouse_release(self, event):
         """Finalize the current stroke on left-release."""
@@ -838,20 +1010,73 @@ class View3DPanel(QWidget):
         lid = self._drag_label_id
         mode = self._drag_mode
         extended = self._drag_extends_existing
+        stroke_bbox = self._stroke_bbox
+        stroke_before = self._stroke_before
         self._drag_active = False
         self._drag_mode = None
         self._drag_label_id = None
         self._drag_extends_existing = False
         self._drag_dirty = False
         self._dirty_bbox = None
+        self._stroke_bbox = None
+        self._stroke_before = None
+        self._stroke_dtype = None
         # Rollback only applies to freshly-reserved paint ids — erase writes
         # 0 and extensions reuse an id owned by an existing VolumeROILayer.
         if (rollback and doc is not None and mode == 'paint'
                 and lid and not extended):
             doc.release_label_id(int(lid))
+            self.refresh_labels()
+            return
         self.refresh_labels()
+        # Emit label_added FIRST so MontarisApp can create the VolumeROILayer
+        # wrapper synchronously. We then bundle the wrapper's Add undo with
+        # the stroke's voxel undo into one Ctrl+Z.
         if emit and doc is not None and lid:
             self.label_added.emit(doc, lid)
+        if (doc is not None and stroke_bbox is not None
+                and stroke_before is not None
+                and doc.labels_3d is not None):
+            from montaris.core.undo import (
+                VolumeStrokeUndoCommand,
+                AddVolumeROIUndoCommand,
+            )
+            from montaris.core.multi_undo import CompoundUndoCommand
+            z0, z1, y0, y1, x0, x1 = stroke_bbox
+            after = np.ascontiguousarray(doc.labels_3d[z0:z1, y0:y1, x0:x1])
+            stroke_cmd = VolumeStrokeUndoCommand(
+                doc, stroke_bbox, stroke_before, after,
+            )
+            if emit and lid and not extended:
+                wrapper = self._find_wrapper_for(doc, int(lid))
+                if wrapper is None:
+                    self.undo_pushed.emit(stroke_cmd)
+                else:
+                    add_cmd = AddVolumeROIUndoCommand(
+                        self._layer_stack(), doc, int(lid), wrapper,
+                    )
+                    self.undo_pushed.emit(
+                        CompoundUndoCommand([add_cmd, stroke_cmd]),
+                    )
+            else:
+                self.undo_pushed.emit(stroke_cmd)
+
+    def _layer_stack(self):
+        """Return the host app's LayerStack, or None if not hosted."""
+        win = self.window()
+        return getattr(win, 'layer_stack', None) if win is not None else None
+
+    def _find_wrapper_for(self, doc, lid):
+        """Return the VolumeROILayer wrapping ``lid`` in this doc, else None."""
+        ls = self._layer_stack()
+        if ls is None:
+            return None
+        for roi in ls.roi_layers:
+            if (getattr(roi, 'is_volume', False)
+                    and getattr(roi, '_doc', None) is doc
+                    and getattr(roi, '_label_id', None) == lid):
+                return roi
+        return None
 
     def set_active_volume_roi_id(self, lid):
         """Tell the panel which 3D ROI id a subsequent paint stroke should
@@ -883,11 +1108,10 @@ class View3DPanel(QWidget):
             z0, z1, y0, y1, x0, x1 = bbox
             sub = np.ascontiguousarray(labels[z0:z1, y0:y1, x0:x1])
             try:
-                # vispy's Texture3D stores data in (X, Y, Z) order; offset
-                # likewise. Pass the data as-is (uint8/16), the texture is
-                # created to match the labels dtype.
+                # vispy's Volume data is (Z, Y, X); Texture3D.set_data's
+                # offset follows the same axis order as the stored data.
                 self._labels_volume._texture.set_data(
-                    sub, offset=(x0, y0, z0),
+                    sub, offset=(z0, y0, x0),
                 )
                 self._labels_volume.update()
                 return
@@ -895,6 +1119,48 @@ class View3DPanel(QWidget):
                 # Fallthrough to full rebuild on any upload failure.
                 pass
         self._rebuild_labels_overlay()
+
+    def _extend_stroke_before(self, labels_3d, stamp_bbox):
+        """Grow ``_stroke_before`` to cover ``stamp_bbox`` with pre-stroke data.
+
+        Called from ``_stamp_brush`` before any write. When the bbox is
+        already large enough, no-op — the snapshot already holds the pre-
+        stroke values for every voxel the stamp is about to touch. When
+        the bbox expands, the newly-included region is seeded from
+        ``labels_3d`` (still pre-stroke there) and the overlap region is
+        copied from the old snapshot (which holds the original values).
+        """
+        nz0, nz1, ny0, ny1, nx0, nx1 = stamp_bbox
+        if self._stroke_bbox is None:
+            self._stroke_bbox = (nz0, nz1, ny0, ny1, nx0, nx1)
+            # .copy() (not ascontiguousarray) — a trivially-sized slice can
+            # alias the parent buffer, so later writes to labels_3d would
+            # leak into the snapshot and break undo.
+            self._stroke_before = labels_3d[nz0:nz1, ny0:ny1, nx0:nx1].copy()
+            self._stroke_dtype = labels_3d.dtype
+            return
+        oz0, oz1, oy0, oy1, ox0, ox1 = self._stroke_bbox
+        # No expansion needed — stamp fits inside the existing stroke bbox.
+        if nz0 >= oz0 and nz1 <= oz1 and ny0 >= oy0 and ny1 <= oy1 \
+                and nx0 >= ox0 and nx1 <= ox1:
+            return
+        uz0, uz1 = min(oz0, nz0), max(oz1, nz1)
+        uy0, uy1 = min(oy0, ny0), max(oy1, ny1)
+        ux0, ux1 = min(ox0, nx0), max(ox1, nx1)
+        shape = (uz1 - uz0, uy1 - uy0, ux1 - ux0)
+        # Seed every voxel from labels_3d — the regions outside the old
+        # stroke bbox are still pre-stroke there. .copy() again — we may
+        # be writing into this snapshot after further stamps, and we
+        # cannot alias the live labels volume.
+        new_before = labels_3d[uz0:uz1, uy0:uy1, ux0:ux1].copy()
+        # Overwrite the overlap region with the saved pre-stroke values so
+        # voxels the stroke has already mutated retain their original state.
+        dz0, dz1 = oz0 - uz0, oz1 - uz0
+        dy0, dy1 = oy0 - uy0, oy1 - uy0
+        dx0, dx1 = ox0 - ux0, ox1 - ux0
+        new_before[dz0:dz1, dy0:dy1, dx0:dx1] = self._stroke_before
+        self._stroke_before = new_before
+        self._stroke_bbox = (uz0, uz1, uy0, uy1, ux0, ux1)
 
     def _stamp_brush(self, seed_zyx):
         """Stamp a filled sphere of radius ``self._brush_radius`` into
@@ -917,6 +1183,10 @@ class View3DPanel(QWidget):
         zz, yy, xx = np.ogrid[z0:z1, y0:y1, x0:x1]
         inside = ((zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx) ** 2) <= r * r
         val = int(self._drag_label_id) if self._drag_mode == 'paint' else 0
+        # Snapshot pre-stroke voxels the first time each region is touched,
+        # BEFORE we write into labels_3d. The snapshot grows as the stroke
+        # extends its bbox so a later Ctrl+Z can restore the full stroke.
+        self._extend_stroke_before(doc.labels_3d, (z0, z1, y0, y1, x0, x1))
         region = doc.labels_3d[z0:z1, y0:y1, x0:x1]
         region[inside] = val
         # Grow the dirty bbox so the tick uploads the smallest subvolume
@@ -1077,10 +1347,235 @@ class View3DPanel(QWidget):
         if not extends_existing:
             self.label_added.emit(doc, new_label)
 
+        # Compact undo entry for the fill: bit-packed component mask + two
+        # label ids. Bundled with an Add undo when this reserved a fresh id
+        # so Ctrl+Z reverses both the new ROI and its voxels in one step.
+        from montaris.core.undo import (
+            VolumeFillUndoCommand,
+            AddVolumeROIUndoCommand,
+        )
+        from montaris.core.multi_undo import CompoundUndoCommand
+        zs, ys, xs = np.where(mask)
+        if zs.size == 0:
+            return
+        bbox = (int(zs.min()), int(zs.max()) + 1,
+                int(ys.min()), int(ys.max()) + 1,
+                int(xs.min()), int(xs.max()) + 1)
+        z0, z1, y0, y1, x0, x1 = bbox
+        mask_crop = mask[z0:z1, y0:y1, x0:x1]
+        fill_cmd = VolumeFillUndoCommand(doc, bbox, mask_crop, old_label, new_label)
+        if extends_existing:
+            self.undo_pushed.emit(fill_cmd)
+        else:
+            wrapper = self._find_wrapper_for(doc, int(new_label))
+            if wrapper is None:
+                self.undo_pushed.emit(fill_cmd)
+            else:
+                add_cmd = AddVolumeROIUndoCommand(
+                    self._layer_stack(), doc, int(new_label), wrapper,
+                )
+                self.undo_pushed.emit(CompoundUndoCommand([add_cmd, fill_cmd]))
+
+    def _run_wand(self, seed_zyx):
+        """Intensity-based 3D flood fill from ``seed_zyx``.
+
+        Grows a region through voxels whose intensity is within
+        ``self._fill_tolerance`` of the seed value on the Wand Channel,
+        then writes the selected ROI's label id into those voxels —
+        but only where they are currently background (label 0). Other
+        ROIs are left untouched.
+
+        The tolerance is **asymmetric**: voxels as dim as ``seed - tol``
+        are accepted, while voxels brighter than the seed are accepted
+        without a ceiling. Rationale: when the seed lands on the bright
+        core of a dendrite (via ray-pick's brightest-along-ray), the
+        boundaries fade to dimmer intensities. A symmetric window clips
+        off those edges; a downward-only window reaches them without
+        leaking upward into unrelated bright structures (which would
+        have to be *connected and brighter* than the core — rare).
+        """
+        doc = self._primary_doc
+        if doc is None:
+            return
+        if doc.labels_3d is None:
+            doc.ensure_labels_3d()
+
+        active = self._active_volume_roi_id
+        if active is None or active not in doc.labels_meta:
+            QMessageBox.information(
+                self, "No 3D ROI selected",
+                "Wand needs a 3D ROI to write into. Click '+' in the "
+                "Layers panel to add one (or select an existing 3D ROI), "
+                "then try again.",
+            )
+            return
+        new_label = int(active)
+
+        vol = self._active_channel_volume()
+        if vol is None or vol.shape != doc.labels_3d.shape:
+            return
+
+        from skimage.segmentation import flood
+        tol = max(0, int(self._fill_tolerance))
+        seed_tuple = tuple(int(v) for v in seed_zyx)
+        seed_val = int(vol[seed_tuple])
+        # Clip values above seed down to seed — this turns skimage's
+        # symmetric |val - seed| <= tol into a one-sided "val >= seed - tol"
+        # without allocating a full uint16 copy of the volume.
+        clipped = np.minimum(vol, seed_val)
+        try:
+            mask = flood(clipped, seed_tuple, tolerance=tol)
+        except Exception:
+            return
+
+        # Don't clobber other ROIs — wand only claims background voxels.
+        mask &= (doc.labels_3d == 0)
+
+        vox = int(mask.sum())
+        if vox == 0:
+            return
+        frac = vox / mask.size
+        if frac >= 0.5:
+            QMessageBox.warning(
+                self, "Wand aborted",
+                f"Intensity-matched region covers {frac*100:.0f}% of the "
+                f"volume — Tolerance is probably too high. Lower it and "
+                f"try again.",
+            )
+            return
+
+        if new_label > np.iinfo(doc.labels_3d.dtype).max:
+            doc.promote_labels_dtype(np.uint16)
+        doc.labels_3d[mask] = new_label
+        self.refresh_labels()
+
+        from montaris.core.undo import VolumeFillUndoCommand
+        zs, ys, xs = np.where(mask)
+        bbox = (int(zs.min()), int(zs.max()) + 1,
+                int(ys.min()), int(ys.max()) + 1,
+                int(xs.min()), int(xs.max()) + 1)
+        z0, z1, y0, y1, x0, x1 = bbox
+        mask_crop = mask[z0:z1, y0:y1, x0:x1]
+        self.undo_pushed.emit(
+            VolumeFillUndoCommand(doc, bbox, mask_crop, 0, new_label)
+        )
+
     def _reset_view(self):
         if self._volumes:
             self._view.camera.set_range()
             self._view.camera.view_changed()
+
+    def _camera_zoom(self, factor):
+        """Multiply the camera's scale_factor by ``factor`` (< 1 zooms in).
+
+        Works regardless of tool mode — the camera's own mouse bindings
+        would otherwise be disabled during Paint/Fill/Wand/Erase.
+        """
+        cam = self._view.camera if self._view is not None else None
+        if cam is None or not hasattr(cam, '_scale_factor'):
+            return
+        cam._scale_factor = max(1e-6, float(cam._scale_factor) * float(factor))
+        cam.view_changed()
+
+    def _camera_rotate(self, d_azimuth, d_elevation):
+        """Nudge the camera by ``d_azimuth``/``d_elevation`` degrees.
+
+        Matches the discrete rotate buttons in the camera row. Works for
+        both turntable-style cameras (azimuth/elevation) and arcball-style
+        (quaternion rotation around scene axes).
+        """
+        cam = self._view.camera if self._view is not None else None
+        if cam is None:
+            return
+        try:
+            if hasattr(cam, 'azimuth') and hasattr(cam, 'elevation'):
+                cam.azimuth = float(cam.azimuth) + float(d_azimuth)
+                cam.elevation = float(cam.elevation) + float(d_elevation)
+                cam.view_changed()
+                return
+            # Arcball: compose a rotation quaternion around world Y (azimuth)
+            # and world X (elevation), multiply into the existing orientation.
+            if hasattr(cam, '_quaternion'):
+                import math
+                from vispy.util.quaternion import Quaternion
+                q = cam._quaternion
+                if d_azimuth:
+                    q = Quaternion.create_from_axis_angle(
+                        math.radians(float(d_azimuth)), 0.0, 1.0, 0.0
+                    ) * q
+                if d_elevation:
+                    q = Quaternion.create_from_axis_angle(
+                        math.radians(float(d_elevation)), 1.0, 0.0, 0.0
+                    ) * q
+                cam._quaternion = q
+                cam.view_changed()
+        except Exception:
+            pass
+
+    def _install_tool_shortcuts(self):
+        """Wire single-key shortcuts for tool switching (V/F/W/P/E/R/=/-)."""
+        mapping = [
+            ('v', "Navigate"),
+            ('f', "Fill"),
+            ('w', "Wand"),
+            ('p', "Paint"),
+            ('e', "Erase"),
+        ]
+        for key, label in mapping:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(
+                lambda lbl=label: self._tool_combo.setCurrentText(lbl)
+            )
+        # Discrete camera shortcuts
+        sc_reset = QShortcut(QKeySequence("r"), self)
+        sc_reset.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_reset.activated.connect(self._reset_view)
+        sc_in = QShortcut(QKeySequence("="), self)
+        sc_in.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_in.activated.connect(lambda: self._camera_zoom(0.8))
+        sc_out = QShortcut(QKeySequence("-"), self)
+        sc_out.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_out.activated.connect(lambda: self._camera_zoom(1.25))
+        sc_rot_l = QShortcut(QKeySequence("Shift+Left"), self)
+        sc_rot_l.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_rot_l.activated.connect(lambda: self._camera_rotate(-15, 0))
+        sc_rot_r = QShortcut(QKeySequence("Shift+Right"), self)
+        sc_rot_r.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_rot_r.activated.connect(lambda: self._camera_rotate(15, 0))
+        sc_rot_u = QShortcut(QKeySequence("Shift+Up"), self)
+        sc_rot_u.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_rot_u.activated.connect(lambda: self._camera_rotate(0, -15))
+        sc_rot_d = QShortcut(QKeySequence("Shift+Down"), self)
+        sc_rot_d.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_rot_d.activated.connect(lambda: self._camera_rotate(0, 15))
+
+    def keyPressEvent(self, event):
+        """Space = temporary Navigate while held.
+
+        Snapshots the current tool on keydown, switches to Navigate so
+        the camera's mouse bindings come alive, and the release handler
+        restores the prior tool. Autorepeat is ignored so repeated
+        keydowns during a long hold don't overwrite the snapshot.
+        """
+        if (event.key() == Qt.Key_Space
+                and not event.isAutoRepeat()
+                and self._tool_mode != 'navigate'):
+            self._space_prev_tool = self._tool_combo.currentText()
+            self._tool_combo.setCurrentText("Navigate")
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if (event.key() == Qt.Key_Space
+                and not event.isAutoRepeat()
+                and self._space_prev_tool is not None):
+            self._tool_combo.setCurrentText(self._space_prev_tool)
+            self._space_prev_tool = None
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def _rebuild_volumes(self):
         # Remove any existing volumes
@@ -1114,8 +1609,10 @@ class View3DPanel(QWidget):
                        for idx, tint, clim, arr, gf in prepped]
 
         # -- Pass 3: upload, catching OOM so we can retry with more stride --
+        from vispy.visuals.transforms import STTransform
+        budget_total = budget_factor * self._oom_retry_factor
         try:
-            for idx, tint, clim, arr, _gf in prepped:
+            for idx, tint, clim, arr, gf in prepped:
                 arr = _to_uint8(arr, clim)
                 rgb = self._tint_for(idx, tint)
                 cmap = _tinted_colormap(rgb)
@@ -1126,6 +1623,15 @@ class View3DPanel(QWidget):
                     cmap=cmap,
                     clim=(0, 255),
                 )
+                # Scale the visual back to full-resolution world coordinates
+                # so ray-picks, labels overlays, and paint tools — which all
+                # operate in full-res voxel space — line up with the voxel a
+                # user sees on screen. Per-channel stride because the
+                # GPU-cap step can apply different factors to different
+                # channels when their original shapes differ.
+                stride = self._downsample_factor * gf * budget_total
+                if stride > 1:
+                    vol.transform = STTransform(scale=(stride, stride, stride))
                 if idx < len(self._channel_toggles):
                     vol.visible = self._channel_toggles[idx].isChecked()
                 self._volumes.append(vol)
@@ -1237,6 +1743,11 @@ class View3DPanel(QWidget):
         # Render labels after intensity so they composite on top. Larger
         # order = drawn later.
         vol.order = 10
+        # Scale into full-res world space to match the intensity visuals so
+        # label overlays line up with the voxels they describe.
+        if ds > 1:
+            from vispy.visuals.transforms import STTransform
+            vol.transform = STTransform(scale=(ds, ds, ds))
         self._labels_volume = vol
 
     def capture_state(self):
@@ -1325,12 +1836,23 @@ def channels_from_documents(documents):
 
     Skips documents without a ``volume_data`` attribute. Returns an empty list
     if no volumes are available.
+
+    In z-stack ``'all'`` mode the app produces one MontageDocument per slice
+    that all share the same ``volume_data`` ndarray — rendering one Volume
+    visual per doc would stack N identical copies on top of each other and
+    read as "the stack split into tiles". Dedupe by ``id(vol)`` so each
+    distinct volume array is rendered once, using the first doc's name/tint.
     """
     channels = []
+    seen = set()
     for doc in documents:
         vol = getattr(doc, 'volume_data', None)
         if vol is None:
             continue
+        key = id(vol)
+        if key in seen:
+            continue
+        seen.add(key)
         tint = doc.tint_color
         if tint is not None and max(tint) > 1.0:
             tint = tuple(c / 255.0 for c in tint)
