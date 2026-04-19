@@ -99,17 +99,24 @@ def separator_style():
 
 
 def toast_style(border_color):
-    """CSS for toast notification frame + label."""
+    """CSS for toast notification frame + label.
+
+    Scoped to ``QFrame#toastFrame`` so the rule wins over the inherited
+    QApplication palette — without the id, a Qt.Tool window sometimes
+    falls back to the OS default (black on dark desktops).
+    """
     if is_dark():
         return (
-            f"QFrame {{ background: #2a2a2a; border: 2px solid {border_color};"
-            f" border-radius: 6px; }}"
-            f" QLabel {{ color: #dcdcdc; font-size: 12px; border: none; }}"
+            f"QFrame#toastFrame {{ background-color: #2a2a2a;"
+            f" border: 2px solid {border_color}; border-radius: 6px; }}"
+            f" QFrame#toastFrame QLabel {{ background: transparent;"
+            f" color: #dcdcdc; font-size: 12px; border: none; }}"
         )
     return (
-        f"QFrame {{ background: #f5f5f5; border: 2px solid {border_color};"
-        f" border-radius: 6px; }}"
-        f" QLabel {{ color: #222; font-size: 12px; border: none; }}"
+        f"QFrame#toastFrame {{ background-color: #f5f5f5;"
+        f" border: 2px solid {border_color}; border-radius: 6px; }}"
+        f" QFrame#toastFrame QLabel {{ background: transparent;"
+        f" color: #222; font-size: 12px; border: none; }}"
     )
 
 

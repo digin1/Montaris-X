@@ -24,6 +24,9 @@ test.tif
 test.zip
 tests/*.png
 tests/screenshots/
+tests/_screenshots/
+screenshots/
+*.tif
 docs/frames/
 
 # Docusaurus

@@ -163,13 +163,36 @@ def test_erase_finish_does_not_emit_label_added(qapp):
 
 
 def test_tool_combo_has_paint_and_erase(qapp):
-    """UI contract: the tool dropdown exposes all four modes in order."""
+    """UI contract: the tool picker exposes all five modes in order."""
     doc, vol = _make_doc_with_volume((4, 8, 8))
     panel = _make_panel(qapp, doc, vol)
     try:
         items = [panel._tool_combo.itemText(i)
                  for i in range(panel._tool_combo.count())]
         assert items == ["Navigate", "Fill", "Wand", "Paint", "Erase"]
+    finally:
+        panel.close()
+
+
+def test_tool_picker_is_exclusive_button_row(qapp):
+    """The picker is a row of checkable buttons (not a dropdown), with
+    exactly one active at a time. Guard against a regression to combo."""
+    doc, vol = _make_doc_with_volume((4, 8, 8))
+    panel = _make_panel(qapp, doc, vol)
+    try:
+        assert set(panel._tool_buttons.keys()) == {
+            "Navigate", "Fill", "Wand", "Paint", "Erase"
+        }
+        for btn in panel._tool_buttons.values():
+            assert btn.isCheckable()
+        # Exactly one checked at init.
+        checked = [lbl for lbl, b in panel._tool_buttons.items() if b.isChecked()]
+        assert checked == ["Navigate"]
+        # Switching tool via the shim moves the check mark.
+        panel._tool_combo.setCurrentText("Paint")
+        checked = [lbl for lbl, b in panel._tool_buttons.items() if b.isChecked()]
+        assert checked == ["Paint"]
+        assert panel._tool_mode == "paint"
     finally:
         panel.close()
 

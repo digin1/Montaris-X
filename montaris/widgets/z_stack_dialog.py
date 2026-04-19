@@ -12,7 +12,7 @@ class ZStackImportDialog(QDialog):
     Three modes:
       - 'max':    max-intensity projection along Z (recommended for ROI drawing)
       - 'slice':  pick a single Z index
-      - 'all':    import every slice as its own channel (previous behavior)
+      - 'synced': one channel per file, Z slider scrubs them in lockstep
 
     The 3D volume is kept in memory in all modes so the "View in 3D" dialog
     can render it regardless of which 2D representation the user chose.
@@ -60,9 +60,9 @@ class ZStackImportDialog(QDialog):
         slice_row.addStretch(1)
         layout.addLayout(slice_row)
 
-        self._rb_all = QRadioButton("Import every slice as a separate channel")
-        self._group.addButton(self._rb_all)
-        layout.addWidget(self._rb_all)
+        self._rb_synced = QRadioButton("One channel per file, scrub Z in lockstep")
+        self._group.addButton(self._rb_synced)
+        layout.addWidget(self._rb_synced)
 
         self._rb_slice.toggled.connect(self._slice_spin.setEnabled)
 
@@ -91,7 +91,7 @@ class ZStackImportDialog(QDialog):
             self._mode = 'slice'
             self._slice_index = self._slice_spin.value()
         else:
-            self._mode = 'all'
+            self._mode = 'synced'
         if self._cb_batch is not None:
             self._apply_to_batch = self._cb_batch.isChecked()
         self._accepted = True

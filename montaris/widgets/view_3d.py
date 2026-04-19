@@ -15,9 +15,10 @@ import numpy as np
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QCheckBox, QSlider, QMessageBox, QWidget, QFrame, QSpinBox,
+    QColorDialog, QButtonGroup,
 )
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFontMetrics, QKeySequence, QShortcut
+from PySide6.QtGui import QFontMetrics, QKeySequence, QShortcut, QColor
 
 
 VISPY_AVAILABLE = True
@@ -293,6 +294,43 @@ _DEFAULT_TINTS = [
 _RENDER_METHODS = ['mip', 'attenuated_mip', 'translucent', 'additive', 'average']
 
 
+class _ToolComboShim:
+    """Duck-typed ``QComboBox``-like adapter over ``View3DPanel._tool_buttons``.
+
+    Keeps the pre-existing API (``currentText`` / ``setCurrentText`` /
+    ``count`` / ``itemText`` / ``addItems``) working after the tool picker
+    was converted from a dropdown to an exclusive toggle-button row. That
+    means tests and scripts that drive tool changes via the combo still
+    work untouched.
+    """
+
+    def __init__(self, panel):
+        self._panel = panel
+
+    def currentText(self):
+        return self._panel._current_tool_label()
+
+    def setCurrentText(self, label):
+        self._panel._set_current_tool(label)
+
+    def count(self):
+        return len(self._panel._tool_buttons)
+
+    def itemText(self, idx):
+        labels = list(self._panel._tool_buttons.keys())
+        if 0 <= idx < len(labels):
+            return labels[idx]
+        return ""
+
+    def addItems(self, items):
+        # The button row is fixed at construction time; extra items would
+        # require re-laying out the row. Raise loudly so silent test drift
+        # surfaces rather than producing a combo-vs-buttons mismatch.
+        raise NotImplementedError(
+            "Tool list is fixed; extend _tool_buttons in __init__ instead."
+        )
+
+
 def _tinted_colormap(rgb):
     """Build a black→colour colormap with alpha ramping from 0 to 1.
 
@@ -542,20 +580,31 @@ class View3DPanel(QWidget):
         # Per-channel visibility row. Channel names are often 100+-char TIFF
         # filenames; without elision each QCheckBox forces the dialog's
         # minimum width to grow past typical screens (3 channels × ~800 px).
+        # A 16×16 swatch button sits next to each checkbox: click to recolor
+        # that channel live (swatch background = current tint).
         self._channel_toggles = []
+        self._channel_swatches = []
         ch_row = QHBoxLayout()
         ch_row.setSpacing(12)
         for idx, (name, _vol, _tint) in enumerate(self._channels_raw):
+            swatch = QPushButton()
+            swatch.setFixedSize(16, 16)
+            swatch.setToolTip(f"Change colour for {name}")
+            swatch.clicked.connect(lambda _=False, i=idx: self._pick_channel_tint(i))
+            ch_row.addWidget(swatch)
+            self._channel_swatches.append(swatch)
+
             cb = QCheckBox()
             fm = QFontMetrics(cb.font())
             cb.setText(fm.elidedText(name, Qt.ElideMiddle, 180))
             cb.setToolTip(name)
             cb.setChecked(True)
-            rgb = self._tint_for(idx, self._channels_raw[idx][2])
-            cb.setStyleSheet(f"color: rgb({int(rgb[0]*255)}, {int(rgb[1]*255)}, {int(rgb[2]*255)});")
             cb.toggled.connect(lambda on, i=idx: self._set_visible(i, on))
             ch_row.addWidget(cb)
             self._channel_toggles.append(cb)
+
+            rgb = self._tint_for(idx, self._channels_raw[idx][2])
+            self._refresh_channel_tint_ui(idx, rgb)
         ch_row.addStretch(1)
         if self._channel_toggles:
             root.addLayout(ch_row)
@@ -592,15 +641,33 @@ class View3DPanel(QWidget):
             # Fill is napari-style label relabel (no intensity, no tolerance);
             # Wand is intensity-based 3D flood into the selected ROI using
             # Channel + Tolerance. Paint/Erase are spherical brushes.
+            # Presented as an exclusive toggle-button row (not a dropdown)
+            # so all tools are one click away and the active tool is visible.
             tool_row = QHBoxLayout()
             tool_row.setSpacing(8)
             tool_row.addWidget(QLabel("Tool:"))
-            self._tool_combo = QComboBox()
-            self._tool_combo.addItems(
-                ["Navigate", "Fill", "Wand", "Paint", "Erase"]
-            )
-            self._tool_combo.currentTextChanged.connect(self._on_tool_changed)
-            tool_row.addWidget(self._tool_combo)
+            self._tool_buttons: dict[str, QPushButton] = {}
+            self._tool_group = QButtonGroup(self)
+            self._tool_group.setExclusive(True)
+            for label, shortcut in (
+                ("Navigate", "V"), ("Fill", "F"), ("Wand", "W"),
+                ("Paint", "P"), ("Erase", "E"),
+            ):
+                btn = QPushButton(f"{label} ({shortcut})")
+                btn.setCheckable(True)
+                btn.setToolTip(self._TOOL_HINTS.get(label.lower(), label))
+                btn.clicked.connect(
+                    lambda _=False, lbl=label: self._set_current_tool(lbl)
+                )
+                self._tool_group.addButton(btn)
+                tool_row.addWidget(btn)
+                self._tool_buttons[label] = btn
+            self._tool_buttons["Navigate"].setChecked(True)
+            # Backward-compat shim: earlier code (and plenty of tests) drove
+            # tool changes through ``_tool_combo.setCurrentText(...)`` /
+            # ``currentText()``. Expose the same duck-typed API so the
+            # button-row swap stays a drop-in replacement.
+            self._tool_combo = _ToolComboShim(self)
 
             tool_row.addWidget(self._sep())
 
@@ -772,6 +839,43 @@ class View3DPanel(QWidget):
             return preferred
         return _DEFAULT_TINTS[idx % len(_DEFAULT_TINTS)]
 
+    def _pick_channel_tint(self, idx):
+        """Open a colour picker for channel ``idx`` and apply the choice."""
+        if not (0 <= idx < len(self._channels_raw)):
+            return
+        current = self._tint_for(idx, self._channels_raw[idx][2])
+        initial = QColor(
+            int(current[0] * 255), int(current[1] * 255), int(current[2] * 255)
+        )
+        color = QColorDialog.getColor(
+            initial, self, "Channel Colour",
+            options=QColorDialog.DontUseNativeDialog,
+        )
+        if not color.isValid():
+            return
+        rgb = (color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0)
+        name, vol, _old = self._channels_raw[idx]
+        self._channels_raw[idx] = (name, vol, rgb)
+        # Live-update the GPU colormap — vispy rebuilds the fragment shader.
+        if 0 <= idx < len(self._volumes):
+            try:
+                self._volumes[idx].cmap = _tinted_colormap(rgb)
+            except Exception:
+                # If the visual can't accept a live cmap swap on this driver,
+                # rebuild the volume stack so the new tint takes effect.
+                self._rebuild_volumes()
+        self._refresh_channel_tint_ui(idx, rgb)
+
+    def _refresh_channel_tint_ui(self, idx, rgb):
+        """Sync the swatch background and checkbox text colour to ``rgb``."""
+        r, g, b = int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+        if 0 <= idx < len(self._channel_swatches):
+            self._channel_swatches[idx].setStyleSheet(
+                f"background-color: rgb({r},{g},{b}); border: 1px solid #555;"
+            )
+        if 0 <= idx < len(self._channel_toggles):
+            self._channel_toggles[idx].setStyleSheet(f"color: rgb({r},{g},{b});")
+
     def _on_mode_changed(self, text):
         method = next((m for m, lbl in self._mode_labels.items() if lbl == text), 'mip')
         for vol in self._volumes:
@@ -784,6 +888,25 @@ class View3DPanel(QWidget):
     def _set_visible(self, idx, on):
         if 0 <= idx < len(self._volumes):
             self._volumes[idx].visible = on
+
+    def _current_tool_label(self):
+        """Return the label (e.g. ``"Navigate"``) of the currently checked tool."""
+        for label, btn in self._tool_buttons.items():
+            if btn.isChecked():
+                return label
+        return "Navigate"
+
+    def _set_current_tool(self, label):
+        """Check the button for ``label`` and run the tool-change handler.
+
+        Safe to call with a label the panel doesn't know — unrecognised
+        labels are no-ops so a stale keyboard binding can't crash us.
+        """
+        btn = self._tool_buttons.get(label)
+        if btn is None:
+            return
+        btn.setChecked(True)
+        self._on_tool_changed(label)
 
     def _on_tool_changed(self, text):
         self._tool_mode = text.lower()
@@ -1525,7 +1648,7 @@ class View3DPanel(QWidget):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(
-                lambda lbl=label: self._tool_combo.setCurrentText(lbl)
+                lambda lbl=label: self._set_current_tool(lbl)
             )
         # Discrete camera shortcuts
         sc_reset = QShortcut(QKeySequence("r"), self)
@@ -1561,8 +1684,8 @@ class View3DPanel(QWidget):
         if (event.key() == Qt.Key_Space
                 and not event.isAutoRepeat()
                 and self._tool_mode != 'navigate'):
-            self._space_prev_tool = self._tool_combo.currentText()
-            self._tool_combo.setCurrentText("Navigate")
+            self._space_prev_tool = self._current_tool_label()
+            self._set_current_tool("Navigate")
             event.accept()
             return
         super().keyPressEvent(event)
@@ -1571,7 +1694,7 @@ class View3DPanel(QWidget):
         if (event.key() == Qt.Key_Space
                 and not event.isAutoRepeat()
                 and self._space_prev_tool is not None):
-            self._tool_combo.setCurrentText(self._space_prev_tool)
+            self._set_current_tool(self._space_prev_tool)
             self._space_prev_tool = None
             event.accept()
             return
@@ -1837,11 +1960,11 @@ def channels_from_documents(documents):
     Skips documents without a ``volume_data`` attribute. Returns an empty list
     if no volumes are available.
 
-    In z-stack ``'all'`` mode the app produces one MontageDocument per slice
-    that all share the same ``volume_data`` ndarray — rendering one Volume
-    visual per doc would stack N identical copies on top of each other and
-    read as "the stack split into tiles". Dedupe by ``id(vol)`` so each
-    distinct volume array is rendered once, using the first doc's name/tint.
+    In z-stack ``'synced'`` mode the app produces one MontageDocument per
+    channel that may share the same ``volume_data`` ndarray (when a single
+    file supplies multiple views of the same stack). Dedupe by ``id(vol)``
+    so each distinct volume array is rendered once, using the first doc's
+    name/tint.
     """
     channels = []
     seen = set()

@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QHBoxLayout,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
+from PySide6.QtGui import QKeySequence
 from montaris.tools import TOOL_REGISTRY, get_tool_class
 from montaris.tools.polygon import PolygonTool
 from montaris import theme as _theme
@@ -305,6 +306,32 @@ class ToolPanel(QWidget):
             for btn in self._action_btns:
                 if hasattr(btn, '_qta_name'):
                     btn.setIcon(qta.icon(btn._qta_name, color=color))
+
+    def suspend_tool_shortcuts(self):
+        """Clear tool-button shortcuts so another panel can own those keys.
+
+        Used when the 3D viewer takes over the central stack — its V/E/P/R
+        shortcuts would otherwise collide with the 2D tool palette's
+        window-scoped shortcuts. Idempotent.
+        """
+        if getattr(self, '_saved_shortcuts', None):
+            return
+        self._saved_shortcuts = {}
+        for name, btn in self._tool_buttons.items():
+            ks = btn.shortcut()
+            self._saved_shortcuts[name] = ks
+            btn.setShortcut(QKeySequence())
+
+    def restore_tool_shortcuts(self):
+        """Reinstate shortcuts saved by ``suspend_tool_shortcuts``."""
+        saved = getattr(self, '_saved_shortcuts', None)
+        if not saved:
+            return
+        for name, ks in saved.items():
+            btn = self._tool_buttons.get(name)
+            if btn is not None:
+                btn.setShortcut(ks)
+        self._saved_shortcuts = None
 
     # Shorter labels for narrow sidebar
     _SHORT_LABELS = {

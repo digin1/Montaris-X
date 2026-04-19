@@ -103,7 +103,10 @@ class ColorPaletteDialog(QDialog):
         self.accept()
 
     def _custom(self):
-        color = QColorDialog.getColor(QColor(*self._current), self)
+        color = QColorDialog.getColor(
+            QColor(*self._current), self,
+            options=QColorDialog.DontUseNativeDialog,
+        )
         if color.isValid():
             self._selected = (color.red(), color.green(), color.blue())
             self.accept()
@@ -200,6 +203,10 @@ class LayerPanel(QWidget):
 
         self.list_widget = PlaceholderListWidget("No ROIs — draw or import to begin")
         self.list_widget.setStyleSheet(_theme.list_widget_style())
+        # Reserve vertical space for the ROI list so sibling docks (Display
+        # Settings, Image Adjustments) can't squeeze it below a useful size
+        # when they expand.
+        self.list_widget.setMinimumHeight(300)
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
         self.list_widget.setDefaultDropAction(Qt.MoveAction)

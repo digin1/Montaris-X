@@ -7,6 +7,21 @@ from montaris.core.display_modes import DisplayMode
 from montaris import theme as _theme
 
 
+# Channel checkboxes with names longer than this get their visible text
+# truncated with an ellipsis; the full name lives in the tooltip. Keeps the
+# right dock narrow even when TIFFs carry very long filenames.
+_CHANNEL_LABEL_MAX_CHARS = 28
+
+
+def _elide(name: str) -> str:
+    if len(name) <= _CHANNEL_LABEL_MAX_CHARS:
+        return name
+    # Keep head + tail so the channel suffix (e.g. ``_z17``, ``_C0``) stays
+    # readable — the discriminator is what users need to tell channels apart.
+    head = _CHANNEL_LABEL_MAX_CHARS - 10
+    return f"{name[:head]}\u2026{name[-8:]}"
+
+
 class DisplayPanel(QWidget):
     mode_changed = Signal(object)
     channels_changed = Signal(list)
@@ -56,7 +71,8 @@ class DisplayPanel(QWidget):
         self._channel_checkboxes.clear()
 
         for i, name in enumerate(channel_names):
-            cb = QCheckBox(name)
+            cb = QCheckBox(_elide(name))
+            cb.setToolTip(name)
             cb.setChecked(active_indices is None or i in active_indices)
             cb.setStyleSheet(_theme.checkbox_style())
             cb.stateChanged.connect(self._on_channel_toggled)

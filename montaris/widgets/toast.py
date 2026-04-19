@@ -17,7 +17,12 @@ class ToastNotification(QFrame):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
         self.setFixedHeight(36)
+        # objectName pairs with QFrame#toastFrame in theme.toast_style so the
+        # stylesheet wins against the inherited palette.
+        self.setObjectName("toastFrame")
 
         color = _LEVEL_COLORS.get(level, _LEVEL_COLORS["info"])
         self.setStyleSheet(_theme.toast_style(color))

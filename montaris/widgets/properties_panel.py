@@ -135,7 +135,10 @@ class PropertiesPanel(QWidget):
 
     def _pick_boundary_color(self):
         c = self.app.layer_stack.boundary_color
-        color = QColorDialog.getColor(QColor(*c), self, "Boundary Colour")
+        color = QColorDialog.getColor(
+            QColor(*c), self, "Boundary Colour",
+            options=QColorDialog.DontUseNativeDialog,
+        )
         if color.isValid():
             self.app.layer_stack.boundary_color = (color.red(), color.green(), color.blue())
             self._update_color_buttons()
@@ -143,7 +146,10 @@ class PropertiesPanel(QWidget):
 
     def _pick_active_color(self):
         c = self.app.layer_stack.active_boundary_color
-        color = QColorDialog.getColor(QColor(*c), self, "Active Boundary Colour")
+        color = QColorDialog.getColor(
+            QColor(*c), self, "Active Boundary Colour",
+            options=QColorDialog.DontUseNativeDialog,
+        )
         if color.isValid():
             self.app.layer_stack.active_boundary_color = (color.red(), color.green(), color.blue())
             self._update_color_buttons()

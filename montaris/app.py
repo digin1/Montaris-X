@@ -220,6 +220,10 @@ class MontarisApp(QMainWindow):
         self._roi_import_path = None  # track where ROI ZIP was loaded from
         self._composite_mode = False
         self._session_dir = None  # current session folder path (reused on save)
+        # Display Settings is collapsed by default; auto-expand it the first
+        # time a multi-channel / z-sync batch is loaded so users see the
+        # channel checkboxes without hunting for them.
+        self._display_settings_auto_expanded = False
 
         self._icon_registry = []
         self._setup_canvas()
@@ -351,34 +355,59 @@ class MontarisApp(QMainWindow):
         scrolling the slider actually scans through the stack. Rotate/flip are
         baked into ``volume_data`` at load time, so only the on-the-fly
         downsample is applied here.
+
+        When the active doc belongs to a z-sync group (several TIFFs loaded
+        together as one channel each), every sibling doc is scrubbed to the
+        same Z so composite view stays aligned.
         """
         doc = self._active_document()
         vol = getattr(doc, 'volume_data', None) if doc is not None else None
         if doc is None or vol is None or vol.ndim != 3:
             return
-        z = int(val)
-        z = max(0, min(vol.shape[0] - 1, z))
-        doc.active_z = z
-        n = vol.shape[0]
-        self._z_label.setText(f"{z + 1} / {n}")
-        ds = int(doc.downsample_factor or 1)
-        plane = vol[z]
-        if ds > 1:
-            plane = plane[::ds, ::ds]
-        # Keep image_layer.data a contiguous array — downstream adjustment /
-        # minimap / canvas refresh paths assume writeable ndarrays, and a
-        # non-contiguous view here triggers subtle colormap artifacts.
-        doc.image_layer.data = np.ascontiguousarray(plane)
-        if doc is self._active_document():
+        group_docs = self._z_group_docs(doc)
+        max_z = min(d.volume_data.shape[0] for d in group_docs) - 1
+        z = max(0, min(max_z, int(val)))
+        self._z_label.setText(f"{z + 1} / {max_z + 1}")
+        for d in group_docs:
+            d.active_z = z
+            plane = d.volume_data[z]
+            ds = int(d.downsample_factor or 1)
+            if ds > 1:
+                plane = plane[::ds, ::ds]
+            # Keep image_layer.data a contiguous array — downstream adjustment /
+            # minimap / canvas refresh paths assume writeable ndarrays, and a
+            # non-contiguous view here triggers subtle colormap artifacts.
+            d.image_layer.data = np.ascontiguousarray(plane)
+        if self._composite_mode:
+            self._refresh_composite()
+        else:
             self.canvas.refresh_image()
             self.minimap.set_image(doc.image_layer.data)
             self.adjustments_panel.set_image_data(doc.image_layer.data)
         # VolumeROILayer caches bbox per slice; the active slice just changed
-        # so every volume-backed ROI needs its bbox recomputed before redraw.
+        # so every volume-backed ROI in any affected doc needs its bbox
+        # recomputed before redraw.
+        affected = set(id(d) for d in group_docs)
         for roi in self.layer_stack.roi_layers:
-            if getattr(roi, 'is_volume', False) and getattr(roi, '_doc', None) is doc:
+            if getattr(roi, 'is_volume', False) and id(getattr(roi, '_doc', None)) in affected:
                 roi.invalidate_bbox()
         self.canvas.refresh_overlays()
+
+    def _z_group_docs(self, doc):
+        """Return every doc that should scrub Z in lockstep with ``doc``.
+
+        Docs with a non-``None`` ``z_sync_group`` scrub together; everything
+        else scrubs alone.
+        """
+        gid = getattr(doc, 'z_sync_group', None)
+        if gid is None:
+            return [doc]
+        return [
+            d for d in self._documents
+            if getattr(d, 'z_sync_group', None) == gid
+            and getattr(d, 'volume_data', None) is not None
+            and d.volume_data.ndim == 3
+        ] or [doc]
 
     def _active_document(self):
         """Currently-focused document, or None if the active cell is empty."""
@@ -390,13 +419,18 @@ class MontarisApp(QMainWindow):
         return self._documents[0]
 
     def _update_z_slider_visibility(self):
-        """Show the Z slider iff the active doc is a z-stack."""
+        """Show the Z slider iff the active doc is a z-stack.
+
+        For z-sync groups, the slider range follows the shortest stack in the
+        group so no doc is ever asked for a slice it doesn't have.
+        """
         doc = self._active_document()
         vol = getattr(doc, 'volume_data', None) if doc is not None else None
         if vol is None or vol.ndim != 3:
             self._z_bar.setVisible(False)
             return
-        n = vol.shape[0]
+        group_docs = self._z_group_docs(doc)
+        n = min(d.volume_data.shape[0] for d in group_docs)
         self._z_bar.setVisible(True)
         # block signals so setting the range doesn't trigger a redraw pass
         self._z_slider.blockSignals(True)
@@ -472,6 +506,11 @@ class MontarisApp(QMainWindow):
             self._collapsible_headers.append(header)
             right_lay.addWidget(header)
             right_lay.addWidget(panel)
+            if title == "Display Settings":
+                # Stash so the first multi-channel load can auto-expand it.
+                self._display_settings_header = header
+                self._display_settings_panel = panel
+                self._display_settings_title = title
 
         right_lay.addStretch()
 
@@ -1633,8 +1672,23 @@ class MontarisApp(QMainWindow):
             self.canvas.refresh_image()
 
     def _on_channels_changed(self, active_indices):
+        """Route channel-checkbox changes into the canvas.
+
+        Composite on: just recompose using the new active set.
+        Composite off: checking >1 auto-enables composite (the only way to
+        see multiple channels at once); checking exactly 1 makes that doc
+        active, which is the non-composite single-channel view.
+        """
         if self._composite_mode:
             self._refresh_composite()
+            return
+        if len(active_indices) >= 2:
+            self.display_panel.composite_cb.setChecked(True)
+            return
+        if len(active_indices) == 1:
+            idx = active_indices[0]
+            if 0 <= idx < len(self._documents) and idx != self._active_doc_index:
+                self._doc_combo.setCurrentIndex(idx)
 
     def _on_composite_toggled(self, checked):
         self._composite_mode = checked
@@ -1905,9 +1959,12 @@ class MontarisApp(QMainWindow):
                 probe = None
             if probe is not None and probe.get('is_zstack'):
                 z_probes[path] = probe
-        z_mode = None        # 'max' | 'slice' | 'all' — chosen by user
+        z_mode = None        # 'max' | 'slice' | 'synced' — chosen by user
         z_slice = 0
         z_apply_batch = False
+        # Fresh sync-group id for synced-mode batches, so every doc created
+        # below gets the same id and scrubs Z in lockstep. Minted lazily.
+        sync_group_id = None
         if z_probes:
             first_path = next(iter(z_probes))
             probe = z_probes[first_path]
@@ -1940,10 +1997,14 @@ class MontarisApp(QMainWindow):
                         mode = None
                         slice_idx = 0
                     channels = self._channels_from_path(path, mode, slice_idx)
+                    if mode == 'synced' and sync_group_id is None:
+                        sync_group_id = self._mint_z_sync_group_id()
+                    doc_group = sync_group_id if mode == 'synced' else None
                     for name, data, volume in channels:
                         self._load_single_channel(
                             name, data, ds_factor, skipped,
                             image_path=path, volume_data=volume,
+                            z_sync_group=doc_group,
                         )
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to load {os.path.basename(path)}:\n{e}")
@@ -1992,6 +2053,7 @@ class MontarisApp(QMainWindow):
                 self._view3d_panel.deleteLater()
                 self._view3d_panel = None
             self.layer_panel.set_3d_mode(False)
+            self.tool_panel.restore_tool_shortcuts()
             self._view3d_btn.setText(" View in 3D")
             self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
             return
@@ -2023,6 +2085,9 @@ class MontarisApp(QMainWindow):
             self._view3d_panel = panel
             self._central_stack.addWidget(panel)
             self._central_stack.setCurrentWidget(panel)
+            # Release V/E/P/R etc. so the 3D panel's widget-scoped shortcuts
+            # can fire without fighting the ToolPanel's window-scoped ones.
+            self.tool_panel.suspend_tool_shortcuts()
             # Carry the LayerPanel's current selection into the new panel so
             # a paint stroke right after opening extends the selected ROI.
             sel = self.canvas._active_layer
@@ -2086,11 +2151,10 @@ class MontarisApp(QMainWindow):
         colors so Montaris round-trips losslessly. Prompts the user when no
         active document has a labels volume attached (no 3D ROIs to export).
         """
-        # Prefer the active doc, but in z-stack "all" mode only the 3D
-        # viewer's primary doc actually holds labels_3d — the other slice
-        # wrappers are empty. Fall back to whichever doc has a populated
-        # labels volume so Export still works when the user is scrolling
-        # through a different 2D slice at the time.
+        # Prefer the active doc, but only the 3D viewer's primary doc in a
+        # synced-mode batch actually holds labels_3d — sibling channel docs
+        # share the volume but not the labels. Fall back to whichever doc
+        # has a populated labels volume.
         active = self._active_document()
         candidates = []
         if active is not None:
@@ -2136,10 +2200,8 @@ class MontarisApp(QMainWindow):
 
         Targets the active doc when it has ``volume_data``; otherwise picks
         the first doc that does — the same document ``View3DPanel`` uses as
-        its ``_primary_doc``. This matters in z-stack 'all' mode where the
-        active doc is often an empty slice wrapper: importing there would
-        attach the labels to a different document than the 3D view reads.
-        Any existing ``labels_3d`` on the target is replaced wholesale
+        its ``_primary_doc``, so labels stay attached to the doc the 3D view
+        reads from. Any existing ``labels_3d`` on the target is replaced wholesale
         along with its meta; stale :class:`VolumeROILayer` wrappers in the
         layer stack are dropped and fresh ones created from the imported
         labels.
@@ -2246,9 +2308,14 @@ class MontarisApp(QMainWindow):
     def _channels_from_path(self, path, z_mode, z_slice):
         """Return list of (name, data_2d, volume_or_None) for a given file path.
 
-        z_mode is one of 'max', 'slice', 'all', or None for non-z-stack files.
-        The 3D volume is attached to every channel tuple produced from a z-stack
-        so the 3D viewer can access it regardless of which 2D projection was chosen.
+        z_mode is one of 'max', 'slice', 'synced', or None for non-z-stack
+        files. The 3D volume is attached to every channel tuple produced from a
+        z-stack so the 3D viewer can access it regardless of which 2D projection
+        was chosen.
+
+        ``'synced'`` returns one channel per file-level channel, using the first
+        slice as the 2D representation. The caller is responsible for assigning
+        a shared ``z_sync_group`` so all loaded docs scrub Z together.
 
         Multi-channel volumetric TIFFs (``CZYX``/``TZYX``) are split into one
         entry per channel/timepoint — each gets its own ``MontageDocument``
@@ -2266,14 +2333,21 @@ class MontarisApp(QMainWindow):
             if z_mode == 'slice':
                 z = max(0, min(volume.shape[0] - 1, int(z_slice)))
                 results.append((f"{base}_z{z}", volume[z], volume))
-            elif z_mode == 'all':
-                for i in range(volume.shape[0]):
-                    results.append((f"{base}_z{i}", volume[i], volume))
+            elif z_mode == 'synced':
+                results.append((base, volume[0], volume))
             else:  # 'max' or fallback
                 results.append((base, max_projection(volume, axis=0), volume))
         return results
 
-    def _load_single_channel(self, name, data, ds_factor, skipped, image_path=None, volume_data=None):
+    def _mint_z_sync_group_id(self):
+        """Return an unused z_sync_group id (1 + current max)."""
+        existing = [
+            getattr(d, 'z_sync_group', None) for d in self._documents
+            if getattr(d, 'z_sync_group', None) is not None
+        ]
+        return (max(existing) + 1) if existing else 1
+
+    def _load_single_channel(self, name, data, ds_factor, skipped, image_path=None, volume_data=None, z_sync_group=None):
         """Load one image/channel into the image stack."""
         if self._flip_on_load_act.isChecked():
             data = np.flip(data, axis=1).copy()
@@ -2328,6 +2402,7 @@ class MontarisApp(QMainWindow):
             image_path=image_path,
             volume_data=volume_data,
             volume_axes='ZYX' if volume_data is not None else None,
+            z_sync_group=z_sync_group,
         )
         self._documents.append(doc)
         self._active_doc_index = len(self._documents) - 1
@@ -2344,6 +2419,26 @@ class MontarisApp(QMainWindow):
         """Update display panel channel list from loaded documents."""
         names = [doc.name for doc in self._documents]
         self.display_panel.set_channels(names)
+        if len(names) >= 2:
+            self._auto_expand_display_settings()
+
+    def _auto_expand_display_settings(self):
+        """Expand the Display Settings collapsible the first time it's useful.
+
+        Runs at most once per session; after the user has seen the panel open
+        we respect whatever collapsed state they leave it in.
+        """
+        if self._display_settings_auto_expanded:
+            return
+        header = getattr(self, '_display_settings_header', None)
+        panel = getattr(self, '_display_settings_panel', None)
+        title = getattr(self, '_display_settings_title', 'Display Settings')
+        if header is None or panel is None:
+            return
+        if not panel.isVisible():
+            panel.setVisible(True)
+            header.setText(f"\u25BC  {title}")
+        self._display_settings_auto_expanded = True
 
     def close_image(self):
         """Close the current image, prompting user about ROIs."""
@@ -2479,10 +2574,10 @@ class MontarisApp(QMainWindow):
     def save_session_progress(self):
         """Save all ROIs as ImageJ .roi files in a timestamped session folder."""
         doc = self._documents[self._active_doc_index] if self._documents else None
-        # In z-stack "all" mode the active doc might be an empty slice
-        # wrapper while the real labels live on a sibling doc. Fall back
-        # to whichever doc actually holds labels so session save still
-        # captures 3D ROIs regardless of which slice is showing.
+        # In a synced-mode batch only one doc in the group holds labels_3d
+        # (the 3D viewer's primary). Fall back to whichever doc actually has
+        # labels so session save still captures 3D ROIs regardless of which
+        # channel is active.
         labels_doc = doc if (
             doc is not None
             and getattr(doc, 'labels_3d', None) is not None
@@ -4041,7 +4136,10 @@ class MontarisApp(QMainWindow):
             return
         doc = self._documents[self._active_doc_index]
         initial = QColor(*(doc.tint_color or (255, 255, 255)))
-        color = QColorDialog.getColor(initial, self, "Channel Tint Color")
+        color = QColorDialog.getColor(
+            initial, self, "Channel Tint Color",
+            options=QColorDialog.DontUseNativeDialog,
+        )
         if color.isValid():
             doc.tint_color = (color.red(), color.green(), color.blue())
             self._update_tint_btn()

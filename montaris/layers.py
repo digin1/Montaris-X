@@ -774,6 +774,11 @@ class MontageDocument:
     # to compute its 2D ``mask`` property, so the 2D compositor can render
     # 3D ROIs as per-slice overlays without any extra plumbing.
     active_z: int = 0
+    # Shared identifier for z-stacks loaded together as separate channels.
+    # The Z slider scrubs every doc in the same sync group in lockstep, so
+    # composite view shows all channels at matching Z. ``None`` means the
+    # doc has no siblings and scrubs independently.
+    z_sync_group: int | None = None
 
     def ensure_labels_3d(self):
         """Lazy-allocate the labels volume the first time a 3D ROI is drawn.

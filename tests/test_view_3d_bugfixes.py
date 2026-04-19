@@ -3,7 +3,8 @@
 Covers three bugs surfaced in the 2026-04-18 code review:
 
 - ``channels_from_documents`` duplicated a shared z-stack across N docs
-  (z-stack 'all' mode), making the 3D viewer render tiled copies.
+  (synced-mode channels sharing one volume), making the 3D viewer render
+  tiled copies.
 - ``_on_drag_refresh_tick`` uploaded the sub-region with xyz offset where
   vispy's Texture3D expects zyx.
 - The bottom Z-slider only nudged ROI bboxes; it never swapped
@@ -40,7 +41,7 @@ def _doc_with_volume(name, vol):
 
 
 def test_channels_from_documents_dedupes_shared_volume():
-    """Z-stack 'all' mode creates N docs sharing one volume; only one entry."""
+    """N docs sharing one volume (synced mode) should dedupe to one channel."""
     vol = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
     docs = [_doc_with_volume(f"stack_z{i}", vol) for i in range(vol.shape[0])]
     # Each doc's 2D image is a distinct slice but all share the same `vol`.
@@ -1033,12 +1034,12 @@ def test_first_paint_vs_extend_undo_is_differentiated(app, qapp):
 
 
 def test_export_volume_labels_falls_back_to_sibling_doc(app, qapp, tmp_path, monkeypatch):
-    """Export works when active doc is an empty z-stack slice wrapper.
+    """Export works when active doc is a sibling channel without labels.
 
-    In z-stack "all" mode, each Z-slice gets its own MontageDocument but
+    In a synced-mode batch, sibling channel docs share ``volume_data`` but
     only the 3D viewer's primary doc actually holds the labels. Export
-    used to fail with "No 3D ROIs" whenever the user had scrolled off
-    that primary doc — we now search all docs for one with labels.
+    used to fail with "No 3D ROIs" whenever the user had switched to
+    another channel — we now search all docs for one with labels.
     """
     import os
     from PySide6.QtWidgets import QFileDialog
@@ -1051,7 +1052,7 @@ def test_export_volume_labels_falls_back_to_sibling_doc(app, qapp, tmp_path, mon
 
     # doc_b simulates a sibling slice doc with no labels attached (the one
     # the user happens to be viewing in 2D when they hit Export).
-    vol_b = doc_a.volume_data  # shared volume in "all" mode
+    vol_b = doc_a.volume_data  # shared volume across synced-mode channels
     layer_b = ImageLayer("slice", vol_b[0])
     doc_b = MontageDocument(
         name="slice_z0",
