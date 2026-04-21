@@ -51,6 +51,9 @@ dependencies = [
     "Pillow>=10.0.0",
     "psutil>=5.9.0",
     "numba>=0.58.0",
+    "vispy>=0.14",
+    "PyOpenGL>=3.1",
+    "qtawesome>=1.3.0",
 ]
 
 [project.optional-dependencies]
@@ -61,10 +64,10 @@ test = [
 accel = [
     "numba>=0.58.0",
 ]
-viewer3d = [
-    "vispy>=0.14",
-    "PyOpenGL>=3.1",
-]
+# Back-compat alias — the 3D viewer + its deps are now core, but the
+# extra is kept empty so existing ``pip install montaris-x[viewer3d]``
+# commands in user scripts keep working without error.
+viewer3d = []
 
 [project.urls]
 Homepage = "https://digindominic.me/Montaris-X/"
