@@ -27,6 +27,8 @@ from montaris.layers import (
 from montaris.widgets.view_3d import (
     VISPY_AVAILABLE,
     View3DPanel,
+    _coerce_gl_int,
+    _max_pool_labels,
     channels_from_documents,
 )
 
@@ -60,6 +62,391 @@ def test_channels_from_documents_keeps_distinct_volumes():
     channels = channels_from_documents(docs)
     assert len(channels) == 2
     assert {c[0] for c in channels} == {"A", "B"}
+
+
+def test_coerce_gl_int_accepts_plain_int():
+    """Well-behaved driver returning a scalar int → same int."""
+    assert _coerce_gl_int(2048, fallback=-1) == 2048
+    assert _coerce_gl_int(0, fallback=-1) == 0
+
+
+def test_coerce_gl_int_unwraps_tuple_return():
+    """Some GL wrappers report GL_MAX_3D_TEXTURE_SIZE / NVX memory info as a
+    tuple (single-element or multi-component). If we treat that as opaque
+    and drop through to the NVIDIA heuristic, the RTX 4090's 24 GB card
+    gets capped at 1 GB — the user sees visibly worse downsample than
+    they should. The helper must unwrap the first numeric element.
+    """
+    # NVIDIA NVX_CURRENT_AVAILABLE_VIDMEM on some driver builds returns a
+    # 1-element tuple of kilobytes.
+    assert _coerce_gl_int((20_000_000,), fallback=-1) == 20_000_000
+    # GL_MAX_3D_TEXTURE_SIZE on wrappers that always return arrays.
+    assert _coerce_gl_int((2048, 0, 0, 0), fallback=-1) == 2048
+
+
+def test_coerce_gl_int_falls_back_on_unknown():
+    """Bytes / strings / None / empty tuple → fallback, don't crash."""
+    assert _coerce_gl_int(None, fallback=7) == 7
+    assert _coerce_gl_int((), fallback=7) == 7
+    assert _coerce_gl_int(b"NVIDIA", fallback=7) == 7
+    assert _coerce_gl_int(True, fallback=7) == 7  # bool is skipped
+
+
+def test_detect_max_3d_dim_handles_tuple_return(monkeypatch):
+    """End-to-end: GL wrapper returns a tuple for GL_MAX_3D_TEXTURE_SIZE;
+    _detect_max_3d_dim must unwrap it instead of falling back to the
+    conservative ``_MAX_3D_DIM_FALLBACK`` default.
+    """
+    import montaris.widgets.view_3d as v3d
+    monkeypatch.setattr(v3d, '_query_gl',
+                        lambda canvas, enum, fallback: (2048, 0, 0, 0))
+    assert v3d._detect_max_3d_dim(canvas=None) == 2048
+
+
+def test_detect_vram_budget_unwraps_nvx_tuple(monkeypatch):
+    """End-to-end regression for the RTX 4090 report: NVX_CURRENT_AVAILABLE
+    returns a tuple on the affected driver build. Without coercion, the
+    budget silently drops to the 4 GB heuristic fallback instead of using
+    the driver's real ~24 GB reading.
+    """
+    import montaris.widgets.view_3d as v3d
+    # 20 GB free, reported as a 1-element tuple of kilobytes.
+    kb_free = 20 * 1024 * 1024  # 20 GB in kB
+    monkeypatch.setattr(v3d, '_query_gl',
+                        lambda canvas, enum, fallback: (kb_free,))
+    # No env override, NVIDIA GPU description.
+    monkeypatch.delenv('MONTARIS_GPU_BUDGET_MB', raising=False)
+    budget = v3d._detect_vram_budget_bytes(canvas=None,
+                                           gpu_desc='NVIDIA RTX 4090')
+    # Half of free VRAM = 10 GB.
+    assert budget == kb_free * 1024 // 2
+    # Sanity: well above the 4 GB heuristic fallback.
+    assert budget > 4 * 1024 * 1024 * 1024
+
+
+def test_detect_vram_budget_falls_through_when_nvx_is_garbage(monkeypatch):
+    """If NVX returns an unusable value (None, empty tuple), fall through
+    to the GL_RENDERER heuristic — must not crash and must return 4 GB
+    for an NVIDIA string.
+    """
+    import montaris.widgets.view_3d as v3d
+    monkeypatch.setattr(v3d, '_query_gl',
+                        lambda canvas, enum, fallback: ())  # bogus
+    monkeypatch.delenv('MONTARIS_GPU_BUDGET_MB', raising=False)
+    budget = v3d._detect_vram_budget_bytes(canvas=None,
+                                           gpu_desc='NVIDIA RTX 4090')
+    assert budget == 4 * 1024 * 1024 * 1024
+
+
+def test_detect_vram_budget_uses_amd_ati_meminfo(monkeypatch):
+    """AMD cards don't expose NVX but do expose GL_ATI_meminfo. Querying
+    TEXTURE_FREE_MEMORY_ATI (0x87FC) returns a 4-tuple of kilobytes where
+    the first element is total free texture memory. Without this, AMD
+    users get the 4 GB heuristic fallback regardless of actual VRAM.
+    """
+    import montaris.widgets.view_3d as v3d
+
+    def fake_query(canvas, enum, fallback):
+        # NVX enums return nothing (non-NVIDIA), ATI returns free VRAM.
+        if enum == v3d._TEXTURE_FREE_MEMORY_ATI:
+            # 16 GB free, reported as (total_free, largest_block, aux, aux)
+            return (16 * 1024 * 1024, 8 * 1024 * 1024, 0, 0)
+        return fallback
+
+    monkeypatch.setattr(v3d, '_query_gl', fake_query)
+    monkeypatch.delenv('MONTARIS_GPU_BUDGET_MB', raising=False)
+    budget = v3d._detect_vram_budget_bytes(canvas=None,
+                                           gpu_desc='AMD Radeon RX 7900 XTX')
+    # Half of the 16 GB pool.
+    assert budget == 16 * 1024 * 1024 * 1024 // 2
+    # And it's above the 4 GB heuristic, proving we took the ATI path.
+    assert budget > 4 * 1024 * 1024 * 1024
+
+
+def test_detect_vram_budget_amd_falls_through_without_ati(monkeypatch):
+    """AMD card without the ATI_meminfo extension (old driver / mesa
+    subset) must still land on the 4 GB heuristic, not crash.
+    """
+    import montaris.widgets.view_3d as v3d
+    monkeypatch.setattr(v3d, '_query_gl',
+                        lambda canvas, enum, fallback: fallback)
+    monkeypatch.delenv('MONTARIS_GPU_BUDGET_MB', raising=False)
+    budget = v3d._detect_vram_budget_bytes(canvas=None,
+                                           gpu_desc='AMD Radeon RX 580')
+    assert budget == 4 * 1024 * 1024 * 1024
+
+
+def test_max_pool_labels_preserves_thin_structures():
+    """The 3D labels overlay is downsampled when the stack exceeds the GPU's
+    3D-texture cap. Stride decimation destroys sparse thin structures (a
+    1-voxel-wide dendrite at an odd index collapses into nothing, producing
+    the "skeleton" effect users see on re-toggle). Max-pool must keep any
+    block that contained a nonzero label.
+    """
+    labels = np.zeros((4, 16, 16), dtype=np.uint16)
+    # 1-voxel-wide horizontal line at an odd Y — stride-2 misses every voxel.
+    labels[1, 1, :] = 7
+    strided = labels[::1, ::2, ::1]
+    assert (strided > 0).sum() == 0, "sanity: stride loses this sparse line"
+
+    pooled = _max_pool_labels(labels, (1, 2, 1))
+    assert pooled.shape == (4, 8, 16)
+    # Every X column had a label voxel in its block — all 16 should survive.
+    assert (pooled > 0).sum() == 16
+    # Max-pool preserves the label id.
+    assert int(pooled.max()) == 7
+
+
+def test_max_pool_labels_single_voxel_survives():
+    """A single ROI voxel at an odd coordinate must not be stride-eaten."""
+    labels = np.zeros((2, 8, 8), dtype=np.uint16)
+    labels[0, 3, 5] = 42
+    assert (labels[::1, ::2, ::1] > 0).sum() == 0  # stride misses it
+    pooled = _max_pool_labels(labels, (1, 2, 1))
+    assert (pooled > 0).sum() == 1
+    assert int(pooled.max()) == 42
+
+
+def test_max_pool_labels_passthrough_when_block_is_one():
+    """Block size (1,1,1) → no-op, return array unchanged (identity)."""
+    labels = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    out = _max_pool_labels(labels, (1, 1, 1))
+    assert out is labels  # identity, no copy
+
+
+def test_max_pool_labels_preserves_trailing_remainder():
+    """Non-divisible axis (e.g. Y=2599 with dy=2 → matches user's GPU-cap
+    downsample). A label on the very last Y-row must not vanish, and the
+    output shape must match ``ceil(S/f)`` to line up with the intensity
+    volume's stride at ``_fit_to_gpu``.
+    """
+    labels = np.zeros((4, 7, 4), dtype=np.uint16)
+    labels[0, 6, 2] = 9  # trailing row y=6, block (1,2,1) would pool at [6]
+    pooled = _max_pool_labels(labels, (1, 2, 1))
+    # ceil(7/2) = 4, so pooled Y should have 4 rows — not 3 (floor).
+    assert pooled.shape == (4, 4, 4)
+    # The trailing row's label ends up at the last output row.
+    assert int(pooled[0, 3, 2]) == 9
+
+
+def test_max_pool_labels_honours_id_map_for_partial_visibility():
+    """Partial visibility regression: when a block contains both a visible
+    ROI and a hidden one, max-pool used to pick the hidden id (whose cmap
+    alpha is 0), so the visible ROI's voxels rendered transparent. With an
+    id_map that remaps invisible ids to 0, max-pool picks the visible id.
+    """
+    labels = np.zeros((2, 4, 4), dtype=np.uint16)
+    # Block (1, 2, 1) at output cell (0, 1, 2): input rows y=2 and y=3 at x=2.
+    labels[0, 2, 2] = 3     # visible ROI
+    labels[0, 3, 2] = 150   # hidden ROI — higher id wins raw max
+
+    raw = _max_pool_labels(labels, (1, 2, 1))
+    assert int(raw[0, 1, 2]) == 150, "raw max-pool picks the higher id"
+
+    # id_map remaps label 150 to 0 (hidden).
+    id_map = np.arange(151, dtype=labels.dtype)
+    id_map[150] = 0
+    masked = _max_pool_labels(labels, (1, 2, 1), id_map=id_map)
+    assert int(masked[0, 1, 2]) == 3, (
+        "with id_map, max-pool must ignore hidden labels so the visible "
+        "ROI's voxel survives in the pooled output"
+    )
+
+
+def test_max_pool_labels_extends_short_id_map_without_index_error():
+    """A malformed caller could pass an id_map too small for the voxel
+    value range (e.g. partial sidecar leaves labels_meta missing an id).
+    The helper must not IndexError — it extends the LUT with identity
+    entries so the upload proceeds instead of crashing the 3D viewer.
+    """
+    labels = np.zeros((1, 4, 4), dtype=np.uint16)
+    labels[0, 0, 0] = 100  # voxel id beyond short id_map
+    # id_map only covers 0..9; 100 is out of range.
+    short_id_map = np.arange(10, dtype=np.uint16)
+    out = _max_pool_labels(labels, (1, 2, 2), id_map=short_id_map)
+    # Identity extension preserves the raw label.
+    assert int(out.max()) == 100
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_fast_path_refreshes_via_set_data_not_raw_texture(qapp, monkeypatch):
+    """Regression: the in-place fast path must go through
+    ``VolumeVisual.set_data(..., clim=...)`` rather than poking
+    ``_texture.set_data`` and reassigning ``clim`` separately.
+
+    Why: vispy's ``VolumeVisual`` caches the uploaded array as ``_last_data``
+    and re-uploads it from ``_last_data`` when ``clim`` widens past the
+    cached data's own range. If we bypass ``set_data``, ``_last_data`` is
+    stale, so a later ``clim`` widen (e.g. after a paint adds a larger
+    label id) silently re-uploads OLD voxels and drops the new ones.
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    vol[0, 0, 0] = 1
+    doc = _doc_with_volume("regression", vol)
+    doc.labels_3d = np.zeros_like(vol)
+    doc.labels_3d[0, 0, 0] = 1
+    doc.labels_meta = {1: {"name": "r1", "color": (255, 0, 0),
+                           "opacity": 128, "visible": True,
+                           "fill_mode": "solid"}}
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        # Force the pool path by setting a non-identity downsample so the
+        # fast-path shape-match check is actually exercised.
+        panel._last_total_ds_axes = (1, 2, 1)
+        # Initial build (slow path — no prior visual).
+        panel._rebuild_labels_overlay()
+        assert panel._labels_volume is not None
+
+        captured = {}
+
+        def fake_set_data(vol_data, clim=None, copy=True):
+            captured['shape'] = tuple(vol_data.shape)
+            captured['clim'] = tuple(clim) if clim is not None else None
+            captured['copy'] = copy
+
+        monkeypatch.setattr(panel._labels_volume, 'set_data', fake_set_data)
+        # Also patch _texture.set_data so a regression to the old code path
+        # would be visible (captured['raw_texture']).
+        monkeypatch.setattr(panel._labels_volume._texture, 'set_data',
+                            lambda *a, **kw: captured.setdefault(
+                                'raw_texture', True))
+
+        # Add a larger id to doc and trigger another refresh — simulates a
+        # paint stroke adding label 5 after the overlay was last built.
+        doc.labels_3d[1, 1, 1] = 5
+        doc.labels_meta[5] = {"name": "r5", "color": (0, 255, 0),
+                              "opacity": 128, "visible": True,
+                              "fill_mode": "solid"}
+        panel._rebuild_labels_overlay()
+
+        assert captured.get('raw_texture') is not True, (
+            "fast path must route through VolumeVisual.set_data — "
+            "bypassing it leaves _last_data stale and a later clim widen "
+            "will re-upload outdated voxels"
+        )
+        assert captured.get('clim') == (0.0, 5.0), (
+            "new max_id must be passed to set_data so VolumeVisual's "
+            "cached _last_data stays in sync with the new clim"
+        )
+    finally:
+        panel.close()
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_rebuild_labels_overlay_reentrancy_is_suppressed(qapp, monkeypatch):
+    """show_progress flushes paint events, which can let a queued signal
+    re-enter refresh_labels while the outer call is still mid-build. The
+    guard must drop the reentrant call so stale locals don't clobber the
+    freshly-uploaded state on return.
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    doc = _doc_with_volume("reentry", vol)
+    doc.labels_3d = np.zeros_like(vol)
+    doc.labels_3d[0, 0, 0] = 1
+    doc.labels_meta = {1: {"name": "r1", "color": (255, 0, 0),
+                           "opacity": 128, "visible": True,
+                           "fill_mode": "solid"}}
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        calls = {'count': 0}
+        real_do = panel._do_rebuild_labels_overlay
+
+        def counting_do():
+            calls['count'] += 1
+            # Inside the first build, re-enter via the public entry point.
+            if calls['count'] == 1:
+                panel._rebuild_labels_overlay()
+            real_do()
+
+        monkeypatch.setattr(panel, '_do_rebuild_labels_overlay', counting_do)
+
+        panel._rebuild_labels_overlay()
+
+        # Only the outer call ran the actual body; the reentrant inner call
+        # was short-circuited by the guard.
+        assert calls['count'] == 1
+    finally:
+        panel.close()
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_all_hidden_skips_pool_and_upload(qapp, monkeypatch):
+    """'Hide all' should not repool/re-upload — just toggle the visual off.
+    LayerPanel's toggle-all-off sets every meta['visible']=False; without
+    this short-circuit the pool+id_map+upload still runs (~1s on large
+    stacks).
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    doc = _doc_with_volume("hidden", vol)
+    doc.labels_3d = np.zeros_like(vol)
+    doc.labels_3d[0, 0, 0] = 1
+    doc.labels_meta = {1: {"name": "r1", "color": (255, 0, 0),
+                           "opacity": 128, "visible": True,
+                           "fill_mode": "solid"}}
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        panel._last_total_ds_axes = (1, 2, 1)
+        panel._rebuild_labels_overlay()
+        assert panel._labels_volume is not None
+
+        pool_calls = {'count': 0}
+        import montaris.widgets.view_3d as v3d
+        real_pool = v3d._max_pool_labels
+
+        def counted_pool(*a, **kw):
+            pool_calls['count'] += 1
+            return real_pool(*a, **kw)
+
+        monkeypatch.setattr(v3d, '_max_pool_labels', counted_pool)
+
+        # Hide the only ROI and re-trigger.
+        doc.labels_meta[1]['visible'] = False
+        panel._rebuild_labels_overlay()
+
+        assert pool_calls['count'] == 0, (
+            "all-hidden path must skip the pool entirely"
+        )
+        assert panel._labels_volume.visible is False
+    finally:
+        panel.close()
+
+
+def test_max_pool_labels_reuses_out_buffer():
+    """Passing a preallocated ``out`` buffer of matching shape/dtype must
+    (a) write into it in place, (b) start from zeros, (c) return the same
+    buffer so the caller can cache it across refreshes.
+    """
+    labels = np.zeros((2, 6, 4), dtype=np.uint16)
+    labels[0, 2, 2] = 5
+    target_shape = (2, 3, 4)
+    buf = np.full(target_shape, 99, dtype=np.uint16)  # pre-dirty
+    result = _max_pool_labels(labels, (1, 2, 1), out=buf)
+    # Returns the same buffer — the visibility-toggle fast path relies on
+    # this to avoid re-allocating ~0.5 GB every refresh on the user's data.
+    assert result is buf
+    # Old values wiped; only the real label remains.
+    assert int(buf.max()) == 5
+    # Mismatched shape → helper allocates a fresh output (not in place).
+    too_small = np.zeros((1, 1, 1), dtype=np.uint16)
+    result2 = _max_pool_labels(labels, (1, 2, 1), out=too_small)
+    assert result2 is not too_small
+    assert result2.shape == target_shape
+
+
+def test_max_pool_labels_axis_shorter_than_block_still_pools_others():
+    """Block on axis A can exceed the array length on A while pooling the
+    other axes correctly. Previous stride-fallback re-introduced the
+    skeleton bug on axes that could have been pooled.
+    """
+    labels = np.zeros((1, 4, 4), dtype=np.uint16)
+    labels[0, 1, 1] = 5  # odd Y, odd X
+    pooled = _max_pool_labels(labels, (2, 2, 2))
+    # ceil(1/2)=1, ceil(4/2)=2 — Z axis short, Y/X still pooled.
+    assert pooled.shape == (1, 2, 2)
+    assert int(pooled[0, 0, 0]) == 5  # voxel at (0,1,1) falls into (0,0,0)
 
 
 @pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")

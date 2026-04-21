@@ -15,7 +15,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QCheckBox, QSlider, QMessageBox, QWidget, QFrame, QSpinBox,
-    QColorDialog, QButtonGroup,
+    QColorDialog, QButtonGroup, QApplication, QProgressBar,
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QKeySequence, QShortcut, QColor
@@ -186,6 +186,11 @@ _GL_MAX_3D_TEXTURE_SIZE = 0x8073
 # NVIDIA's NVX_gpu_memory_info extension — returns kilobytes.
 _GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX = 0x9049
 _GPU_MEMORY_INFO_TOTAL_AVAILABLE_VIDMEM_NVX = 0x9048
+# AMD's ATI_meminfo extension — returns a 4-tuple of kilobytes per pool
+# (total free, largest free block, total aux free, largest aux free). We
+# care about the texture pool's total free memory for labels + intensity
+# volume uploads.
+_TEXTURE_FREE_MEMORY_ATI = 0x87FC
 
 
 def _query_gl(canvas, enum, fallback):
@@ -197,9 +202,41 @@ def _query_gl(canvas, enum, fallback):
         return fallback
 
 
+def _coerce_gl_int(value, fallback=0):
+    """Normalise a GL state return into an int.
+
+    vispy's ``glGetParameter`` wraps ``glGetIntegerv``, which can yield a
+    tuple/list when the driver reports multiple components for the same
+    enum (common for NVIDIA's NVX_gpu_memory_info in some driver builds,
+    and for ``GL_MAX_3D_TEXTURE_SIZE`` on wrappers that always return
+    fixed-size arrays). Treating such a return as opaque and dropping
+    through to the heuristic silently caps the VRAM budget at 1 GB on a
+    24 GB card — the user sees visibly-worse downsample than they should.
+    """
+    if isinstance(value, bool):  # bool is a subclass of int; skip
+        return fallback
+    if isinstance(value, (int, float)):
+        return int(value)
+    # Bytes/str iterate per-byte/per-char and would return the ordinal of
+    # the first character — not an integer count. Reject them outright.
+    if isinstance(value, (bytes, bytearray, str)):
+        return fallback
+    try:
+        if hasattr(value, "__len__") and len(value) == 0:
+            return fallback
+        for x in value:
+            if isinstance(x, (int, float)) and not isinstance(x, bool):
+                return int(x)
+    except TypeError:
+        pass
+    return fallback
+
+
 def _detect_max_3d_dim(canvas):
     try:
-        return int(_query_gl(canvas, _GL_MAX_3D_TEXTURE_SIZE, _MAX_3D_DIM_FALLBACK))
+        raw = _query_gl(canvas, _GL_MAX_3D_TEXTURE_SIZE, _MAX_3D_DIM_FALLBACK)
+        cap = _coerce_gl_int(raw, _MAX_3D_DIM_FALLBACK)
+        return cap if cap > 0 else _MAX_3D_DIM_FALLBACK
     except Exception:
         return _MAX_3D_DIM_FALLBACK
 
@@ -221,11 +258,13 @@ def _detect_vram_budget_bytes(canvas, gpu_desc):
     Precedence:
     1. MONTARIS_GPU_BUDGET_MB environment override (explicit user control).
     2. NVIDIA NVX_gpu_memory_info query — real free VRAM, halved for headroom.
-    3. Heuristic based on GL_RENDERER string:
+    3. AMD ATI_meminfo texture-pool query — real free VRAM, halved.
+    4. Heuristic based on GL_RENDERER string:
        - Software (llvmpipe/swr) → 64 MB (CPU path, keep tiny)
        - Intel / integrated      → 256 MB (shares system RAM, stay modest)
        - Apple Silicon           → 1024 MB (unified memory, but don't hog)
-       - NVIDIA / AMD discrete   → 1024 MB (assume ≥2 GB card, leave headroom)
+       - NVIDIA / AMD discrete   → 4096 MB (modern workstation baseline;
+                                             OOM retry adds stride if wrong)
 
     OpenGL has no portable free-VRAM query, so the heuristic is the honest
     best-effort for non-NVIDIA GPUs.
@@ -237,12 +276,27 @@ def _detect_vram_budget_bytes(canvas, gpu_desc):
         except ValueError:
             pass
 
-    # NVX extension path — only exists on NVIDIA drivers.
+    # NVX extension path — only exists on NVIDIA drivers. The raw return
+    # can be an int OR a multi-element tuple/array depending on the GL
+    # wrapper / driver build; coerce before using it.
     try:
-        kb = _query_gl(canvas, _GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, 0)
-        if isinstance(kb, (int, float)) and kb > 0:
+        raw = _query_gl(canvas, _GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, 0)
+        kb = _coerce_gl_int(raw, 0)
+        if kb > 0:
             # Half of free VRAM leaves room for other textures + framebuffers.
-            return int(kb) * 1024 // 2
+            return kb * 1024 // 2
+    except Exception:
+        pass
+
+    # ATI_meminfo extension path — AMD cards. TEXTURE_FREE_MEMORY_ATI
+    # returns a 4-tuple of kilobytes; element [0] is the texture pool's
+    # total free memory. Other vendors silently return no-data (GL_INVALID_ENUM
+    # or a zero tuple) so this call is safe to attempt unconditionally.
+    try:
+        raw = _query_gl(canvas, _TEXTURE_FREE_MEMORY_ATI, 0)
+        kb = _coerce_gl_int(raw, 0)
+        if kb > 0:
+            return kb * 1024 // 2
     except Exception:
         pass
 
@@ -253,9 +307,14 @@ def _detect_vram_budget_bytes(canvas, gpu_desc):
         return 256 * 1024 * 1024
     if "apple" in desc or "metal" in desc:
         return 1024 * 1024 * 1024
+    # NVIDIA/AMD heuristic fallback. The NVX path should have hit on
+    # NVIDIA; if it didn't (driver variant, non-NVIDIA discrete), 4 GB
+    # matches the low end of modern discrete cards and keeps the
+    # downsample from collapsing to a 1 GB cap on users with 12-24 GB
+    # cards like the RTX 4090.
     if "nvidia" in desc or "geforce" in desc or "rtx" in desc or "quadro" in desc \
        or "amd" in desc or "radeon" in desc:
-        return 1024 * 1024 * 1024
+        return 4 * 1024 * 1024 * 1024
     # Unknown GPU — be conservative.
     return 256 * 1024 * 1024
 
@@ -363,6 +422,87 @@ def _downsample(volume, factor):
     return volume[::factor, ::factor, ::factor]
 
 
+def _max_pool_labels(labels, block, id_map=None, out=None):
+    """Downsample an integer labels volume by block-max instead of stride.
+
+    Stride-decimation on sparse integer labels collapses thin structures
+    (e.g. 1-voxel-wide dendrites) into disconnected dots — the "skeleton"
+    artefact. Block max-pool keeps any voxel whose block contained a nonzero
+    label, which is the right behaviour for overlays where the user just
+    needs to see where ROIs are rather than exact voxel counts.
+
+    ``block`` is a ``(dz, dy, dx)`` tuple of per-axis pooling factors.
+
+    ``id_map`` (optional) is a 1-D lookup array indexed by label id. When
+    given, each sub-view is remapped through it before being folded into
+    the block max. This is how partial visibility is handled: invisible
+    labels map to 0 so max-pool won't pick them over a visible but
+    smaller-id neighbour. Without this remap, a block containing ROI 3
+    (visible) and ROI 150 (hidden) pools to 150; the cmap gives alpha=0
+    to 150; ROI 3's voxels in that block disappear — the "skeleton" you
+    see when only some ROIs are toggled on.
+
+    Output shape matches ``ceil(S/f)`` per axis — the same shape the
+    intensity pipeline's stride produces via ``_fit_to_gpu`` — so the
+    STTransform scale in :meth:`_rebuild_labels_overlay` keeps the overlay
+    voxel-for-voxel aligned with the intensity volume. Trailing-edge
+    voxels that don't fill a full block still contribute: we accumulate
+    by phase-offset strided views into a pre-allocated output, so cells
+    whose block straddles the array edge just get max over the present
+    neighbours without any padding or trim.
+    """
+    dz, dy, dx = (max(1, int(b)) for b in block)
+    no_pool = (dz, dy, dx) == (1, 1, 1)
+    if no_pool and id_map is None:
+        return labels
+    # Defensive: a short id_map would IndexError on advanced indexing below.
+    # Callers should size from ``max(labels.max(), max_meta_id)``; if they
+    # slipped, extend the LUT with identity entries so indexing is safe.
+    if id_map is not None:
+        lbl_max = int(labels.max()) if labels.size else 0
+        if lbl_max >= id_map.size:
+            extended = np.arange(lbl_max + 1, dtype=id_map.dtype)
+            extended[:id_map.size] = id_map
+            id_map = extended
+    if no_pool:
+        # No spatial reduction — just remap ids. The cmap already handles
+        # alpha=0 for invisible labels, so callers usually skip the id_map
+        # here, but support it for parity with the pooled path.
+        return id_map[labels]
+    Z, Y, X = labels.shape
+    oz = (Z + dz - 1) // dz
+    oy = (Y + dy - 1) // dy
+    ox = (X + dx - 1) // dx
+    if out is None:
+        out = np.zeros((oz, oy, ox), dtype=labels.dtype)
+    else:
+        if out.shape != (oz, oy, ox) or out.dtype != labels.dtype:
+            out = np.zeros((oz, oy, ox), dtype=labels.dtype)
+        else:
+            out.fill(0)
+    for iz in range(dz):
+        sz = Z - iz
+        if sz <= 0:
+            continue
+        nz = (sz + dz - 1) // dz
+        for iy in range(dy):
+            sy = Y - iy
+            if sy <= 0:
+                continue
+            ny = (sy + dy - 1) // dy
+            for ix in range(dx):
+                sx = X - ix
+                if sx <= 0:
+                    continue
+                nx = (sx + dx - 1) // dx
+                sub = labels[iz::dz, iy::dy, ix::dx]
+                if id_map is not None:
+                    sub = id_map[sub]
+                np.maximum(out[:nz, :ny, :nx], sub,
+                           out=out[:nz, :ny, :nx])
+    return out
+
+
 def _fit_to_gpu(volume, max_dim=_MAX_3D_DIM_FALLBACK):
     """Stride-downsample axes exceeding the driver's 3D-texture limit.
 
@@ -453,6 +593,18 @@ class View3DPanel(QWidget):
         self._labels_volume = None  # scene.visuals.Volume for labels_3d overlay
         self._labels_visible = True
         self._labels_opacity = 0.6
+        # Cache for the pooled labels array — reused across visibility toggles
+        # to avoid re-allocating ~0.5 GB per refresh. Keyed by (shape, dtype,
+        # block); invalidated when any of those change (downsample slider,
+        # import, etc.). Preallocation also lets us pass ``out=`` into the
+        # pooler so each call just overwrites the buffer.
+        self._pooled_labels_buf = None
+        self._pooled_labels_key = None  # (shape, dtype, block)
+        # Reentrancy guard for _rebuild_labels_overlay. show_progress flushes
+        # paint events which in turn can process queued signals (visibility
+        # toggles, opacity edits) that re-enter refresh_labels. Even with
+        # ExcludeUserInputEvents the guard is cheap belt-and-suspenders.
+        self._rebuilding_labels = False
         # Last total downsample applied to intensity volumes, kept as
         # per-axis ``(dz, dy, dx)`` so non-cubic stacks that only exceed the
         # driver's 3D-texture limit on one axis render at correct scale.
@@ -512,6 +664,20 @@ class View3DPanel(QWidget):
             keys='interactive', show=False, bgcolor='black', parent=self,
         )
         root.addWidget(self._canvas.native, 1)
+
+        # Slim progress bar (matches 2D canvas style) for slow refreshes
+        # (partial-visibility re-pool) and label-TIFF imports. Indeterminate
+        # by default — the work is mostly a single numpy pool + GL upload,
+        # so there's no useful percentage to report.
+        self._progress_bar = QProgressBar(self)
+        self._progress_bar.setFixedHeight(4)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setStyleSheet(
+            "QProgressBar { background: transparent; border: none; }"
+            "QProgressBar::chunk { background: #00b4ff; }"
+        )
+        self._progress_bar.hide()
+        root.addWidget(self._progress_bar)
 
         self._view = self._canvas.central_widget.add_view()
         self._view.camera = PanArcballCamera(fov=0)
@@ -1004,6 +1170,27 @@ class View3DPanel(QWidget):
     def refresh_labels(self):
         """Public hook used by paint/fill tools after they mutate labels_3d."""
         self._rebuild_labels_overlay()
+
+    def show_progress(self):
+        """Show the indeterminate progress bar and flush paint events so it
+        renders before the caller blocks on a long operation (pool + GL
+        upload, TIFF import). ``ExcludeUserInputEvents`` is critical:
+        without it, a rapid-fire user click reenters through Qt's queued
+        events and kicks off a nested ``_rebuild_labels_overlay`` while
+        the outer one still holds stale ``labels`` / ``max_id`` locals —
+        the outer call then overwrites the freshly-uploaded state on
+        return. This excludes mouse/keyboard, so paint+expose flush but
+        no new work is started. Cheap to call speculatively — callers
+        without heavy work to do can skip this and the bar never shows.
+        """
+        from PySide6.QtCore import QEventLoop
+        self._progress_bar.setRange(0, 0)  # indeterminate / marquee
+        self._progress_bar.show()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+    def hide_progress(self):
+        """Hide the progress bar."""
+        self._progress_bar.hide()
 
     def _on_canvas_mouse_press(self, event):
         """Route mouse press to the active annotation tool.
@@ -1837,56 +2024,187 @@ class View3DPanel(QWidget):
         return Colormap(colors=colors, controls=controls, interpolation='zero')
 
     def _rebuild_labels_overlay(self):
-        """(Re)create the labels overlay visual from ``primary_doc.labels_3d``.
+        """(Re)create — or in-place update — the labels overlay visual.
 
-        Safe to call when no labels exist — tears down any stale overlay and
-        returns. Called at the end of every intensity rebuild so downsample
-        changes propagate, and from ``refresh_labels()`` after paint ops.
+        Full rebuild happens the first time, on dtype/shape changes
+        (downsample slider, re-import with different volume), or when no
+        labels exist. Visibility / opacity / colour changes reuse the
+        existing ``scene.visuals.Volume`` and just re-upload the texture
+        data + swap the colormap — this avoids recreating the whole vispy
+        visual, which costs hundreds of milliseconds on large stacks.
+
+        The pooled output buffer is cached too, so the repeated pool that
+        happens on every toggle doesn't re-allocate ~0.5 GB per call.
         """
-        # Always drop the old visual first — it may be out of date.
-        if self._labels_volume is not None:
-            self._labels_volume.parent = None
-            self._labels_volume = None
+        # Reentrancy guard: show_progress() pumps paint events and a
+        # queued signal (e.g. another visibility toggle) could otherwise
+        # reenter us while `labels`/`max_id` locals are still stale.
+        # Skipping reentrant calls is safe — the triggering signal either
+        # beat us to the same state or will fire a fresh refresh on its
+        # own emit path. We never lose a refresh: every external trigger
+        # calls refresh_labels again after its own state is committed.
+        if self._rebuilding_labels:
+            return
+        self._rebuilding_labels = True
+        try:
+            self._do_rebuild_labels_overlay()
+        finally:
+            self._rebuilding_labels = False
+            # Belt-and-suspenders: guarantee the progress bar is hidden
+            # even if _do_rebuild_labels_overlay's own finally missed a
+            # path (e.g. an exception thrown before its try started).
+            self.hide_progress()
+
+    def _do_rebuild_labels_overlay(self):
+        """Actual rebuild body. Never call directly — always route through
+        ``_rebuild_labels_overlay`` so the reentrancy guard holds.
+        """
         if self._view is None:
+            if self._labels_volume is not None:
+                self._labels_volume.parent = None
+                self._labels_volume = None
             return
         doc = self._primary_doc
         if doc is None or doc.labels_3d is None or not doc.labels_meta:
+            if self._labels_volume is not None:
+                self._labels_volume.parent = None
+                self._labels_volume = None
             return
         labels = doc.labels_3d
-        dz, dy, dx = (max(1, int(a)) for a in self._last_total_ds_axes)
-        if (dz, dy, dx) != (1, 1, 1):
-            labels = labels[::dz, ::dy, ::dx]
-        max_id = max(doc.labels_meta.keys())
+        max_id = int(max(doc.labels_meta.keys()))
         if max_id <= 0:
+            if self._labels_volume is not None:
+                self._labels_volume.parent = None
+                self._labels_volume = None
             return
-        cmap = self._build_labels_colormap(doc.labels_meta, max_id)
-        try:
-            # Hand the integer array straight through — vispy's Volume
-            # accepts uint8/uint16 and uploads them verbatim. Casting to
-            # float32 quadrupled the texture bytes for no visual benefit
-            # (we have at most a few hundred label ids per document, so
-            # uint16 is already more than enough precision).
-            vol = scene.visuals.Volume(
-                np.ascontiguousarray(labels),
-                parent=self._view.scene,
-                method='translucent',
-                cmap=cmap,
-                clim=(0, float(max_id)),
+        # All-hidden fast-path: nothing will render anyway. Skip the pool
+        # and the upload entirely and just toggle the existing visual off.
+        # LayerPanel's "hide all" sets every VolumeROILayer.visible=False,
+        # which hits this path — the slowest case in the old code becomes
+        # the fastest.
+        all_hidden = all(
+            (not m.get('visible', True))
+            or int(m.get('opacity', 128)) <= 0
+            for m in doc.labels_meta.values()
+        )
+        if all_hidden:
+            if self._labels_volume is not None:
+                self._labels_volume.visible = False
+                self._labels_volume.update()
+            return
+        dz, dy, dx = (max(1, int(a)) for a in self._last_total_ds_axes)
+        block = (dz, dy, dx)
+        if block != (1, 1, 1):
+            # Max-pool per (dz, dy, dx) block rather than stride-decimate.
+            # Stride decimation skips voxels, which destroys sparse thin
+            # structures (e.g. 1-voxel-wide dendrites collapse to a dot grid
+            # — the "skeleton" effect). Max-pool preserves any block that
+            # contains a nonzero label, matching napari's behaviour.
+            # Remap effectively-hidden labels to 0 only when at least one
+            # label is actually hidden — the remap uses advanced indexing
+            # which is ~4× slower than identity pooling on large stacks.
+            # "Show all" skips the remap and hits the fast path; "hide all"
+            # short-circuits above before we get here.
+            any_hidden = any(
+                (not m.get('visible', True))
+                or int(m.get('opacity', 128)) <= 0
+                for m in doc.labels_meta.values()
             )
-        except Exception as e:  # noqa: BLE001 — GL upload can fail on edge dtypes
-            print(f"[view_3d] labels overlay failed: {e}")
-            return
-        vol.visible = self._labels_visible
-        # Render labels after intensity so they composite on top. Larger
-        # order = drawn later.
-        vol.order = 10
-        # Scale into full-res world space to match the intensity visuals so
-        # label overlays line up with the voxels they describe. Array order
-        # is (Z, Y, X); STTransform scale is (X, Y, Z).
-        if (dz, dy, dx) != (1, 1, 1):
-            from vispy.visuals.transforms import STTransform
-            vol.transform = STTransform(scale=(dx, dy, dz))
-        self._labels_volume = vol
+            id_map = None
+            if any_hidden:
+                # Size id_map from the larger of labels_meta and the actual
+                # voxel max so a partial sidecar (ids present in labels_3d
+                # but not in labels_meta) can't IndexError inside the
+                # helper. For uint8/uint16 labels the whole value range
+                # fits in a cheap LUT; bigger dtypes fall back to a scan.
+                if labels.dtype.itemsize <= 2:
+                    lut_size = int(np.iinfo(labels.dtype).max) + 1
+                else:
+                    lut_size = max(max_id, int(labels.max())) + 1
+                id_map = np.arange(lut_size, dtype=labels.dtype)
+                for lid, meta in doc.labels_meta.items():
+                    lid = int(lid)
+                    if lid <= 0 or lid >= lut_size:
+                        continue
+                    hidden = (not meta.get('visible', True)
+                              or int(meta.get('opacity', 128)) <= 0)
+                    if hidden:
+                        id_map[lid] = 0
+            # Show the indeterminate progress bar for the slow partial-
+            # visibility path — pool + advanced-index remap + GL upload
+            # takes ~1 s on large sparse stacks, long enough that the user
+            # deserves visible feedback. "Show all" skips this (id_map is
+            # None → much faster); "hide all" already short-circuited above.
+            if id_map is not None:
+                self.show_progress()
+            # Reuse the preallocated pool buffer when the signature matches
+            # so visibility toggles don't re-allocate the pooled array.
+            key = (labels.shape, labels.dtype, block)
+            reuse = (self._pooled_labels_key == key
+                     and self._pooled_labels_buf is not None)
+            out_buf = self._pooled_labels_buf if reuse else None
+            labels = _max_pool_labels(labels, block, id_map=id_map,
+                                      out=out_buf)
+            self._pooled_labels_buf = labels
+            self._pooled_labels_key = key
+        try:
+            cmap = self._build_labels_colormap(doc.labels_meta, max_id)
+            labels_contig = np.ascontiguousarray(labels)
+
+            # Fast path: reuse the existing Volume visual when shape/dtype
+            # match what's already on the GPU. Swap the data + cmap in
+            # place so visibility toggles don't pay the cost of rebuilding
+            # the vispy visual (shader compile + scene graph churn). Use
+            # VolumeVisual.set_data rather than poking _texture directly —
+            # the visual caches the data for later re-uploads (e.g. when
+            # clim widens), so bypassing it would leave stale voxels
+            # around. ``copy=False`` skips the internal memcpy since
+            # labels_contig is already contiguous and we won't mutate it.
+            if (self._labels_volume is not None
+                    and tuple(getattr(self, '_labels_tex_shape', ())) == labels_contig.shape
+                    and getattr(self, '_labels_tex_dtype', None) == labels_contig.dtype):
+                try:
+                    self._labels_volume.set_data(
+                        labels_contig, clim=(0, float(max_id)), copy=False,
+                    )
+                    self._labels_volume.cmap = cmap
+                    self._labels_volume.visible = self._labels_visible
+                    self._labels_volume.update()
+                    return
+                except Exception:
+                    # Fall through to full rebuild on any in-place failure.
+                    pass
+
+            # Slow path: full rebuild (first render, shape change, fallback).
+            if self._labels_volume is not None:
+                self._labels_volume.parent = None
+                self._labels_volume = None
+            try:
+                # Hand the integer array straight through — vispy's Volume
+                # accepts uint8/uint16 and uploads them verbatim.
+                vol = scene.visuals.Volume(
+                    labels_contig,
+                    parent=self._view.scene,
+                    method='translucent',
+                    cmap=cmap,
+                    clim=(0, float(max_id)),
+                )
+            except Exception as e:  # noqa: BLE001 — GL upload can fail on edge dtypes
+                print(f"[view_3d] labels overlay failed: {e}")
+                return
+            vol.visible = self._labels_visible
+            vol.order = 10  # drawn after intensity so labels composite on top
+            if block != (1, 1, 1):
+                from vispy.visuals.transforms import STTransform
+                vol.transform = STTransform(scale=(dx, dy, dz))
+            self._labels_volume = vol
+            self._labels_tex_shape = labels_contig.shape
+            self._labels_tex_dtype = labels_contig.dtype
+        finally:
+            # Hide is cheap and a no-op when the bar wasn't shown, so just
+            # always call it here instead of tracking whether show_progress
+            # ran.
+            self.hide_progress()
 
     def capture_state(self):
         """Snapshot camera pose so it can be restored after a rebuild."""

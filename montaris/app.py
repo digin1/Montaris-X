@@ -2158,6 +2158,37 @@ class MontarisApp(QMainWindow):
         self._view3d_btn.setText(" View in 3D")
         self._view3d_btn.setToolTip("Open a 3D volume view of any loaded z-stacks")
 
+    def _select_roi_layer(self, layer):
+        """Select ``layer`` in the LayerPanel and force-sync downstream state.
+
+        Qt's ``setCurrentRow`` is a no-op when the row is already current
+        (e.g. LayerPanel.refresh restored the same row number), so relying
+        on the ``currentRowChanged`` signal alone drops the sync in
+        legitimate cases — most visibly, a second import that lands on the
+        previously-selected row leaves ``_active_volume_roi_id`` pointing
+        at a wrapper whose labels_meta entry was just replaced.
+
+        Pass ``None`` to clear the selection (empty import, etc.). The list
+        widget row update is still attempted for visual feedback; the
+        downstream sync runs unconditionally.
+        """
+        lw = self.layer_panel.list_widget
+        if layer is None:
+            lw.setCurrentRow(-1)
+        else:
+            try:
+                roi_idx = self.layer_stack.roi_layers.index(layer)
+            except ValueError:
+                roi_idx = None
+            if roi_idx is not None:
+                for row in range(lw.count()):
+                    item = lw.item(row)
+                    data = item.data(Qt.UserRole) if item is not None else None
+                    if data and data[0] == "roi" and data[1] == roi_idx:
+                        lw.setCurrentRow(row)
+                        break
+        self._on_layer_selected(layer)
+
     def _on_3d_label_added(self, doc, label_id):
         """Mirror a newly-created 3D label into the 2D LayerStack.
 
@@ -2180,12 +2211,7 @@ class MontarisApp(QMainWindow):
         self.layer_panel.refresh()
         # Auto-select the new ROI so the next paint/fill stroke extends it
         # (napari parity: selected_label sticks to what was last painted).
-        # Without this, each stroke reserves yet another id because plain
-        # 2D ROILayers don't carry a label_id for the selection sync to pick
-        # up, so _active_volume_roi_id stays None forever.
-        idx = len(self.layer_stack.roi_layers) - 1
-        row = idx + (1 if self.layer_stack.image_layer else 0)
-        self.layer_panel.list_widget.setCurrentRow(row)
+        self._select_roi_layer(wrapper)
         # Keep the 3D overlay's colormap in sync with the assigned color.
         if self._view3d_panel is not None:
             self._view3d_panel.refresh_labels()
@@ -2248,16 +2274,25 @@ class MontarisApp(QMainWindow):
     def import_volume_labels(self):
         """Load a labels TIFF + sidecar into the target volume document.
 
-        Targets the active doc when it has ``volume_data``; otherwise picks
-        the first doc that does — the same document ``View3DPanel`` uses as
-        its ``_primary_doc``, so labels stay attached to the doc the 3D view
-        reads from. Any existing ``labels_3d`` on the target is replaced wholesale
+        When the 3D viewer is open, targets its ``_primary_doc`` so imported
+        labels land on the doc the wand/paint tools actually edit — the
+        panel picks ``_primary_doc`` once at construction as the first
+        volume doc and never changes it, so importing into the combo's
+        "active" doc can silently desync (wand refuses, or worse writes
+        into the wrong doc on id collision). With no 3D panel open, we
+        prefer the active doc and fall back to the first volume doc.
+        Any existing ``labels_3d`` on the target is replaced wholesale
         along with its meta; stale :class:`VolumeROILayer` wrappers in the
         layer stack are dropped and fresh ones created from the imported
         labels.
         """
-        active = self._active_document()
-        doc = active if (active is not None and getattr(active, 'volume_data', None) is not None) else None
+        doc = None
+        if self._view3d_panel is not None:
+            doc = getattr(self._view3d_panel, '_primary_doc', None)
+        if doc is None:
+            active = self._active_document()
+            doc = active if (active is not None
+                             and getattr(active, 'volume_data', None) is not None) else None
         if doc is None:
             doc = next(
                 (d for d in self._documents
@@ -2278,45 +2313,113 @@ class MontarisApp(QMainWindow):
         if not path:
             return
         self._update_last_dir(path)
-        try:
-            from montaris.io.volume_labels import load_volume_labels
-            labels, meta = load_volume_labels(path)
-        except Exception as e:  # noqa: BLE001 — user-visible
-            QMessageBox.warning(self, "Import failed", str(e))
-            return
-        if labels.shape != doc.volume_data.shape:
-            QMessageBox.warning(
-                self, "Shape mismatch",
-                f"Labels volume {labels.shape} does not match the active "
-                f"document's volume {doc.volume_data.shape}.",
-            )
-            return
+        # Labels TIFFs can be 100s of MB; the tifffile read alone is a few
+        # seconds. Show a slim progress bar so the UI doesn't look frozen.
+        # Prefer the 3D panel's bar when it's open (it covers the doc being
+        # imported into); otherwise fall back to the 2D canvas bar.
+        canvas_bar = getattr(self.canvas, '_progress_bar', None)
+        use_panel_bar = self._view3d_panel is not None
+        use_canvas_bar = (not use_panel_bar) and canvas_bar is not None
+        if use_panel_bar:
+            self._view3d_panel.show_progress()
+        elif use_canvas_bar:
+            canvas_bar.setRange(0, 0)
+            canvas_bar.show()
+            QApplication.processEvents()
+        def _dismiss_progress():
+            # Hide the busy bar before blocking on a modal warning so the
+            # dialog doesn't layer on top of a "still working" indicator.
+            if use_panel_bar and self._view3d_panel is not None:
+                self._view3d_panel.hide_progress()
+            elif use_canvas_bar and canvas_bar is not None:
+                canvas_bar.hide()
 
-        # Drop stale volume wrappers tied to THIS doc. Other docs' 3D ROIs
-        # stay so a per-doc import doesn't nuke neighbouring volumes.
-        from montaris.layers import VolumeROILayer
-        self.layer_stack.roi_layers = [
-            r for r in self.layer_stack.roi_layers
-            if not (getattr(r, 'is_volume', False) and getattr(r, '_doc', None) is doc)
-        ]
-        # Any undo entry whose patches were sized for the *previous* labels
-        # volume of this doc would either explode on a shape mismatch or
-        # silently scribble over the freshly imported data. Drop them.
-        self.undo_stack.purge_for_doc(doc)
-        doc.labels_3d = labels
-        doc.labels_meta = dict(meta)
-        doc.labels_next_id = (max(meta.keys()) + 1) if meta else 1
-        # Mirror each imported label as a VolumeROILayer so the LayerPanel sees it.
-        for lid in sorted(meta.keys()):
-            self.layer_stack.roi_layers.append(VolumeROILayer(doc, int(lid)))
-        self.layer_stack.changed.emit()
-        self.layer_panel.refresh()
-        if self._view3d_panel is not None:
-            self._view3d_panel.refresh_labels()
-        self.toast.show(
-            f"Imported {len(meta)} 3D ROI(s) from {os.path.basename(path)}",
-            "success",
-        )
+        try:
+            try:
+                from montaris.io.volume_labels import load_volume_labels
+                labels, meta = load_volume_labels(path)
+            except Exception as e:  # noqa: BLE001 — user-visible
+                _dismiss_progress()
+                QMessageBox.warning(self, "Import failed", str(e))
+                return
+            if labels.shape != doc.volume_data.shape:
+                _dismiss_progress()
+                QMessageBox.warning(
+                    self, "Shape mismatch",
+                    f"Labels volume {labels.shape} does not match document "
+                    f"'{doc.name}' volume {doc.volume_data.shape}.",
+                )
+                return
+
+            # Drop stale volume wrappers tied to THIS doc. Other docs' 3D
+            # ROIs stay so a per-doc import doesn't nuke neighbouring
+            # volumes.
+            from montaris.layers import VolumeROILayer
+            # Synced-mode channels share the same ``volume_data`` ndarray
+            # across multiple docs. Only ``_primary_doc`` is rendered by
+            # the 3D view, but sibling docs can still carry stale
+            # ``labels_3d`` / ``labels_meta`` (older session or a prior
+            # non-primary import). Leaving them in place would leak via
+            # export/save and show as ghost rows in the LayerPanel. Clear
+            # siblings that share the same underlying array.
+            siblings = [
+                d for d in self._documents
+                if d is not doc
+                and getattr(d, 'volume_data', None) is doc.volume_data
+            ]
+            for sib in siblings:
+                self.layer_stack.roi_layers = [
+                    r for r in self.layer_stack.roi_layers
+                    if not (getattr(r, 'is_volume', False)
+                            and getattr(r, '_doc', None) is sib)
+                ]
+                self.undo_stack.purge_for_doc(sib)
+                sib.labels_3d = None
+                sib.labels_meta = {}
+                sib.labels_next_id = 1
+            self.layer_stack.roi_layers = [
+                r for r in self.layer_stack.roi_layers
+                if not (getattr(r, 'is_volume', False)
+                        and getattr(r, '_doc', None) is doc)
+            ]
+            # Undo entries whose patches were sized for the *previous*
+            # labels volume of this doc would either explode on a shape
+            # mismatch or silently scribble over the freshly imported
+            # data. Drop them.
+            self.undo_stack.purge_for_doc(doc)
+            doc.labels_3d = labels
+            doc.labels_meta = dict(meta)
+            doc.labels_next_id = (max(meta.keys()) + 1) if meta else 1
+            # Mirror each imported label as a VolumeROILayer so the
+            # LayerPanel sees it.
+            first_imported = None
+            for lid in sorted(meta.keys()):
+                wrapper = VolumeROILayer(doc, int(lid))
+                self.layer_stack.roi_layers.append(wrapper)
+                if first_imported is None:
+                    first_imported = wrapper
+            self.layer_stack.changed.emit()
+            self.layer_panel.refresh()
+            if self._view3d_panel is not None:
+                self._view3d_panel.refresh_labels()
+            # Auto-select the first imported 3D ROI so wand/paint/erase
+            # have an active label id to write into. ``_select_roi_layer``
+            # force-syncs even when the list widget row happens to match
+            # the previously-selected one (second import over the same row
+            # would otherwise leave ``_active_volume_roi_id`` pointing at
+            # a replaced meta entry). Empty imports explicitly clear the
+            # stale selection.
+            self._select_roi_layer(first_imported)
+            self.toast.show(
+                f"Imported {len(meta)} 3D ROI(s) from {os.path.basename(path)} "
+                f"→ {doc.name}",
+                "success",
+            )
+        finally:
+            if use_panel_bar and self._view3d_panel is not None:
+                self._view3d_panel.hide_progress()
+            elif use_canvas_bar and canvas_bar is not None:
+                canvas_bar.hide()
 
     def flatten_volume_labels_to_2d(self):
         """Convert each 3D ROI into a per-Z stack of 2D ``ROILayer`` items.
