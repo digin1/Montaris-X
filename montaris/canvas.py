@@ -889,6 +889,48 @@ class ImageCanvas(QGraphicsView):
         if layer in self._selection.layers:
             self._update_selection_highlights()
 
+    def refresh_dirty_region(self, layer, dirty_bbox):
+        """Synchronously re-rasterize only ``dirty_bbox`` of ``layer`` plus the
+        usual end-of-stroke bookkeeping. Replaces the full-ROI
+        ``refresh_active_overlay`` for brush / eraser releases — the
+        latter ran ``binary_erosion`` over the whole ROI mask, which is
+        seconds on a 71 M-pixel layer even when the actual brush stroke
+        only touched a few hundred pixels.
+
+        Caller guarantees every voxel that could have changed is inside
+        ``dirty_bbox`` (the brush / eraser ``_stroke_bbox`` already does
+        this). The bbox cache is invalidated and the dirty flag cleared
+        so downstream consumers (layer panel pixel counts, undo,
+        selection highlights) see post-stroke state.
+
+        Note on reentrancy: ``_pending_dirty.pop`` here is safe even if a
+        ``_dirty_timer.timeout`` runs concurrently — ``_flush_dirty``
+        snapshots and clears the dict before iterating, so a pop during
+        its iteration just removes a not-yet-processed entry.
+        """
+        if layer is None or not getattr(layer, 'is_roi', False):
+            return
+        # Drop any pending throttled-flush entry; we render synchronously
+        # right now and the timer queue would otherwise re-render the
+        # same region on its next tick.
+        self._pending_dirty.pop(id(layer), None)
+        # Invalidate bbox BEFORE rendering: if the tile path declines
+        # (e.g. bbox grew past the existing pixmap) the caller falls
+        # through to ``_refresh_roi_item`` which reads ``roi.get_bbox()``
+        # — that cache must reflect post-stroke voxels or the full
+        # rebuild misses pixels the user just painted.
+        layer.invalidate_bbox()
+        layer.clear_dirty()
+        self._render_dirty_region(layer, dirty_bbox, lod_level=0)
+        self._roi_stale.discard(id(layer))
+        self._roi_lod[id(layer)] = 0
+        if layer in self._selection.layers:
+            self._update_selection_highlights()
+        # Skip the progress flash on the fast path (sub-50 ms): the
+        # original full-refresh callers needed user feedback for slow
+        # work, but flashing for a 50 ms brush release is just visual
+        # noise (fresh-eyes review L2).
+
     def refresh_active_overlay_partial(self, layer, dirty_bbox):
         """Throttled partial refresh: accumulate dirty region, render on timer."""
         if layer is None or not getattr(layer, 'is_roi', False):
@@ -923,6 +965,166 @@ class ImageCanvas(QGraphicsView):
             self._render_dirty_region(layer, bbox, lod_level=lod)
         self._report_render((time.perf_counter() - t0) * 1000, "flush_dirty")
 
+    def _render_dirty_edge_tile(self, layer, dirty_bbox, lod_level,
+                                fill_mode, is_selected):
+        """Re-rasterize edge + fill in a small tile around ``dirty_bbox``
+        and composite it onto the existing pixmap item.
+
+        Tile geometry:
+
+        * The painted output region is the dirty bbox **inflated by
+          ``thickness``** — a voxel just outside the dirty bbox can have
+          its edge state flip when its neighbour inside the dirty bbox
+          changes, so the un-inflated version leaves a stale fringe of
+          yellow boundary pixels just outside the brush stroke
+          (fresh-eyes M2).
+        * The mask is cropped with a ``2 * thickness`` pad — the
+          inflated output PLUS another ``thickness`` of neighbourhood
+          context so ``_compute_thick_edge`` can do its single thin-edge
+          scan + ``thickness - 1`` dilation iterations correctly at
+          every output voxel (Codex HIGH #1).
+
+        Returns True on success, False to let the caller fall back to
+        the full-ROI ``_refresh_roi_item`` path. Any exception during
+        QPainter / numpy work also returns False — matches the in-place
+        texture upload pattern in ``view_3d.py`` so transient failures
+        recover gracefully instead of crashing the stroke.
+        """
+        # LOD > 0 (downsampled non-active overlay) keeps using the full-
+        # refresh path. We only know the active layer is forced to LOD 0;
+        # for an auto-overlap recipient at a different scale, compositing
+        # full-res tiles into a scaled item leaves a mis-scaled overlay.
+        if lod_level > 0:
+            return False
+
+        rid = id(layer)
+        existing = self._roi_items.get(rid)
+        if existing is None:
+            return False  # first render — let _refresh_roi_item create it
+        # ``_render_dirty_region`` already declines on scaled items, but
+        # belt-and-suspenders if a future caller goes around it.
+        try:
+            if abs(existing.scale() - 1.0) > 1e-6:
+                return False
+        except Exception:
+            pass
+        # Hidden ROI: don't make it visible again. ``_refresh_roi_item``
+        # handles this case correctly; the tile path mirrors that here
+        # (Codex review MEDIUM #2 — ``_render_dirty_edge_tile`` previously
+        # called ``existing.setVisible(True)`` unconditionally, which
+        # un-hid layers that the user toggled off).
+        if not getattr(layer, 'visible', True):
+            existing.setVisible(False)
+            return True
+
+        dy1, dy2, dx1, dx2 = dirty_bbox
+        if dy2 <= dy1 or dx2 <= dx1:
+            return False
+
+        h, w = layer.shape
+        thickness = max(1, self._boundary_thickness_px())
+        # Inflate the painted output by ``thickness`` so edge pixels
+        # whose state flipped because of changes inside ``dirty_bbox``
+        # also get repainted (fresh-eyes review M2).
+        oy1 = max(0, dy1 - thickness)
+        oy2 = min(h, dy2 + thickness)
+        ox1_o = max(0, dx1 - thickness)
+        ox2_o = min(w, dx2 + thickness)
+        # Mask context for the edge computation needs another
+        # ``thickness`` of pad on top of that: ``_compute_thick_edge``
+        # first detects the thin edge (1-voxel neighbourhood) then
+        # dilates ``thickness - 1`` times, so a pixel inside the output
+        # region depends on mask values up to ``thickness`` voxels
+        # outside it (Codex review HIGH #1 — the prior +1 pad let a
+        # nearby pre-existing structure poison thick boundaries).
+        py1 = max(0, oy1 - thickness)
+        py2 = min(h, oy2 + thickness)
+        px1 = max(0, ox1_o - thickness)
+        px2 = min(w, ox2_o + thickness)
+        if py2 <= py1 or px2 <= px1:
+            return False
+
+        try:
+            # Partial RLE decode when compressed; full mask access is
+            # avoided so brush.py's auto-overlap ``compress()`` calls
+            # actually keep memory bounded (Codex review MEDIUM #1).
+            mask_padded = layer.get_mask_crop((py1, py2, px1, px2))
+            edge_padded = _compute_thick_edge(mask_padded, thickness)
+
+            # Crop edge + mask to the inflated output region.
+            iy1 = oy1 - py1
+            iy2 = oy2 - py1
+            ix1 = ox1_o - px1
+            ix2 = ox2_o - px1
+            edge = edge_padded[iy1:iy2, ix1:ix2]
+            inner_mask = mask_padded[iy1:iy2, ix1:ix2]
+            oh, ow = inner_mask.shape
+
+            r, g, b = layer.color
+            gof = self.layer_stack._global_opacity_factor
+            effective_opacity = int(layer.opacity * gof)
+            if is_selected:
+                bc = self.layer_stack.active_boundary_color
+            else:
+                bc = self.layer_stack.boundary_color
+
+            rgba = np.zeros((oh, ow, 4), dtype=np.uint8)
+            if fill_mode in ('boundary', 'outline'):
+                rgba[edge] = [*bc, effective_opacity]
+            elif fill_mode == 'both':
+                fill_alpha = max(1, effective_opacity // 2)
+                painted = inner_mask > 0
+                rgba[painted] = [r, g, b, fill_alpha]
+                rgba[edge] = [*bc, min(255, effective_opacity)]
+            else:  # solid + selected → fill plus active-color edge
+                painted = inner_mask > 0
+                rgba[painted] = [r, g, b, effective_opacity]
+                if is_selected:
+                    rgba[edge] = [*bc, min(255, effective_opacity)]
+
+            rgba = np.ascontiguousarray(rgba)
+            qimg = QImage(rgba.data, ow, oh, ow * 4, QImage.Format_RGBA8888)
+            if qimg.isNull():
+                return False  # Qt refused the allocation
+            dirty_img = qimg.copy()  # detach from numpy buffer
+            if dirty_img.isNull():
+                return False
+
+            image = existing.image()
+            ox, oy = int(existing.pos().x()), int(existing.pos().y())
+            pw, ph = image.width(), image.height()
+
+            # Bbox-growth path is unsafe for tile compositing: thick
+            # edges of pre-existing mask pixels can spill outside the
+            # original tightly-cropped pixmap, but ``_refresh_roi_item``
+            # never painted those spill pixels (it crops to the ROI
+            # bbox). When the new tile sits outside the old pixmap,
+            # any pixel in the gap between the old pixmap edge and the
+            # new tile inherits ``alpha=0`` instead of the thick-edge
+            # colour the full refresh would have produced. Decline so
+            # the caller falls back to ``_refresh_roi_item`` and the
+            # whole new bbox gets re-rendered correctly.
+            px1_e, py1_e = ox, oy
+            px2_e, py2_e = ox + pw, oy + ph
+            if (ox1_o < px1_e or oy1 < py1_e
+                    or ox2_o > px2_e or oy2 > py2_e):
+                return False
+
+            p = QPainter(image)
+            if not p.isActive():
+                return False
+            p.setCompositionMode(QPainter.CompositionMode_Source)
+            p.drawImage(ox1_o - ox, oy1 - oy, dirty_img)
+            p.end()
+            existing.updateDirty(QRectF(ox1_o - ox, oy1 - oy, ow, oh))
+            existing.setVisible(True)
+            return True
+        except Exception:
+            # QImage/QPainter or numpy edge cases — let _refresh_roi_item
+            # rebuild the layer from scratch so the user still sees a
+            # correct overlay.
+            return False
+
     def _render_dirty_region(self, layer, dirty_bbox, lod_level=0):
         """Render a single dirty region onto the layer's pixmap item."""
         dy1, dy2, dx1, dx2 = dirty_bbox
@@ -930,30 +1132,61 @@ class ImageCanvas(QGraphicsView):
         if dh <= 0 or dw <= 0:
             return
 
-        # Boundary rendering needs the full mask context (edge detection on
-        # a small tile gives wrong results at tile edges).  Fall back to a
-        # full-ROI refresh when boundaries are visible.
+        # If the existing pixmap is rendered at a non-1 scale (it was
+        # last refreshed at LOD > 0 in ``_refresh_roi_item``), tile-
+        # compositing in full-res scene coordinates would write into the
+        # downsampled image at the wrong position. Decline both branches
+        # (edge-tile and solid) — fall through to a full LOD-0 rebuild
+        # via ``_refresh_roi_item`` (Codex review HIGH).
+        rid = id(layer)
+        existing = self._roi_items.get(rid)
+        if existing is not None:
+            try:
+                if abs(existing.scale() - 1.0) > 1e-6:
+                    try:
+                        idx = self.layer_stack.roi_layers.index(layer)
+                    except ValueError:
+                        return
+                    self._refresh_roi_item(layer, idx,
+                                            lod_level=lod_level)
+                    return
+            except Exception:
+                pass
+
+        # Boundary / selected rendering needs the full mask context to
+        # compute the edge — but only within ``2 * thickness`` pixels of
+        # any changed voxel can the edge actually have flipped, so we
+        # can crop a small padded tile, recompute edge there, and
+        # composite. The active ROI is always selected during a stroke,
+        # so the old "fall back to full refresh" path was triggered on
+        # every brush move + release on the user's 71 M-pixel masks.
         fill_mode = self.layer_stack.fill_mode
         is_selected = self._selection.contains(layer)
-        if fill_mode in ('boundary', 'outline', 'both') or is_selected:
+        needs_edge = fill_mode in ('boundary', 'outline', 'both') or is_selected
+        if needs_edge:
+            target_lod = 0 if layer is self._active_layer else lod_level
+            if self._render_dirty_edge_tile(layer, dirty_bbox, target_lod,
+                                             fill_mode, is_selected):
+                return
+            # Tile path declined (no existing item, bbox grew, etc.)
+            # — fall through to full-ROI refresh.
             try:
                 idx = self.layer_stack.roi_layers.index(layer)
             except ValueError:
                 return
-            # Active ROI must stay at LOD 0 for correct dirty compositing
-            target_lod = 0 if layer is self._active_layer else lod_level
             self._refresh_roi_item(layer, idx, lod_level=target_lod)
             return
-
-        rid = id(layer)
-        existing = self._roi_items.get(rid)
 
         r, g, b = layer.color
         gof = self.layer_stack._global_opacity_factor
         alpha = int(layer.opacity * gof)
 
-        # Build RGBA tile for dirty region from actual mask data
-        mask_crop = layer.mask[dy1:dy2, dx1:dx2]
+        # Build RGBA tile for dirty region from actual mask data.
+        # ``get_mask_crop`` does a partial RLE decode when the layer is
+        # compressed instead of fully decompressing the whole 71 M-pixel
+        # mask — important for auto-overlap recipients that brush.py
+        # explicitly compresses to bound memory (Codex review MEDIUM #1).
+        mask_crop = layer.get_mask_crop((dy1, dy2, dx1, dx2))
 
         # LOD downsampling during stroke for performance
         scale_factor = 1

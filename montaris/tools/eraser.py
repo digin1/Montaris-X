@@ -75,11 +75,16 @@ class EraserTool(BaseTool):
                     old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
-        canvas.refresh_active_overlay(layer)
+        # Re-rasterize only the touched region instead of the full ROI
+        # — same fix as the brush release path. ``refresh_dirty_region``
+        # also handles bbox-cache invalidation + selection highlights.
+        if self._stroke_bbox is not None:
+            canvas.refresh_dirty_region(layer, self._stroke_bbox)
+        else:
+            canvas.refresh_active_overlay(layer)
         self._snapshot_crop = None
         self._snapshot_bbox = None
         self._stroke_bbox = None
-        canvas._update_selection_highlights()
 
     def _get_circle(self, es=None):
         """Return cached circle mask, recomputing only when effective size changes."""

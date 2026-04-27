@@ -30,6 +30,9 @@ class FakeCanvas:
     def refresh_active_overlay_partial(self, layer, bbox):
         pass
 
+    def refresh_dirty_region(self, layer, bbox):
+        pass
+
     def _update_selection_highlights(self):
         pass
 

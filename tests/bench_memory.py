@@ -52,6 +52,7 @@ class FakeCanvas:
         self._selection_highlight_items = []
     def refresh_active_overlay(self, layer): pass
     def refresh_active_overlay_partial(self, layer, bbox): pass
+    def refresh_dirty_region(self, layer, bbox): pass
     def _update_selection_highlights(self): pass
     def transform(self): return _FakeTransform()
     def scene(self): return self

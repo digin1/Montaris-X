@@ -127,18 +127,31 @@ class BrushTool(BaseTool):
                 self.app.undo_stack.push(commands[0])
             else:
                 self.app.undo_stack.push(CompoundUndoCommand(commands))
-            # Refresh only affected layers instead of all overlays
-            canvas.refresh_active_overlay(layer)
+
+        # Use the dirty-region fast path: every voxel that could have
+        # changed is inside ``self._stroke_bbox``, so a tile-sized edge
+        # recompute is enough — vs the full-ROI re-rasterize the older
+        # ``refresh_active_overlay`` did, which ran ``binary_erosion``
+        # on the whole 71 M-pixel mask on every release.
+        sb = self._stroke_bbox
+        if sb is not None:
+            canvas.refresh_dirty_region(layer, sb)
             for other in affected_layers:
-                canvas.refresh_active_overlay(other)
+                canvas.refresh_dirty_region(other, sb)
         else:
+            # No accumulated bbox (release without a press) — fall back
+            # to the full refresh so we don't leave the overlay stale.
             canvas.refresh_active_overlay(layer)
 
         self._snapshot_crop = None
         self._snapshot_bbox = None
         self._stroke_bbox = None
         self._overlap_layers = []
-        canvas._update_selection_highlights()
+        # Both ``refresh_dirty_region`` and ``refresh_active_overlay``
+        # update selection highlights when the layer is in the active
+        # selection, so the old trailing ``_update_selection_highlights``
+        # was redundant on the success path and never needed on the
+        # fallback path either (fresh-eyes review L1).
 
     def _get_circle(self, es=None):
         """Return cached circle mask, recomputing only when effective size changes."""
