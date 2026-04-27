@@ -51,8 +51,14 @@ class RectangleTool(BaseTool):
                     old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
-
-        canvas.refresh_active_overlay(layer)
+            # Always route through the dirty-region path with the just-
+            # painted bbox — even on a no-op (paint into already-painted
+            # pixels), tile re-rasterise is far cheaper than the full-
+            # ROI rebuild ``refresh_active_overlay`` did. Mirrors the
+            # brush/eraser idiom (fresh-eyes M2).
+            canvas.refresh_dirty_region(layer, (y1, y2, x1, x2))
+        else:
+            canvas.refresh_active_overlay(layer)
         self._start = None
 
     def _update_preview(self, pos, canvas):

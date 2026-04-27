@@ -65,8 +65,11 @@ class CircleTool(BaseTool):
                     old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
-
-        canvas.refresh_active_overlay(layer)
+            # Always route through the dirty-region path with the bbox
+            # — see rectangle.py for rationale (fresh-eyes M2).
+            canvas.refresh_dirty_region(layer, (by1, by2, bx1, bx2))
+        else:
+            canvas.refresh_active_overlay(layer)
         self._center = None
 
     def _update_preview(self, pos, canvas):

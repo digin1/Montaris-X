@@ -62,7 +62,15 @@ class StampTool(BaseTool):
                     old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
-        canvas.refresh_active_overlay(layer)
+        # Same dirty-region fast path the brush/eraser use: only the
+        # voxels inside ``self._stroke_bbox`` could have changed, so a
+        # tile-sized edge re-rasterise is enough vs. the full-ROI
+        # rebuild that ``refresh_active_overlay`` did.
+        sb = self._stroke_bbox
+        if sb is not None:
+            canvas.refresh_dirty_region(layer, sb)
+        else:
+            canvas.refresh_active_overlay(layer)
         self._snapshot_crop = None
         self._snapshot_bbox = None
         self._stroke_bbox = None

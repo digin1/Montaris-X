@@ -70,6 +70,7 @@ class PolygonTool(BaseTool):
         by1 = max(0, int(vertices[:, 1].min()))
         by2 = min(h, int(vertices[:, 1].max()) + 1)
 
+        painted_bbox = None
         if bx1 < bx2 and by1 < by2:
             old_crop = layer.mask[by1:by2, bx1:bx2].copy()
 
@@ -83,10 +84,18 @@ class PolygonTool(BaseTool):
                     old_crop, new_crop,
                 )
                 self.app.undo_stack.push(cmd)
+            painted_bbox = (by1, by2, bx1, bx2)
 
         if self._canvas:
             self._canvas.clear_polygon_preview()
-            self._canvas.refresh_active_overlay(layer)
+            # Always route through the dirty-region path with the
+            # vertex-bbox — see rectangle.py for rationale (fresh-eyes
+            # M2). ``painted_bbox`` is None only when the polygon's
+            # vertex extremes are degenerate / out of bounds.
+            if painted_bbox is not None:
+                self._canvas.refresh_dirty_region(layer, painted_bbox)
+            else:
+                self._canvas.refresh_active_overlay(layer)
 
         self._vertices.clear()
 

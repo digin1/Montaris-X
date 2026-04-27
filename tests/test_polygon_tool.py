@@ -46,6 +46,9 @@ class FakeCanvas:
     def refresh_active_overlay(self, layer):
         pass
 
+    def refresh_dirty_region(self, layer, bbox):
+        pass
+
 
 class FakeApp:
     def __init__(self):

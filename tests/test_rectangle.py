@@ -33,6 +33,9 @@ class MockCanvas:
     def refresh_active_overlay(self, layer):
         pass
 
+    def refresh_dirty_region(self, layer, bbox):
+        pass
+
 
 class TestRectangleTool:
     def test_draw_rectangle_fills_correct_area(self):

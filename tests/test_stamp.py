@@ -21,6 +21,9 @@ class MockCanvas:
     def refresh_active_overlay_partial(self, layer, dirty_bbox):
         pass
 
+    def refresh_dirty_region(self, layer, bbox):
+        pass
+
 
 class TestStampTool:
     def test_stamp_places_square(self):

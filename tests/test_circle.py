@@ -34,6 +34,9 @@ class MockCanvas:
     def refresh_active_overlay(self, layer):
         pass
 
+    def refresh_dirty_region(self, layer, bbox):
+        pass
+
 
 class TestCircleTool:
     def test_draw_circle_fills_roughly_circular_area(self):

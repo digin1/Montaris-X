@@ -18,6 +18,9 @@ class MockCanvas:
     def refresh_active_overlay(self, layer):
         pass
 
+    def refresh_dirty_region(self, layer, bbox):
+        pass
+
 
 class TestBucketFill:
     def test_fill_empty_mask_paints_connected_region(self):
