@@ -258,6 +258,68 @@ def test_bucket_fill_undo_restores_tolerance_mixed_intensities(app, layer,
     assert layer.mask[5, 3] == 100
 
 
+def test_bucket_fill_uses_connected_components_not_full_match(app, layer, canvas):
+    """Bucket-fill on tolerance=0 must select ONLY the connected
+    component containing the seed, not every matching-value pixel in
+    the image. Two disjoint patches of the same value: clicking one
+    must not erase the other.
+    """
+    layer.mask[10:15, 10:15] = 100  # left patch
+    layer.mask[60:65, 60:65] = 100  # right patch (same value, disjoint)
+    tool = BucketFillTool(app)
+    tool.tolerance = 0
+    tool.on_press(QPointF(12, 12), layer, canvas)  # click the left patch
+
+    # Left patch erased.
+    assert (layer.mask[10:15, 10:15] == 0).all()
+    # Right patch untouched — confirms ndi.label correctly partitioned
+    # the matches into separate components.
+    assert (layer.mask[60:65, 60:65] == 100).all()
+
+
+def test_bucket_fill_8_connectivity_diagonal(app, layer, canvas):
+    """8-connectivity (3×3 structure) means diagonally-adjacent matching
+    pixels belong to the same component. A diagonal chain of painted
+    pixels forms one component on the erase path.
+    """
+    for i in range(5):
+        layer.mask[20 + i, 20 + i] = 100  # diagonal line
+    tool = BucketFillTool(app)
+    tool.tolerance = 0
+    tool.on_press(QPointF(20, 20), layer, canvas)
+
+    # All 5 diagonal pixels erased — 4-connectivity would only erase the seed.
+    for i in range(5):
+        assert layer.mask[20 + i, 20 + i] == 0, (
+            f"diagonal pixel ({20+i}, {20+i}) wasn't erased — bucket fill "
+            f"is no longer using 8-connectivity"
+        )
+
+
+def test_bucket_fill_8_connectivity_paint_path(app, layer, canvas):
+    """Paint path (target_value=0) must also use 8-connectivity. A
+    diagonal chain of zero pixels surrounded by painted 255s should be
+    one component when the user clicks any of them. Codex review LOW #3
+    flagged that the prior tests covered only the erase path; a future
+    refactor could regress paint-path connectivity to 4-conn unnoticed.
+    """
+    # Fill a 7×7 region with 255, then carve out a diagonal of zeros.
+    layer.mask[10:17, 10:17] = 255
+    diag = [(11, 11), (12, 12), (13, 13), (14, 14), (15, 15)]
+    for y, x in diag:
+        layer.mask[y, x] = 0
+    tool = BucketFillTool(app)
+    tool.tolerance = 0
+    # Click any zero pixel in the diagonal — paint should fill the
+    # whole diagonal under 8-connectivity (5 cells), not just the seed.
+    tool.on_press(QPointF(11, 11), layer, canvas)
+    for y, x in diag:
+        assert layer.mask[y, x] == 255, (
+            f"paint-path 8-connectivity failed: ({y}, {x}) wasn't filled "
+            "— the diagonal chain of zeros should be one component"
+        )
+
+
 def test_bucket_fill_tolerance_no_op_neighbour_skips_dirty(app, layer, canvas):
     """Codex review MEDIUM: with high tolerance, BFS can mark cells
     already at ``fill_value`` as part of the region (they pass the

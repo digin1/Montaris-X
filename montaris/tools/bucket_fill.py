@@ -1,10 +1,10 @@
 import collections
 
 import numpy as np
-from scipy.ndimage import binary_propagation
 from PySide6.QtCore import Qt
 from montaris.tools.base import BaseTool
 from montaris.core.undo import UndoCommand
+from montaris.core.components import label_connected_components
 from montaris.core.roi_transform import get_mask_bbox
 
 
@@ -88,18 +88,39 @@ class BucketFillTool(BaseTool):
             return None
 
         if self.tolerance == 0:
-            # Exact-match flood fill — the connected component reachable
-            # through ``mask > 0`` (erase) or ``mask == 0`` (paint).
-            seed = np.zeros((h, w), dtype=bool)
-            seed[start_y, start_x] = True
+            # Exact-match flood fill via single-pass connected-component
+            # labelling — same algorithm napari uses for its labels-
+            # layer bucket fill (`napari/layers/labels/labels.py::fill`).
+            # The earlier ``scipy.ndimage.binary_propagation`` did
+            # iterative dilation until fixed point, costing O(n ×
+            # diameter) — long thin dendrites paid that diameter as
+            # iteration count. ``ndi.label`` (via the project helper)
+            # is one O(n) pass regardless of region geometry.
+            #
+            # 8-connectivity (3×3 structure) is intentional and diverges
+            # from the helper's 4-conn default: it preserves the prior
+            # ``binary_propagation`` behaviour and matches user
+            # expectation that a diagonal chain of same-value pixels is
+            # one connected fill region. ``core/components.py``'s other
+            # callers (move/transform `get_component_at`) keep 4-conn —
+            # the discrepancy is pre-existing.
             if target_value > 0:
-                structure = mask > 0
+                matches = mask > 0
             else:
-                structure = mask == 0
-            return binary_propagation(
-                seed, structure=np.ones((3, 3), dtype=bool),
-                mask=structure,
+                matches = mask == 0
+            labelled, _num = label_connected_components(
+                matches, structure=np.ones((3, 3), dtype=bool),
             )
+            seed_id = labelled[start_y, start_x]
+            if seed_id == 0:
+                # Defensive — under the normal call path, ``target_value``
+                # was just read from ``mask[start_y, start_x]`` so
+                # ``matches[start_y, start_x]`` is always True and
+                # ``seed_id`` non-zero. Guard anyway in case a future
+                # caller threads a target_value that isn't the literal
+                # value at the click point.
+                return None
+            return labelled == seed_id
 
         # Tolerance > 0: BFS over original ``mask`` values only. The
         # original code mutated mask in place during BFS but the

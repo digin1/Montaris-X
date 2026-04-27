@@ -40,13 +40,27 @@ def get_component_at(mask, x, y, bbox=None):
     return ndimage.binary_propagation(seed, mask=(mask > 0))
 
 
-def label_connected_components(mask) -> tuple[np.ndarray, int]:
+def label_connected_components(mask, structure=None) -> tuple[np.ndarray, int]:
     """Label connected components in a binary mask.
 
+    ``structure`` controls connectivity. ``None`` (default) is scipy's
+    cross structure → 4-connected (orthogonal neighbours only). Pass
+    ``np.ones((3, 3), bool)`` for 8-connected (orthogonal + diagonal).
+    The 2D bucket-fill tool uses 8-connected so a diagonal chain of
+    same-value pixels counts as one component, matching the prior
+    ``binary_propagation`` behaviour and napari's labels-layer fill.
+
+    Skips the ``mask > 0`` materialisation when the caller already
+    passes a bool array — saves a 71 MB allocation on the user's
+    71 M-pixel masks (Codex review M1).
+
     Returns:
-        (label_array, n_components) where label_array has integer labels 1..n
+        (label_array, n_components) where label_array has integer
+        labels 1..n.
     """
-    result = ndimage.label(mask > 0)
+    if mask.dtype != np.bool_:
+        mask = mask > 0
+    result = ndimage.label(mask, structure=structure)
     return result[0], int(result[1])  # type: ignore[index]
 
 
