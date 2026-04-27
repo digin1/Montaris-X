@@ -50,6 +50,7 @@ class _FakeTransform:
 class FakeCanvas:
     def __init__(self):
         self._selection_highlight_items = []
+        self._stroke_in_progress = False
     def refresh_active_overlay(self, layer): pass
     def refresh_active_overlay_partial(self, layer, bbox): pass
     def refresh_dirty_region(self, layer, bbox): pass

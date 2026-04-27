@@ -38,6 +38,10 @@ class BrushTool(BaseTool):
         self._snapshot_crop = None
         self._snapshot_bbox = None
         self._stroke_bbox = None
+        # Tell the canvas we're in a stroke so the partial-flush path
+        # skips the expensive thick-edge recompute mid-drag (the
+        # boundary appears once on release via refresh_dirty_region).
+        canvas._stroke_in_progress = True
         # Hide selection highlight while painting
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
@@ -69,9 +73,18 @@ class BrushTool(BaseTool):
         canvas.refresh_active_overlay_partial(layer, (dy1, dy2, dx1, dx2))
 
     def on_release(self, pos, layer, canvas):
-        if not self._painting or layer is None:
+        if not self._painting:
             return
         self._painting = False
+        # End the mid-stroke fast path FIRST, ahead of the layer-None
+        # check below — otherwise a release-with-layer=None (image
+        # closed mid-drag, layer deselected, etc.) would leave the flag
+        # latched True forever and silently force every later
+        # dirty-region refresh through the solid-tile path even in
+        # boundary/outline modes (Codex review HIGH).
+        canvas._stroke_in_progress = False
+        if layer is None:
+            return
 
         commands = []
         # Main layer undo — use accumulated stroke bbox for efficient diff

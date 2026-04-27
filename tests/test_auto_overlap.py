@@ -23,6 +23,7 @@ class FakeCanvas:
     """Minimal canvas stub for tool tests without GUI rendering."""
     def __init__(self):
         self._selection_highlight_items = []
+        self._stroke_in_progress = False
 
     def refresh_active_overlay(self, layer):
         pass

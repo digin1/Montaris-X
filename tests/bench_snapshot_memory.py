@@ -61,6 +61,7 @@ class FakeCanvas:
 
     def __init__(self):
         self._selection_highlight_items = []
+        self._stroke_in_progress = False
 
     def refresh_active_overlay(self, layer):
         pass

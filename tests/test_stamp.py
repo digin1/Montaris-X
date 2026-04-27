@@ -12,6 +12,9 @@ class MockApp:
 
 
 class MockCanvas:
+    def __init__(self):
+        self._stroke_in_progress = False
+
     def refresh_overlays(self):
         pass
 

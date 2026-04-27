@@ -338,6 +338,136 @@ def test_dirty_path_preserves_compressed_mask(qapp):
         canvas.close()
 
 
+def test_tile_path_skips_during_active_stroke(canvas_with_roi):
+    """Drag stutter regression: while a brush/eraser stroke is in
+    progress, the partial-flush path must NOT take the expensive edge
+    tile branch — at low zoom each thick-edge recompute is tens of ms
+    and stacking them every 16 ms (the dirty timer) blocked the event
+    loop after ~5 mouse-move events. The active-stroke flag short-
+    circuits the edge branch so mid-drag flushes are cheap solid
+    fills; the proper thick edge appears once on release.
+    """
+    canvas, roi = canvas_with_roi
+    # Selected → would normally take the edge tile path.
+    assert roi in canvas._selection.layers
+
+    # Mark a stroke as active and call _render_dirty_region directly.
+    canvas._stroke_in_progress = True
+    try:
+        # Spy on the edge-tile method so we can assert it's NOT called.
+        edge_calls = []
+        real_edge = canvas._render_dirty_edge_tile
+
+        def spy(*args, **kwargs):
+            edge_calls.append((args, kwargs))
+            return real_edge(*args, **kwargs)
+
+        canvas._render_dirty_edge_tile = spy  # type: ignore[assignment]
+        roi.mask[100:115, 100:115] = 255
+        canvas._render_dirty_region(roi, (100, 115, 100, 115), lod_level=0)
+        assert edge_calls == [], (
+            "edge tile path ran during a stroke — drag stutter will "
+            "return because each flush blocks ~50 ms at low zoom"
+        )
+    finally:
+        canvas._stroke_in_progress = False
+        canvas._render_dirty_edge_tile = real_edge  # type: ignore[assignment]
+
+
+def test_tool_switch_mid_stroke_clears_flag(canvas_with_roi):
+    """Codex review HIGH (repro A): switching tools mid-stroke must
+    abort the in-progress stroke. Without this, the original tool's
+    ``on_release`` never fires, so ``_stroke_in_progress`` stays True
+    forever and every subsequent dirty-region refresh silently skips
+    the boundary recompute even in outline/boundary modes.
+    """
+    from montaris.tools.brush import BrushTool
+    from montaris.tools.hand import HandTool
+
+    class _StubApp:
+        def __init__(self):
+            from montaris.core.undo import UndoStack
+            self.undo_stack = UndoStack()
+            self._auto_overlap = False
+            self.layer_stack = canvas_with_roi[0].layer_stack
+
+    canvas, roi = canvas_with_roi
+    brush = BrushTool(_StubApp())
+    canvas.set_tool(brush)
+    from PySide6.QtCore import QPointF
+    brush.on_press(QPointF(100, 100), roi, canvas)
+    assert canvas._stroke_in_progress is True
+    assert brush._painting is True
+
+    # User switches to the hand tool mid-drag.
+    canvas.set_tool(HandTool(_StubApp()))
+
+    assert canvas._stroke_in_progress is False, (
+        "tool switch mid-stroke left the canvas flag latched True"
+    )
+    assert brush._painting is False, (
+        "tool switch left the previous tool's _painting latched True; "
+        "a stray on_move from a different code path could keep painting"
+    )
+
+
+def test_release_with_layer_none_clears_flag(canvas_with_roi):
+    """Codex review HIGH (repro B): release with ``layer=None`` (image
+    closed mid-drag, layer deselected) must still clear the flag, not
+    return early before the cleanup.
+    """
+    from montaris.tools.brush import BrushTool
+
+    class _StubApp:
+        def __init__(self):
+            from montaris.core.undo import UndoStack
+            self.undo_stack = UndoStack()
+            self._auto_overlap = False
+            self.layer_stack = canvas_with_roi[0].layer_stack
+
+    canvas, roi = canvas_with_roi
+    brush = BrushTool(_StubApp())
+    from PySide6.QtCore import QPointF
+    brush.on_press(QPointF(100, 100), roi, canvas)
+    assert canvas._stroke_in_progress is True
+
+    # User closes the image; the active layer becomes None before
+    # the mouse-release event.
+    brush.on_release(QPointF(100, 100), None, canvas)
+
+    assert canvas._stroke_in_progress is False, (
+        "release with layer=None left the flag latched True"
+    )
+    assert brush._painting is False
+
+
+def test_release_runs_edge_after_stroke_ends(canvas_with_roi):
+    """Counterpart to the previous test: once the stroke ends and
+    ``refresh_dirty_region`` runs, the edge tile path MUST execute so
+    the user sees the proper boundary on release.
+    """
+    canvas, roi = canvas_with_roi
+    # Simulate a press without a release by setting the flag directly.
+    canvas._stroke_in_progress = False  # release happened
+    edge_calls = []
+    real_edge = canvas._render_dirty_edge_tile
+
+    def spy(*args, **kwargs):
+        edge_calls.append(True)
+        return real_edge(*args, **kwargs)
+
+    canvas._render_dirty_edge_tile = spy  # type: ignore[assignment]
+    try:
+        roi.mask[100:115, 100:115] = 255
+        canvas.refresh_dirty_region(roi, (100, 115, 100, 115))
+        assert edge_calls, (
+            "release path skipped the edge tile — boundary will look "
+            "stale until the next full refresh"
+        )
+    finally:
+        canvas._render_dirty_edge_tile = real_edge  # type: ignore[assignment]
+
+
 def test_tile_path_skips_when_existing_item_is_scaled(canvas_with_roi):
     """A non-active ROI rendered at scale > 1 (LOD downsampled by an
     earlier `_refresh_roi_item`) must NOT be composited into as if it

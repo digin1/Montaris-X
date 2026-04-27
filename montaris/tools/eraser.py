@@ -36,6 +36,9 @@ class EraserTool(BaseTool):
         self._snapshot_crop = None
         self._snapshot_bbox = None
         self._stroke_bbox = None
+        # Mid-stroke flush skips the expensive thick-edge recompute —
+        # see brush.py for rationale.
+        canvas._stroke_in_progress = True
         # Hide selection highlight while erasing
         for item in canvas._selection_highlight_items:
             item.setVisible(False)
@@ -59,9 +62,15 @@ class EraserTool(BaseTool):
         canvas.refresh_active_overlay_partial(layer, (dy1, dy2, dx1, dx2))
 
     def on_release(self, pos, layer, canvas):
-        if not self._erasing or layer is None:
+        if not self._erasing:
             return
         self._erasing = False
+        # End the mid-stroke fast path FIRST so a release with
+        # layer=None (image closed mid-drag, layer deselected) can't
+        # leave the flag latched True (Codex review HIGH).
+        canvas._stroke_in_progress = False
+        if layer is None:
+            return
         if self._snapshot_crop is not None and self._stroke_bbox is not None:
             sy1, sy2, sx1, sx2 = self._stroke_bbox
             old_crop = self._snapshot_crop[

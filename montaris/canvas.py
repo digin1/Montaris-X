@@ -93,6 +93,13 @@ class ImageCanvas(QGraphicsView):
         self._dirty_timer.setSingleShot(True)
         self._dirty_timer.setInterval(16)  # ~60fps max
         self._dirty_timer.timeout.connect(self._flush_dirty)
+        # While a brush/eraser stroke is in progress the partial-flush
+        # path skips the thick-edge recompute (tens of ms per flush at
+        # low zoom = mid-drag stutter every few mouse-move events) and
+        # falls back to the cheap solid-tile path. The proper thick
+        # edge is rendered once on release via ``refresh_dirty_region``.
+        # brush/eraser ``on_press`` set this; ``on_release`` clears it.
+        self._stroke_in_progress = False
 
         self._tint_color = None
         self._adjustments = None  # ImageAdjustments applied at display time
@@ -201,8 +208,31 @@ class ImageCanvas(QGraphicsView):
                     pass
         self._zb_pct.setStyleSheet(_theme.zoom_bar_pct_style())
 
+    def _abort_active_stroke(self):
+        """Force-end any in-progress paint stroke and reset the canvas
+        + tool flags. Called from ``set_tool`` and any code path that
+        invalidates the current tool/layer (image close, document
+        switch). Idempotent — safe to call when no stroke is active.
+        """
+        self._stroke_in_progress = False
+        old = getattr(self, "_tool", None)
+        if old is not None:
+            # Clear the tool-local "drag in progress" flags so a
+            # missed-release or tool-switch-mid-drag doesn't leave
+            # ``on_move`` from another event keep painting.
+            for attr in ("_painting", "_erasing", "_stamping"):
+                if hasattr(old, attr):
+                    setattr(old, attr, False)
+
     def set_tool(self, tool):
         t0 = time.perf_counter()
+        # Abort any in-progress brush/eraser/stamp stroke before swapping
+        # tools. Without this, a mid-drag tool switch would never clear
+        # ``_stroke_in_progress`` (the old tool's ``on_release`` is the
+        # only path that does), and every subsequent dirty-region
+        # refresh would silently take the solid-tile path even in
+        # boundary/outline modes — Codex review HIGH (stuck-state bug).
+        self._abort_active_stroke()
         # Clean up old tool's scene items (e.g. transform handles)
         old = self._tool
         if old is not None and hasattr(old, '_clear_handles'):
@@ -1162,7 +1192,17 @@ class ImageCanvas(QGraphicsView):
         # every brush move + release on the user's 71 M-pixel masks.
         fill_mode = self.layer_stack.fill_mode
         is_selected = self._selection.contains(layer)
-        needs_edge = fill_mode in ('boundary', 'outline', 'both') or is_selected
+        # During an active stroke skip the edge tile (it costs tens of
+        # ms per flush at low zoom because of the thickness-sized
+        # binary_dilation chain). The user sees a solid-fill update for
+        # the freshly-painted region and the proper thick edge appears
+        # once on release via ``refresh_dirty_region``. Without this
+        # gate continuous drags stutter every few move events as the
+        # 16 ms timer fires the flush mid-drag.
+        needs_edge = (
+            (fill_mode in ('boundary', 'outline', 'both') or is_selected)
+            and not self._stroke_in_progress
+        )
         if needs_edge:
             target_lod = 0 if layer is self._active_layer else lod_level
             if self._render_dirty_edge_tile(layer, dirty_bbox, target_lod,

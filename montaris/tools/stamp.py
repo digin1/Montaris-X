@@ -26,6 +26,10 @@ class StampTool(BaseTool):
         self._snapshot_crop = None
         self._snapshot_bbox = None
         self._stroke_bbox = None
+        # Mid-stroke fast path (same gate brush/eraser use). Without
+        # this, dragging the stamp tool over a large region pays the
+        # ~50 ms thick-edge recompute on every dirty-timer flush.
+        canvas._stroke_in_progress = True
         self._stamp(pos, layer)
         if self._stroke_bbox is not None:
             canvas.refresh_active_overlay_partial(layer, self._stroke_bbox)
@@ -46,9 +50,14 @@ class StampTool(BaseTool):
         canvas.refresh_active_overlay_partial(layer, (dy1, dy2, dx1, dx2))
 
     def on_release(self, pos, layer, canvas):
-        if not self._stamping or layer is None:
+        if not self._stamping:
             return
         self._stamping = False
+        # End the mid-stroke fast path BEFORE the final refresh so the
+        # release renders the proper boundary once (Codex review HIGH).
+        canvas._stroke_in_progress = False
+        if layer is None:
+            return
         if self._snapshot_crop is not None and self._stroke_bbox is not None:
             sy1, sy2, sx1, sx2 = self._stroke_bbox
             old_crop = self._snapshot_crop[
