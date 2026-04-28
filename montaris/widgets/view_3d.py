@@ -592,6 +592,14 @@ class View3DPanel(QWidget):
         self._volumes = []        # list of scene.visuals.Volume (intensity)
         self._labels_volume = None  # scene.visuals.Volume for labels_3d overlay
         self._labels_visible = True
+        # Dense-palette LUT cached after each upload so ``_on_drag_refresh_tick``
+        # can remap raw ``labels_3d`` voxels into palette slots before its
+        # sub-region texture upload. The texture stores slots, NOT raw ids,
+        # so writing a raw value (5, 663, …) into it would sample a wrong
+        # cmap entry and bypass the slot-0 visibility filter — exactly the
+        # bug the dense-palette fix removed from the full-rebuild path.
+        self._labels_texture_lut = None
+        self._labels_palette_size = 0
         self._labels_opacity = 0.6
         # Cache for the pooled labels array — reused across visibility toggles
         # to avoid re-allocating ~0.5 GB per refresh. Keyed by (shape, dtype,
@@ -1412,14 +1420,28 @@ class View3DPanel(QWidget):
         self._dirty_bbox = None
         doc = self._primary_doc
         labels = doc.labels_3d if doc is not None else None
-        # Fast path: live visual, no downsample, bbox available. Upload
-        # just the touched subvolume via Texture3D.set_data(offset=...).
+        tex_lut = self._labels_texture_lut
+        # Fast path: live visual, cached LUT, no downsample, bbox
+        # available. Upload just the touched subvolume via
+        # Texture3D.set_data(offset=...). The texture stores DENSE
+        # palette slots — raw ``labels`` values must be remapped through
+        # ``tex_lut`` before upload (mirrors the dense-palette upload
+        # in ``_do_rebuild_labels_overlay``); writing raw ids would
+        # sample wrong cmap entries with ``clim=(0, palette_size)``.
         if (self._labels_volume is not None
                 and labels is not None
+                and tex_lut is not None
                 and bbox is not None
                 and tuple(int(a) for a in self._last_total_ds_axes) == (1, 1, 1)):
             z0, z1, y0, y1, x0, x1 = bbox
-            sub = np.ascontiguousarray(labels[z0:z1, y0:y1, x0:x1])
+            raw_sub = labels[z0:z1, y0:y1, x0:x1]
+            # Stale-id defence: out-of-range raw ids → slot 0
+            # (background). Mask via ``np.where`` rather than extending
+            # the LUT — a stale uint32 id (partial sidecars) would
+            # otherwise drive a multi-GB ``np.zeros`` allocation here.
+            if raw_sub.size and int(raw_sub.max()) >= tex_lut.size:
+                raw_sub = np.where(raw_sub < tex_lut.size, raw_sub, 0)
+            sub = np.ascontiguousarray(tex_lut[raw_sub])
             try:
                 # vispy's Volume data is (Z, Y, X); Texture3D.set_data's
                 # offset follows the same axis order as the stored data.
@@ -1997,31 +2019,69 @@ class View3DPanel(QWidget):
         # it picks up the same downsample stride.
         self._rebuild_labels_overlay()
 
-    def _build_labels_colormap(self, labels_meta, max_id):
-        """Build a discrete Colormap: 0 → transparent, N → meta[N] color.
+    def _build_labels_colormap_and_lut(self, labels_meta, max_id, dtype):
+        """Build (texture_lut, dense_cmap, palette_size).
 
-        Uses ``interpolation='zero'`` so rendering is nearest-neighbor; any
-        lerp between slots would produce ghost labels on the boundary.
+        ``texture_lut[raw_id]`` → dense palette index in ``[0, palette_size]``.
+        Slot 0 is transparent (background). Visible labels occupy slots
+        1..palette_size, sorted by raw id. Hidden / opacity=0 labels map
+        to slot 0 so they render transparent without consuming a palette
+        slot.
+
+        Why we need this: vispy's ``Colormap`` is uploaded to a fixed
+        1024-pixel 1D GPU LUT (``LUT_len = 1024``). When raw label ids
+        span a wide sparse range (e.g. neuron skeletons with ids
+        0..663), vispy resamples the user-supplied colormap from N
+        entries to 1024 — and for any N that doesn't divide 1024
+        evenly, voxel-value → texel mapping shifts by ``value/N``. A
+        voxel with id 5 ends up sampling the texel that contains color
+        slot 4, etc., scrambling the rendering and dropping voxels
+        whose mapped slot happens to be alpha=0. napari avoids this in
+        ``_accelerated_cmap.zero_preserving_modulo`` by pre-mapping
+        labels to a small dense palette before GPU upload; we do the
+        same here, but keyed by the actual ROI ids so each ROI keeps
+        its user-assigned colour.
+
+        ``dtype`` is the dtype to allocate ``texture_lut`` in — sized
+        to fit ``palette_size`` indices. Caller passes ``labels.dtype``
+        so ``texture_lut[labels]`` keeps numpy's safe-cast invariants.
         """
-        n_slots = int(max_id) + 1
-        colors = np.zeros((n_slots, 4), dtype=np.float32)
-        for lid, meta in labels_meta.items():
-            lid = int(lid)
-            if lid <= 0 or lid >= n_slots:
+        sorted_ids = sorted(int(lid) for lid in labels_meta.keys()
+                            if int(lid) > 0 and int(lid) <= max_id)
+        # Palette = visible-AND-non-transparent labels only; hidden ones
+        # are filtered into slot 0 via the LUT.
+        visible_ids: list[int] = []
+        meta_for_id: dict[int, dict] = {}
+        for lid in sorted_ids:
+            meta = labels_meta[lid]
+            hidden = (not meta.get('visible', True)
+                      or int(meta.get('opacity', 128)) <= 0)
+            if hidden:
                 continue
+            visible_ids.append(lid)
+            meta_for_id[lid] = meta
+        palette_size = len(visible_ids)
+
+        lut_size = int(max_id) + 1
+        texture_lut = np.zeros(lut_size, dtype=dtype)
+        # ``+ 1`` for the background slot at index 0.
+        cmap_colors = np.zeros((palette_size + 1, 4), dtype=np.float32)
+
+        for slot, lid in enumerate(visible_ids, start=1):
+            texture_lut[lid] = slot
+            meta = meta_for_id[lid]
             r, g, b = meta.get('color', (255, 255, 255))
             if max(r, g, b) > 1.0:
                 r, g, b = r / 255.0, g / 255.0, b / 255.0
             base_alpha = meta.get('opacity', 128) / 255.0
-            visible = meta.get('visible', True)
-            a = (base_alpha * self._labels_opacity) if visible else 0.0
-            colors[lid] = (r, g, b, a)
-        # Zero-order interpolation needs N+1 control points (one per step
-        # boundary) for N color entries. Linear interp would blur between
-        # labels and create ghost colors at the boundary voxels, so we stay
-        # with step.
-        controls = np.linspace(0.0, 1.0, n_slots + 1, dtype=np.float32)
-        return Colormap(colors=colors, controls=controls, interpolation='zero')
+            cmap_colors[slot] = (r, g, b, base_alpha * self._labels_opacity)
+
+        # ``+ 2`` controls for the (palette_size + 1)-entry cmap with
+        # zero-order interpolation (one step boundary per entry).
+        controls = np.linspace(0.0, 1.0, palette_size + 2, dtype=np.float32)
+        cmap = Colormap(colors=cmap_colors, controls=controls,
+                        interpolation='zero')
+        return texture_lut, cmap, palette_size
 
     def _rebuild_labels_overlay(self):
         """(Re)create — or in-place update — the labels overlay visual.
@@ -2092,63 +2152,74 @@ class View3DPanel(QWidget):
                 self._labels_volume.visible = False
                 self._labels_volume.update()
             return
+        # Build the texture LUT + dense cmap. ``texture_lut`` maps raw
+        # label ids to dense palette slots (1..palette_size, 0 =
+        # transparent / hidden). Dense slots dodge vispy's LUT_len=1024
+        # resampling that scrambled colours when raw ids spanned a wide
+        # sparse range (the neuron_*_branch_labels_full.tif case — 195
+        # ids in [0..663], renders showed wrong colours / missing
+        # skeletons). The LUT also folds in visibility/opacity filtering
+        # — hidden labels map to slot 0 so max-pool naturally prefers
+        # visible neighbours, no separate ``id_map`` needed.
+        # Pick the LUT dtype to match the input labels — that way
+        # ``texture_lut[labels]`` keeps numpy's safe-cast invariants
+        # without an extra astype copy. The palette index always fits
+        # in this dtype: palette_size ≤ count of meta ids in (0, max_id]
+        # (each ≥1, no duplicates), so palette_size ≤ max_id which
+        # fits ``labels.dtype`` by construction.
+        texture_lut, cmap, palette_size = self._build_labels_colormap_and_lut(
+            doc.labels_meta, max_id, dtype=labels.dtype,
+        )
+        if palette_size == 0:
+            # No visible labels survived the LUT build (every entry was
+            # hidden) — same UX as all_hidden above; just toggle off.
+            if self._labels_volume is not None:
+                self._labels_volume.visible = False
+                self._labels_volume.update()
+            return
+
+        # Stale-id defence: ``labels_3d`` can carry voxel ids beyond
+        # ``max(labels_meta)`` after a partial sidecar import (see
+        # ``montaris/io/volume_labels.py``, which accepts uint32 ids).
+        # Without a meta entry those ids have no colour, so render them
+        # as background (slot 0). Mask via ``np.where`` rather than
+        # extending the LUT — a stale 3-billion uint32 id would drive a
+        # multi-GB ``np.zeros`` allocation under extension. Masking
+        # caps memory at one ``labels``-sized working copy.
+        if labels.size:
+            lbl_max_raw = int(labels.max())
+            if lbl_max_raw >= texture_lut.size:
+                labels = np.where(labels < texture_lut.size, labels, 0)
+
         dz, dy, dx = (max(1, int(a)) for a in self._last_total_ds_axes)
         block = (dz, dy, dx)
         if block != (1, 1, 1):
             # Max-pool per (dz, dy, dx) block rather than stride-decimate.
             # Stride decimation skips voxels, which destroys sparse thin
-            # structures (e.g. 1-voxel-wide dendrites collapse to a dot grid
-            # — the "skeleton" effect). Max-pool preserves any block that
-            # contains a nonzero label, matching napari's behaviour.
-            # Remap effectively-hidden labels to 0 only when at least one
-            # label is actually hidden — the remap uses advanced indexing
-            # which is ~4× slower than identity pooling on large stacks.
-            # "Show all" skips the remap and hits the fast path; "hide all"
-            # short-circuits above before we get here.
-            any_hidden = any(
-                (not m.get('visible', True))
-                or int(m.get('opacity', 128)) <= 0
-                for m in doc.labels_meta.values()
-            )
-            id_map = None
-            if any_hidden:
-                # Size id_map from the larger of labels_meta and the actual
-                # voxel max so a partial sidecar (ids present in labels_3d
-                # but not in labels_meta) can't IndexError inside the
-                # helper. For uint8/uint16 labels the whole value range
-                # fits in a cheap LUT; bigger dtypes fall back to a scan.
-                if labels.dtype.itemsize <= 2:
-                    lut_size = int(np.iinfo(labels.dtype).max) + 1
-                else:
-                    lut_size = max(max_id, int(labels.max())) + 1
-                id_map = np.arange(lut_size, dtype=labels.dtype)
-                for lid, meta in doc.labels_meta.items():
-                    lid = int(lid)
-                    if lid <= 0 or lid >= lut_size:
-                        continue
-                    hidden = (not meta.get('visible', True)
-                              or int(meta.get('opacity', 128)) <= 0)
-                    if hidden:
-                        id_map[lid] = 0
-            # Show the indeterminate progress bar for the slow partial-
-            # visibility path — pool + advanced-index remap + GL upload
-            # takes ~1 s on large sparse stacks, long enough that the user
-            # deserves visible feedback. "Show all" skips this (id_map is
-            # None → much faster); "hide all" already short-circuited above.
-            if id_map is not None:
-                self.show_progress()
-            # Reuse the preallocated pool buffer when the signature matches
-            # so visibility toggles don't re-allocate the pooled array.
+            # structures (e.g. 1-voxel-wide dendrites collapse to a dot
+            # grid — the "skeleton" effect). Max-pool preserves any
+            # block that contains a nonzero label, matching napari's
+            # behaviour. ``id_map=texture_lut`` doubles as the palette
+            # remap and the visibility filter (hidden ids → slot 0 so
+            # max-pool prefers visible neighbours).
+            self.show_progress()
             key = (labels.shape, labels.dtype, block)
             reuse = (self._pooled_labels_key == key
                      and self._pooled_labels_buf is not None)
             out_buf = self._pooled_labels_buf if reuse else None
-            labels = _max_pool_labels(labels, block, id_map=id_map,
+            labels = _max_pool_labels(labels, block, id_map=texture_lut,
                                       out=out_buf)
             self._pooled_labels_buf = labels
             self._pooled_labels_key = key
+        else:
+            # No pooling — route the LUT through ``_max_pool_labels`` so
+            # the bounds-extension guard (extends short LUT to identity
+            # for ids beyond ``max_id``) is shared with the pool path.
+            # Direct ``texture_lut[labels]`` would IndexError on stale
+            # imports where labels_3d carries ids absent from
+            # labels_meta (partial sidecars; see volume_labels.py).
+            labels = _max_pool_labels(labels, (1, 1, 1), id_map=texture_lut)
         try:
-            cmap = self._build_labels_colormap(doc.labels_meta, max_id)
             labels_contig = np.ascontiguousarray(labels)
 
             # Fast path: reuse the existing Volume visual when shape/dtype
@@ -2160,16 +2231,23 @@ class View3DPanel(QWidget):
             # clim widens), so bypassing it would leave stale voxels
             # around. ``copy=False`` skips the internal memcpy since
             # labels_contig is already contiguous and we won't mutate it.
+            # ``clim`` matches the dense palette range, NOT raw max_id.
+            # Voxel value `slot` (1..palette_size) maps to LUT texcoord
+            # ``slot / palette_size`` which falls cleanly inside the
+            # palette_size+1 cmap controls — no resampling drift.
+            clim_max = float(palette_size)
             if (self._labels_volume is not None
                     and tuple(getattr(self, '_labels_tex_shape', ())) == labels_contig.shape
                     and getattr(self, '_labels_tex_dtype', None) == labels_contig.dtype):
                 try:
                     self._labels_volume.set_data(
-                        labels_contig, clim=(0, float(max_id)), copy=False,
+                        labels_contig, clim=(0, clim_max), copy=False,
                     )
                     self._labels_volume.cmap = cmap
                     self._labels_volume.visible = self._labels_visible
                     self._labels_volume.update()
+                    self._labels_texture_lut = texture_lut
+                    self._labels_palette_size = palette_size
                     return
                 except Exception:
                     # Fall through to full rebuild on any in-place failure.
@@ -2187,7 +2265,7 @@ class View3DPanel(QWidget):
                     parent=self._view.scene,
                     method='translucent',
                     cmap=cmap,
-                    clim=(0, float(max_id)),
+                    clim=(0, clim_max),
                 )
             except Exception as e:  # noqa: BLE001 — GL upload can fail on edge dtypes
                 print(f"[view_3d] labels overlay failed: {e}")
@@ -2200,6 +2278,8 @@ class View3DPanel(QWidget):
             self._labels_volume = vol
             self._labels_tex_shape = labels_contig.shape
             self._labels_tex_dtype = labels_contig.dtype
+            self._labels_texture_lut = texture_lut
+            self._labels_palette_size = palette_size
         finally:
             # Hide is cheap and a no-op when the bar wasn't shown, so just
             # always call it here instead of tracking whether show_progress

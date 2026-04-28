@@ -269,6 +269,69 @@ def test_max_pool_labels_extends_short_id_map_without_index_error():
 
 
 @pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_dense_palette_lut_avoids_vispy_lut_resampling(qapp):
+    """Regression for the neuron_*_branch_labels_full.tif rendering bug.
+
+    vispy's ``Colormap`` uploads a fixed 1024-pixel 1D LUT
+    (``LUT_len = 1024``). When raw label ids span a wide sparse range
+    (e.g. 195 distinct ids in [0..663] for a multi-branch neuron file),
+    the user-supplied N-entry colormap gets resampled to 1024 entries
+    and voxel-value → texel mapping shifts by ``value/N``. Voxel id 5
+    ended up sampling the texel that contained slot 4's colour, etc.
+
+    Fix: pre-remap raw ids to dense palette indices before upload, so
+    the GPU sees ``[0, palette_size]`` instead of raw ``[0, max_id]``.
+    This test verifies:
+    - ``texture_lut`` maps each visible meta id to a unique dense slot
+      starting at 1 (slot 0 = transparent / hidden).
+    - The cmap has exactly ``palette_size + 1`` entries.
+    - Hidden / opacity=0 ids map to slot 0 in the LUT.
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    doc = _doc_with_volume("dense_palette", vol)
+    doc.labels_3d = np.zeros_like(vol)
+    # Sparse, wide-range ids — exactly the case the bug surfaced on.
+    doc.labels_3d[0, 0, 0] = 5
+    doc.labels_3d[0, 0, 1] = 100
+    doc.labels_3d[0, 0, 2] = 663
+    doc.labels_3d[0, 0, 3] = 50  # this one will be hidden
+    doc.labels_meta = {
+        5:   {"name": "a", "color": (255, 0, 0),   "opacity": 128,
+              "visible": True,  "fill_mode": "solid"},
+        50:  {"name": "b", "color": (0, 255, 0),   "opacity": 128,
+              "visible": False, "fill_mode": "solid"},  # hidden
+        100: {"name": "c", "color": (0, 0, 255),   "opacity": 128,
+              "visible": True,  "fill_mode": "solid"},
+        663: {"name": "d", "color": (255, 255, 0), "opacity": 128,
+              "visible": True,  "fill_mode": "solid"},
+    }
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        texture_lut, cmap, palette_size = panel._build_labels_colormap_and_lut(
+            doc.labels_meta, max_id=663, dtype=np.uint16,
+        )
+        # 3 visible labels (50 is hidden) → 3 palette slots, plus slot 0.
+        assert palette_size == 3
+        assert texture_lut[0] == 0      # background untouched
+        assert texture_lut[5] == 1      # first visible id (sorted) → slot 1
+        assert texture_lut[100] == 2    # next visible id → slot 2
+        assert texture_lut[663] == 3    # last visible id → slot 3
+        assert texture_lut[50] == 0     # hidden id → background slot
+        # Cmap has palette_size + 1 colour entries (slot 0 + slots 1..N).
+        from vispy.color import Colormap as VispyCmap
+        assert isinstance(cmap, VispyCmap)
+        # Slot 0 must be fully transparent (alpha=0).
+        assert tuple(cmap.colors.rgba[0]) == (0.0, 0.0, 0.0, 0.0)
+        # Slot 1 (raw id 5, red) must be opaque red ≈ (1, 0, 0, alpha).
+        assert cmap.colors.rgba[1][0] > 0.99   # red channel ~1.0
+        assert cmap.colors.rgba[1][1] < 0.01   # green ~0
+        assert cmap.colors.rgba[1][3] > 0.0    # alpha > 0
+    finally:
+        panel.close()
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
 def test_fast_path_refreshes_via_set_data_not_raw_texture(qapp, monkeypatch):
     """Regression: the in-place fast path must go through
     ``VolumeVisual.set_data(..., clim=...)`` rather than poking
@@ -291,6 +354,12 @@ def test_fast_path_refreshes_via_set_data_not_raw_texture(qapp, monkeypatch):
     panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
                         documents=[doc])
     try:
+        # Drain the deferred QTimer.singleShot(0, _rebuild_volumes) the
+        # panel constructor schedules — otherwise it fires during the
+        # first build's show_progress→processEvents and clobbers
+        # _last_total_ds_axes back to (1, 1, 1) for this tiny test
+        # volume, breaking the shape-match check on the second build.
+        qapp.processEvents()
         # Force the pool path by setting a non-identity downsample so the
         # fast-path shape-match check is actually exercised.
         panel._last_total_ds_axes = (1, 2, 1)
@@ -312,6 +381,15 @@ def test_fast_path_refreshes_via_set_data_not_raw_texture(qapp, monkeypatch):
                             lambda *a, **kw: captured.setdefault(
                                 'raw_texture', True))
 
+        # Re-assert _last_total_ds_axes in case anything reset it; the
+        # second build must use the same block as the first so the
+        # shape-match check passes and the fast path runs.
+        panel._last_total_ds_axes = (1, 2, 1)
+        # Capture the volume identity to verify the fast path reused it
+        # rather than rebuilding (slow path replaces the visual object,
+        # which would otherwise let `clim == (0.0, 2.0)` pass via the
+        # rebuild branch and silently regress).
+        original_volume_id = id(panel._labels_volume)
         # Add a larger id to doc and trigger another refresh — simulates a
         # paint stroke adding label 5 after the overlay was last built.
         doc.labels_3d[1, 1, 1] = 5
@@ -319,16 +397,87 @@ def test_fast_path_refreshes_via_set_data_not_raw_texture(qapp, monkeypatch):
                               "opacity": 128, "visible": True,
                               "fill_mode": "solid"}
         panel._rebuild_labels_overlay()
+        assert id(panel._labels_volume) == original_volume_id, (
+            "fast path must reuse the existing Volume visual; if a "
+            "rebuild swapped it out, set_data was patched on a stale "
+            "object and the test no longer pins the in-place path"
+        )
 
         assert captured.get('raw_texture') is not True, (
             "fast path must route through VolumeVisual.set_data — "
             "bypassing it leaves _last_data stale and a later clim widen "
             "will re-upload outdated voxels"
         )
-        assert captured.get('clim') == (0.0, 5.0), (
-            "new max_id must be passed to set_data so VolumeVisual's "
-            "cached _last_data stays in sync with the new clim"
+        # ``clim`` is now ``(0, palette_size)`` — palette_size = 2 here
+        # because there are two visible meta entries (id 1 and id 5).
+        # The dense-palette LUT (introduced to avoid vispy's LUT_len=1024
+        # resampling that scrambled colours on wide-range raw ids) maps
+        # raw id 5 to slot 2 before upload, so clim must reflect the
+        # palette range, not raw max_id.
+        assert captured.get('clim') == (0.0, 2.0), (
+            f"clim should match palette_size (=2), got {captured.get('clim')}"
         )
+    finally:
+        panel.close()
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_drag_refresh_tick_remaps_through_dense_palette_lut(qapp, monkeypatch):
+    """Regression: live paint drags must remap raw label ids to palette
+    slots before the sub-region texture upload. The texture stores DENSE
+    palette slots after the dense-palette LUT fix, with
+    ``clim=(0, palette_size)`` — uploading raw ids (e.g. 663) into it
+    would sample a wrong cmap entry and bypass the slot-0 visibility
+    filter. ``_on_drag_refresh_tick`` was the one path that still poked
+    raw ``labels_3d`` slices into the texture; this pins the remap.
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    doc = _doc_with_volume("drag_remap", vol)
+    doc.labels_3d = np.zeros_like(vol)
+    # Wide-range sparse ids — exactly the case the dense-palette fix
+    # was introduced for.
+    doc.labels_3d[0, 0, 0] = 663
+    doc.labels_meta = {663: {"name": "a", "color": (255, 0, 0),
+                             "opacity": 128, "visible": True,
+                             "fill_mode": "solid"}}
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        qapp.processEvents()
+        # Identity downsample so the drag tick's fast path runs.
+        panel._last_total_ds_axes = (1, 1, 1)
+        panel._rebuild_labels_overlay()
+        assert panel._labels_volume is not None
+        assert panel._labels_texture_lut is not None
+        # Cached LUT should remap raw 663 → slot 1 (only visible id).
+        assert int(panel._labels_texture_lut[663]) == 1
+
+        captured = {}
+
+        def fake_set_data(sub, offset=None):
+            captured['sub'] = np.array(sub)
+            captured['offset'] = tuple(offset) if offset is not None else None
+
+        monkeypatch.setattr(panel._labels_volume._texture, 'set_data',
+                            fake_set_data)
+        # Simulate a paint stroke writing raw id 663 into a fresh voxel.
+        doc.labels_3d[1, 2, 3] = 663
+        panel._dirty_bbox = (1, 2, 2, 3, 3, 4)  # (z0,z1,y0,y1,x0,x1)
+        panel._drag_dirty = True
+        panel._on_drag_refresh_tick()
+
+        assert 'sub' in captured, (
+            "drag tick must call Texture3D.set_data on the sub-region"
+        )
+        assert captured['offset'] == (1, 2, 3)
+        # The uploaded sub-region must contain palette slots, NOT the
+        # raw id 663. Slot 1 = the only visible meta entry.
+        sub = captured['sub']
+        assert int(sub.max()) == 1, (
+            f"sub-region must be remapped to dense palette slots; "
+            f"got max={int(sub.max())} (663 = raw upload regression)"
+        )
+        assert sub[0, 0, 0] == 1
     finally:
         panel.close()
 
@@ -473,6 +622,12 @@ def test_drag_refresh_tick_uploads_with_zyx_offset(qapp, monkeypatch):
 
         panel._labels_volume = FakeVolume()
         panel._last_total_ds = 1
+        # Identity LUT so the dense-palette remap is a no-op for this
+        # test (which only pins the offset/shape contract). A real
+        # build sets ``_labels_texture_lut`` to a dense palette LUT;
+        # the drag tick refuses to upload without one (would otherwise
+        # poke raw ids into a dense-palette texture).
+        panel._labels_texture_lut = np.arange(256, dtype=np.uint8)
         panel._drag_dirty = True
         # bbox = (z0, z1, y0, y1, x0, x1)
         panel._dirty_bbox = (2, 5, 4, 10, 6, 14)
