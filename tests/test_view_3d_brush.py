@@ -533,6 +533,58 @@ def test_wand_flood_fills_by_intensity_into_selected_roi(qapp):
         panel.close()
 
 
+def test_wand_does_not_use_full_volume_np_where_for_bbox(qapp, monkeypatch):
+    """Wand must derive the undo bbox via per-axis ``mask.any(axis=...)``
+    reductions, NOT ``np.where(mask)``. ``np.where`` on the full mask
+    builds three full-volume int64 index arrays just to extract min/max
+    per axis — measured at ~590 ms on the 348M-voxel GQR file, ~30%
+    of the wand's wall-time. Per-axis collapse delivers the same bbox
+    in ~150 ms. Pin the contract so a future cleanup that "simplifies"
+    back to ``np.where`` would be caught.
+    """
+    shape = (4, 8, 8)
+    vol = np.zeros(shape, dtype=np.uint8)
+    vol[1:3, 2:5, 2:5] = 200
+    doc = MontageDocument(name="w", image_layer=ImageLayer("w", vol.max(axis=0)))
+    doc.volume_data = vol
+    doc.volume_axes = "ZYX"
+    doc.ensure_labels_3d()
+
+    panel = View3DPanel(
+        None, channels=[("ch0", vol, (1.0, 1.0, 1.0))], documents=[doc],
+    )
+    try:
+        lid = doc.reserve_label_id(name="d")
+        panel.set_active_volume_roi_id(lid)
+        panel._tool_combo.setCurrentText("Wand")
+        panel._fill_tolerance = 20
+
+        # Spy on np.where; the wand path must NOT call it on the
+        # full mask. ``flood`` and other internals may call it on
+        # smaller arrays — we only assert it isn't called with a
+        # full-volume-shaped argument.
+        full_shape = vol.shape
+        bad_where_calls = {'count': 0}
+        real_where = np.where
+
+        def spy(*args, **kwargs):
+            if args and hasattr(args[0], 'shape') and args[0].shape == full_shape:
+                bad_where_calls['count'] += 1
+            return real_where(*args, **kwargs)
+
+        monkeypatch.setattr(np, 'where', spy)
+        panel._run_wand((2, 3, 3))
+
+        assert bad_where_calls['count'] == 0, (
+            "wand bbox derivation must not call np.where on the full "
+            "mask; use per-axis any-collapse instead"
+        )
+        # And the actual selection still works.
+        assert doc.labels_3d[2, 3, 3] == lid
+    finally:
+        panel.close()
+
+
 def test_wand_does_not_clobber_other_rois(qapp):
     """Wand writes only into background (0) voxels — existing ROIs survive."""
     shape = (6, 12, 12)

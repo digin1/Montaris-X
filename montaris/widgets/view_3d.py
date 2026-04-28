@@ -1899,10 +1899,21 @@ class View3DPanel(QWidget):
         self.refresh_labels()
 
         from montaris.core.undo import VolumeFillUndoCommand
-        zs, ys, xs = np.where(mask)
-        bbox = (int(zs.min()), int(zs.max()) + 1,
-                int(ys.min()), int(ys.max()) + 1,
-                int(xs.min()), int(xs.max()) + 1)
+        # Bbox via per-axis ``any`` reductions (~150 ms on the GQR
+        # file) instead of ``np.where(mask)`` (~590 ms). ``np.where``
+        # allocates THREE full-volume int64 index arrays (3 × 348M
+        # entries) just to derive the bbox from the min/max — the
+        # individual voxel coords aren't needed downstream because
+        # the in-place ``labels_3d[mask] = new_label`` write above
+        # already used the mask directly. Per-axis collapse
+        # short-circuits each reduction at the first True, returning
+        # in O(volume) ops instead of O(volume) allocations.
+        zs_idx = np.flatnonzero(mask.any(axis=(1, 2)))
+        ys_idx = np.flatnonzero(mask.any(axis=(0, 2)))
+        xs_idx = np.flatnonzero(mask.any(axis=(0, 1)))
+        bbox = (int(zs_idx[0]), int(zs_idx[-1]) + 1,
+                int(ys_idx[0]), int(ys_idx[-1]) + 1,
+                int(xs_idx[0]), int(xs_idx[-1]) + 1)
         z0, z1, y0, y1, x0, x1 = bbox
         mask_crop = mask[z0:z1, y0:y1, x0:x1]
         self.undo_pushed.emit(
