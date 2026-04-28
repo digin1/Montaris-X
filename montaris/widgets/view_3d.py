@@ -473,11 +473,17 @@ def _max_pool_labels(labels, block, id_map=None, out=None):
     oz = (Z + dz - 1) // dz
     oy = (Y + dy - 1) // dy
     ox = (X + dx - 1) // dx
+    # When ``id_map`` is given, the output values are LUT outputs, not
+    # raw labels — allocate ``out`` in the LUT dtype so a uint8 dense
+    # palette doesn't get force-promoted to the labels' uint16/uint32
+    # via ``np.maximum(uint16, uint8) → uint16``. Halves GPU upload
+    # bytes for sparse uint16 label files (the common case).
+    out_dtype = id_map.dtype if id_map is not None else labels.dtype
     if out is None:
-        out = np.zeros((oz, oy, ox), dtype=labels.dtype)
+        out = np.zeros((oz, oy, ox), dtype=out_dtype)
     else:
-        if out.shape != (oz, oy, ox) or out.dtype != labels.dtype:
-            out = np.zeros((oz, oy, ox), dtype=labels.dtype)
+        if out.shape != (oz, oy, ox) or out.dtype != out_dtype:
+            out = np.zeros((oz, oy, ox), dtype=out_dtype)
         else:
             out.fill(0)
     for iz in range(dz):
@@ -2019,7 +2025,7 @@ class View3DPanel(QWidget):
         # it picks up the same downsample stride.
         self._rebuild_labels_overlay()
 
-    def _build_labels_colormap_and_lut(self, labels_meta, max_id, dtype):
+    def _build_labels_colormap_and_lut(self, labels_meta, max_id, dtype=None):
         """Build (texture_lut, dense_cmap, palette_size).
 
         ``texture_lut[raw_id]`` → dense palette index in ``[0, palette_size]``.
@@ -2042,10 +2048,13 @@ class View3DPanel(QWidget):
         same here, but keyed by the actual ROI ids so each ROI keeps
         its user-assigned colour.
 
-        ``dtype`` is the dtype to allocate ``texture_lut`` in — sized
-        to fit ``palette_size`` indices. Caller passes ``labels.dtype``
-        so ``texture_lut[labels]`` keeps numpy's safe-cast invariants.
+        ``dtype`` is accepted for back-compat but ignored — the LUT
+        output dtype is chosen below to match ``palette_size``, since
+        the dense slots fit dramatically smaller than raw ids (e.g.
+        a 195-label sparse uint16 file remaps to uint8, halving the
+        GPU upload bytes).
         """
+        del dtype  # see docstring
         sorted_ids = sorted(int(lid) for lid in labels_meta.keys()
                             if int(lid) > 0 and int(lid) <= max_id)
         # Palette = visible-AND-non-transparent labels only; hidden ones
@@ -2062,8 +2071,22 @@ class View3DPanel(QWidget):
             meta_for_id[lid] = meta
         palette_size = len(visible_ids)
 
+        # Output dtype = smallest unsigned int that fits ``palette_size``
+        # (= the largest slot index ever stored in the LUT). Halves GPU
+        # upload bytes when ``palette_size ≤ 255`` (the common case for
+        # sparse uint16/uint32 label files: ~200 ROIs map to uint8).
+        # ``texture_lut[labels]`` returns LUT dtype regardless of
+        # ``labels.dtype``, so the eventual ``Texture3D`` upload uses
+        # this narrower dtype too.
+        if palette_size <= np.iinfo(np.uint8).max:
+            out_dtype = np.uint8
+        elif palette_size <= np.iinfo(np.uint16).max:
+            out_dtype = np.uint16
+        else:
+            out_dtype = np.uint32
+
         lut_size = int(max_id) + 1
-        texture_lut = np.zeros(lut_size, dtype=dtype)
+        texture_lut = np.zeros(lut_size, dtype=out_dtype)
         # ``+ 1`` for the background slot at index 0.
         cmap_colors = np.zeros((palette_size + 1, 4), dtype=np.float32)
 
@@ -2161,12 +2184,11 @@ class View3DPanel(QWidget):
         # skeletons). The LUT also folds in visibility/opacity filtering
         # — hidden labels map to slot 0 so max-pool naturally prefers
         # visible neighbours, no separate ``id_map`` needed.
-        # Pick the LUT dtype to match the input labels — that way
-        # ``texture_lut[labels]`` keeps numpy's safe-cast invariants
-        # without an extra astype copy. The palette index always fits
-        # in this dtype: palette_size ≤ count of meta ids in (0, max_id]
-        # (each ≥1, no duplicates), so palette_size ≤ max_id which
-        # fits ``labels.dtype`` by construction.
+        # The LUT output dtype is now picked inside the builder based
+        # on ``palette_size`` (uint8 ≤255, uint16 ≤65535, else uint32),
+        # NOT the input labels' dtype — so a 200-ROI sparse uint16
+        # file uploads to the GPU as uint8, halving texture bandwidth.
+        # ``dtype`` argument is back-compat only; ignored.
         texture_lut, cmap, palette_size = self._build_labels_colormap_and_lut(
             doc.labels_meta, max_id, dtype=labels.dtype,
         )

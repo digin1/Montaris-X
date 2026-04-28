@@ -251,6 +251,14 @@ def test_max_pool_labels_honours_id_map_for_partial_visibility():
         "with id_map, max-pool must ignore hidden labels so the visible "
         "ROI's voxel survives in the pooled output"
     )
+    # Output dtype must match the LUT's, not the raw labels'. The dense-
+    # palette path narrows the LUT to uint8 when palette_size ≤ 255, and
+    # ``np.maximum(uint16_out, uint8_id_map_result)`` would silently
+    # promote back to uint16, defeating the GPU-upload halving.
+    assert masked.dtype == id_map.dtype, (
+        f"out dtype must follow id_map.dtype ({id_map.dtype}), "
+        f"got {masked.dtype}"
+    )
 
 
 def test_max_pool_labels_extends_short_id_map_without_index_error():
@@ -313,6 +321,13 @@ def test_dense_palette_lut_avoids_vispy_lut_resampling(qapp):
         )
         # 3 visible labels (50 is hidden) → 3 palette slots, plus slot 0.
         assert palette_size == 3
+        # LUT dtype is sized to palette_size, NOT input labels.dtype —
+        # palette_size=3 fits in uint8 even though raw ids are uint16.
+        # Halves GPU upload bandwidth for the texture downstream.
+        assert texture_lut.dtype == np.uint8, (
+            f"LUT dtype should narrow to uint8 when palette_size ≤ 255, "
+            f"got {texture_lut.dtype}"
+        )
         assert texture_lut[0] == 0      # background untouched
         assert texture_lut[5] == 1      # first visible id (sorted) → slot 1
         assert texture_lut[100] == 2    # next visible id → slot 2
