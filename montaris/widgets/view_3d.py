@@ -606,6 +606,13 @@ class View3DPanel(QWidget):
         # bug the dense-palette fix removed from the full-rebuild path.
         self._labels_texture_lut = None
         self._labels_palette_size = 0
+        # Snapshot of ``labels_meta`` keys at the last successful upload.
+        # ``refresh_labels`` compares the current keyset to this; equal
+        # → only RGBA changed → cmap-only fast path; differs → meta
+        # added/removed → full rebuild. Without this, every per-ROI
+        # visibility checkbox click would force a full rebuild (~2.7 s
+        # on the GQR183 file).
+        self._labels_meta_keys: frozenset[int] | None = None
         self._labels_opacity = 0.6
         # Cache for the pooled labels array — reused across visibility toggles
         # to avoid re-allocating ~0.5 GB per refresh. Keyed by (shape, dtype,
@@ -1176,13 +1183,95 @@ class View3DPanel(QWidget):
 
     def _on_labels_opacity_changed(self, val):
         self._labels_opacity = val / 100.0
-        # Rebuilding is the cheapest way to restyle the Colormap's alpha
-        # channel; labels volumes are much smaller than intensity data so
-        # the upload cost is negligible.
+        # Cmap-only fast path: opacity is just a per-slot alpha
+        # multiplier baked into ``cmap_colors`` — no LUT change, no
+        # texture data change. Rebuilding the full overlay would
+        # re-run the per-voxel ``texture_lut[labels]`` and re-upload
+        # the entire 3D texture (~2.7 s on an 850 MB labels volume),
+        # so dragging the slider used to issue ~100 multi-second
+        # rebuilds. ``set_cmap_only`` reassigns ``volume.cmap`` and
+        # is sub-millisecond. Falls back to the full rebuild only
+        # when there's no live volume yet.
+        if self._labels_volume is not None and self._primary_doc is not None:
+            self._refresh_labels_cmap_inplace()
+            return
         self._rebuild_labels_overlay()
 
+    def _refresh_labels_cmap_inplace(self):
+        """Rebuild ONLY the labels Colormap (visibility / opacity / colour
+        edits) and reassign it on the existing Volume. Skips the LUT
+        and the texture upload — caller has guaranteed that
+        ``labels_meta`` keys haven't changed since the last full build,
+        so every slot in the cached LUT is still valid; only the per-
+        slot RGBA values vary.
+
+        Mirrors the colour-build half of :meth:`_build_labels_colormap_and_lut`;
+        kept inline rather than refactored out so the hot path stays
+        free of conditional branches.
+        """
+        doc = self._primary_doc
+        if doc is None or self._labels_volume is None:
+            return
+        labels_meta = doc.labels_meta
+        if not labels_meta:
+            return
+        max_id = int(max(labels_meta.keys()))
+        sorted_ids = sorted(int(lid) for lid in labels_meta.keys()
+                            if int(lid) > 0 and int(lid) <= max_id)
+        palette_size = len(sorted_ids)
+        if palette_size == 0:
+            return
+        cmap_colors = np.zeros((palette_size + 1, 4), dtype=np.float32)
+        for slot, lid in enumerate(sorted_ids, start=1):
+            meta = labels_meta[lid]
+            r, g, b = meta.get('color', (255, 255, 255))
+            if max(r, g, b) > 1.0:
+                r, g, b = r / 255.0, g / 255.0, b / 255.0
+            hidden = (not meta.get('visible', True)
+                      or int(meta.get('opacity', 128)) <= 0)
+            base_alpha = 0.0 if hidden else meta.get('opacity', 128) / 255.0
+            cmap_colors[slot] = (r, g, b, base_alpha * self._labels_opacity)
+        controls = np.linspace(0.0, 1.0, palette_size + 2, dtype=np.float32)
+        self._labels_volume.cmap = Colormap(
+            colors=cmap_colors, controls=controls, interpolation='zero',
+        )
+        # Restore the global "labels visible" flag — the all-hidden
+        # short-circuit in ``_do_rebuild_labels_overlay`` sets
+        # ``volume.visible = False`` to skip rendering when every meta
+        # entry is hidden. When the user re-enables one ROI the keyset
+        # is unchanged (so we land here, not on a full rebuild) — without
+        # this the volume stays hidden until some later full rebuild.
+        self._labels_volume.visible = self._labels_visible
+        self._labels_volume.update()
+
     def refresh_labels(self):
-        """Public hook used by paint/fill tools after they mutate labels_3d."""
+        """Public hook used by paint/fill/wand/erase tools after they
+        mutate ``labels_3d``. Always issues a full rebuild — voxel
+        values changed, the GPU texture must be re-uploaded.
+        """
+        self._rebuild_labels_overlay()
+
+    def refresh_labels_meta_only(self):
+        """Public hook for callers that touch ONLY ``labels_meta`` (the
+        LayerPanel's visibility / opacity / colour / rename / delete
+        signals; properties panel edits). Routes to the cmap-only fast
+        path when the meta keyset is unchanged (sub-millisecond);
+        falls through to the full rebuild when keys were added or
+        removed (new ROI / delete / merge).
+
+        Tool callers (paint, fill, wand, erase) must NOT use this — they
+        mutate ``labels_3d`` voxel values without changing meta keys,
+        so the cmap-only path would skip the texture re-upload and the
+        edit would be invisible.
+        """
+        doc = self._primary_doc
+        if (self._labels_volume is not None
+                and doc is not None
+                and self._labels_meta_keys is not None):
+            current_keys = frozenset(int(k) for k in doc.labels_meta.keys())
+            if current_keys == self._labels_meta_keys:
+                self._refresh_labels_cmap_inplace()
+                return
         self._rebuild_labels_overlay()
 
     def show_progress(self):
@@ -2055,21 +2144,18 @@ class View3DPanel(QWidget):
         GPU upload bytes).
         """
         del dtype  # see docstring
+        # Palette includes ALL meta entries — visible AND hidden — each
+        # gets a stable slot. Hidden / opacity=0 labels render as alpha=0
+        # via their cmap entry rather than being filtered out of the LUT.
+        # This keeps the LUT (and therefore the GPU texture) stable
+        # across visibility toggles, so a per-ROI visibility checkbox is
+        # a sub-ms cmap reassignment instead of a full ~2.7 s texture
+        # re-upload (the lag the user reported on 851 MB labels). New /
+        # removed meta entries still trigger a full rebuild via the
+        # ``_labels_meta_keys`` cache check in :meth:`refresh_labels`.
         sorted_ids = sorted(int(lid) for lid in labels_meta.keys()
                             if int(lid) > 0 and int(lid) <= max_id)
-        # Palette = visible-AND-non-transparent labels only; hidden ones
-        # are filtered into slot 0 via the LUT.
-        visible_ids: list[int] = []
-        meta_for_id: dict[int, dict] = {}
-        for lid in sorted_ids:
-            meta = labels_meta[lid]
-            hidden = (not meta.get('visible', True)
-                      or int(meta.get('opacity', 128)) <= 0)
-            if hidden:
-                continue
-            visible_ids.append(lid)
-            meta_for_id[lid] = meta
-        palette_size = len(visible_ids)
+        palette_size = len(sorted_ids)
 
         # Output dtype = smallest unsigned int that fits ``palette_size``
         # (= the largest slot index ever stored in the LUT). Halves GPU
@@ -2090,13 +2176,15 @@ class View3DPanel(QWidget):
         # ``+ 1`` for the background slot at index 0.
         cmap_colors = np.zeros((palette_size + 1, 4), dtype=np.float32)
 
-        for slot, lid in enumerate(visible_ids, start=1):
+        for slot, lid in enumerate(sorted_ids, start=1):
             texture_lut[lid] = slot
-            meta = meta_for_id[lid]
+            meta = labels_meta[lid]
             r, g, b = meta.get('color', (255, 255, 255))
             if max(r, g, b) > 1.0:
                 r, g, b = r / 255.0, g / 255.0, b / 255.0
-            base_alpha = meta.get('opacity', 128) / 255.0
+            hidden = (not meta.get('visible', True)
+                      or int(meta.get('opacity', 128)) <= 0)
+            base_alpha = 0.0 if hidden else meta.get('opacity', 128) / 255.0
             cmap_colors[slot] = (r, g, b, base_alpha * self._labels_opacity)
 
         # ``+ 2`` controls for the (palette_size + 1)-entry cmap with
@@ -2270,6 +2358,9 @@ class View3DPanel(QWidget):
                     self._labels_volume.update()
                     self._labels_texture_lut = texture_lut
                     self._labels_palette_size = palette_size
+                    self._labels_meta_keys = frozenset(
+                        int(k) for k in doc.labels_meta.keys()
+                    )
                     return
                 except Exception:
                     # Fall through to full rebuild on any in-place failure.
@@ -2282,12 +2373,23 @@ class View3DPanel(QWidget):
             try:
                 # Hand the integer array straight through — vispy's Volume
                 # accepts uint8/uint16 and uploads them verbatim.
+                # ``interpolation='nearest'`` is critical for label data:
+                # the default 'linear' trilinear-interpolates raw slot
+                # values between voxels, then looks the interpolated value
+                # up in the cmap. For categorical labels this produces
+                # halos in unrelated colours — e.g. a hidden slot=3 voxel
+                # next to a slot=0 background interpolates to slot=1.5,
+                # which the cmap maps to colour slot 2 (a different,
+                # possibly visible ROI). napari-style labels rendering
+                # requires nearest sampling so each voxel's slot is
+                # looked up exactly.
                 vol = scene.visuals.Volume(
                     labels_contig,
                     parent=self._view.scene,
                     method='translucent',
                     cmap=cmap,
                     clim=(0, clim_max),
+                    interpolation='nearest',
                 )
             except Exception as e:  # noqa: BLE001 — GL upload can fail on edge dtypes
                 print(f"[view_3d] labels overlay failed: {e}")
@@ -2302,6 +2404,9 @@ class View3DPanel(QWidget):
             self._labels_tex_dtype = labels_contig.dtype
             self._labels_texture_lut = texture_lut
             self._labels_palette_size = palette_size
+            self._labels_meta_keys = frozenset(
+                int(k) for k in doc.labels_meta.keys()
+            )
         finally:
             # Hide is cheap and a no-op when the bar wasn't shown, so just
             # always call it here instead of tracking whether show_progress

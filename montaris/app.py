@@ -1575,10 +1575,14 @@ class MontarisApp(QMainWindow):
         Replaces the bare ``canvas.refresh_overlays`` connection so 3D ROI
         changes (duplicate, merge, reorder, visibility, opacity) also
         redraw the vispy labels overlay in lockstep with the sidebar.
+        Routes through the meta-only fast path: visibility/opacity/colour
+        edits become sub-ms cmap reassignments instead of multi-second
+        full rebuilds. Add/delete falls back to the full rebuild via the
+        keyset check inside ``refresh_labels_meta_only``.
         """
         self.canvas.refresh_overlays()
         if self._view3d_panel is not None:
-            self._view3d_panel.refresh_labels()
+            self._view3d_panel.refresh_labels_meta_only()
 
     def _on_layer_selected(self, layer):
         self.canvas.set_active_layer(layer)

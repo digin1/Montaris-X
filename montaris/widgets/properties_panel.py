@@ -127,7 +127,7 @@ class PropertiesPanel(QWidget):
             if getattr(self._layer, 'is_volume', False):
                 panel = getattr(self.app, '_view3d_panel', None)
                 if panel is not None:
-                    panel.refresh_labels()
+                    panel.refresh_labels_meta_only()
 
     def _on_fill_mode_changed(self, text):
         _internal = {'Solid': 'solid', 'Boundary': 'boundary',

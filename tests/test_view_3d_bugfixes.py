@@ -319,29 +319,152 @@ def test_dense_palette_lut_avoids_vispy_lut_resampling(qapp):
         texture_lut, cmap, palette_size = panel._build_labels_colormap_and_lut(
             doc.labels_meta, max_id=663, dtype=np.uint16,
         )
-        # 3 visible labels (50 is hidden) → 3 palette slots, plus slot 0.
-        assert palette_size == 3
+        # All 4 meta entries (visible + hidden) get a stable slot — that
+        # way per-ROI visibility toggles become cmap-only (~ms) instead
+        # of LUT-rebuild + texture re-upload (~2.7 s on 851 MB labels).
+        # Hidden labels still render as alpha=0 via cmap, not by being
+        # filtered out of the LUT.
+        assert palette_size == 4
         # LUT dtype is sized to palette_size, NOT input labels.dtype —
-        # palette_size=3 fits in uint8 even though raw ids are uint16.
+        # palette_size=4 fits in uint8 even though raw ids are uint16.
         # Halves GPU upload bandwidth for the texture downstream.
         assert texture_lut.dtype == np.uint8, (
             f"LUT dtype should narrow to uint8 when palette_size ≤ 255, "
             f"got {texture_lut.dtype}"
         )
+        # Sorted ids: 5, 50, 100, 663 → slots 1, 2, 3, 4.
         assert texture_lut[0] == 0      # background untouched
-        assert texture_lut[5] == 1      # first visible id (sorted) → slot 1
-        assert texture_lut[100] == 2    # next visible id → slot 2
-        assert texture_lut[663] == 3    # last visible id → slot 3
-        assert texture_lut[50] == 0     # hidden id → background slot
+        assert texture_lut[5] == 1      # first id (sorted) → slot 1
+        assert texture_lut[50] == 2     # hidden id still gets a slot
+        assert texture_lut[100] == 3    # next visible id → slot 3
+        assert texture_lut[663] == 4    # last visible id → slot 4
         # Cmap has palette_size + 1 colour entries (slot 0 + slots 1..N).
         from vispy.color import Colormap as VispyCmap
         assert isinstance(cmap, VispyCmap)
         # Slot 0 must be fully transparent (alpha=0).
         assert tuple(cmap.colors.rgba[0]) == (0.0, 0.0, 0.0, 0.0)
-        # Slot 1 (raw id 5, red) must be opaque red ≈ (1, 0, 0, alpha).
+        # Slot 1 (raw id 5, red, visible) must be opaque red.
         assert cmap.colors.rgba[1][0] > 0.99   # red channel ~1.0
         assert cmap.colors.rgba[1][1] < 0.01   # green ~0
         assert cmap.colors.rgba[1][3] > 0.0    # alpha > 0
+        # Slot 2 (raw id 50, hidden) keeps its colour but alpha=0 so
+        # the GPU samples it as fully transparent — this is what
+        # makes per-ROI visibility toggles cmap-only.
+        assert cmap.colors.rgba[2][3] == 0.0, (
+            "hidden labels must render as alpha=0 via cmap, not by "
+            "being absent from the LUT (LUT must stay stable across "
+            "visibility toggles for the cmap-only fast path)"
+        )
+        # The labels Volume must use NEAREST texture filtering, not the
+        # vispy default 'linear'. Linear trilinearly interpolates raw
+        # slot values between voxels, so a hidden slot=3 voxel next to
+        # slot=0 background produces an interpolated 1.5 → cmap maps
+        # to a different (potentially visible) ROI's colour. This shows
+        # up as colour halos in unrelated hues — the bug the user
+        # reported as "i dont see those colors independently". Pinning
+        # this attribute catches a constructor-arg regression.
+        panel._rebuild_labels_overlay()
+        assert panel._labels_volume is not None
+        assert panel._labels_volume.interpolation == 'nearest', (
+            f"labels Volume must use 'nearest' filtering for categorical "
+            f"slot indices; got {panel._labels_volume.interpolation!r}"
+        )
+    finally:
+        panel.close()
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_refresh_labels_cmap_only_when_meta_keys_unchanged(qapp, monkeypatch):
+    """Per-ROI visibility/opacity/colour edits via the LayerPanel must
+    take a cmap-only fast path — no LUT rebuild, no texture re-upload.
+    On the GQR183 file (851 MB / 348M voxels) the full rebuild costs
+    ~2.7 s; users reported ``[per-ROI] visibility checkbox: extremely
+    slow``. The fix keeps the LUT stable across visibility toggles
+    (hidden labels keep their slot but render alpha=0) so when
+    ``labels_meta`` keys don't change, ``refresh_labels_meta_only``
+    swaps only ``volume.cmap``. Tool callers that mutate
+    ``labels_3d`` (paint/erase/fill/wand) must keep using
+    ``refresh_labels`` which always full-rebuilds — covered by
+    pre-existing tool tests.
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    vol[0, 0, 0] = 1
+    doc = _doc_with_volume("cmap_only", vol)
+    doc.labels_3d = np.zeros_like(vol)
+    doc.labels_3d[0, 0, 0] = 1
+    doc.labels_3d[1, 1, 1] = 2
+    doc.labels_meta = {
+        1: {"name": "a", "color": (255, 0, 0), "opacity": 128,
+            "visible": True, "fill_mode": "solid"},
+        2: {"name": "b", "color": (0, 255, 0), "opacity": 128,
+            "visible": True, "fill_mode": "solid"},
+    }
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        qapp.processEvents()
+        panel._rebuild_labels_overlay()
+        assert panel._labels_volume is not None
+        assert panel._labels_meta_keys == frozenset({1, 2})
+
+        # Track which path runs next: full rebuild reassigns
+        # ``_labels_tex_shape``; cmap-only does not.
+        rebuild_calls = {'count': 0}
+        real_do = panel._do_rebuild_labels_overlay
+
+        def counting_do():
+            rebuild_calls['count'] += 1
+            real_do()
+
+        monkeypatch.setattr(panel, '_do_rebuild_labels_overlay', counting_do)
+
+        cmap_calls = {'count': 0}
+        real_cmap = panel._refresh_labels_cmap_inplace
+
+        def counting_cmap():
+            cmap_calls['count'] += 1
+            real_cmap()
+
+        monkeypatch.setattr(panel, '_refresh_labels_cmap_inplace', counting_cmap)
+
+        # Toggle visibility on an existing meta entry — keys unchanged.
+        doc.labels_meta[2]['visible'] = False
+        panel.refresh_labels_meta_only()
+        assert cmap_calls['count'] == 1, (
+            "visibility-only change must take the cmap-only fast path"
+        )
+        assert rebuild_calls['count'] == 0, (
+            "no LUT rebuild should fire when meta keys are stable"
+        )
+
+        # Add a new meta entry — keys changed → must full-rebuild even
+        # via the meta-only entry point.
+        doc.labels_3d[2, 2, 2] = 5
+        doc.labels_meta[5] = {"name": "c", "color": (0, 0, 255), "opacity": 128,
+                              "visible": True, "fill_mode": "solid"}
+        panel.refresh_labels_meta_only()
+        assert rebuild_calls['count'] == 1, (
+            "new meta entry must trigger a full rebuild — the LUT has "
+            "no slot for it yet, cmap-only would render the new ROI as "
+            "background (slot 0)"
+        )
+        # Cache should now reflect the new keyset.
+        assert panel._labels_meta_keys == frozenset({1, 2, 5})
+
+        # The bare ``refresh_labels`` (used by paint/erase/fill/wand)
+        # must ALWAYS take the full rebuild — even when meta keys are
+        # stable — because those tools mutate ``labels_3d`` voxel
+        # values and the texture needs re-uploading.
+        rebuild_calls['count'] = 0
+        cmap_calls['count'] = 0
+        panel.refresh_labels()  # bare hook, no meta change
+        assert rebuild_calls['count'] == 1, (
+            "refresh_labels must always full-rebuild — tools mutate "
+            "labels_3d voxels without changing meta keys, the cmap-"
+            "only path would skip the texture re-upload and the edit "
+            "would be invisible"
+        )
+        assert cmap_calls['count'] == 0
     finally:
         panel.close()
 
