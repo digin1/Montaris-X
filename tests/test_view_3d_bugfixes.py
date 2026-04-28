@@ -13,6 +13,7 @@ Covers three bugs surfaced in the 2026-04-18 code review:
 """
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -368,6 +369,57 @@ def test_dense_palette_lut_avoids_vispy_lut_resampling(qapp):
         assert panel._labels_volume.interpolation == 'nearest', (
             f"labels Volume must use 'nearest' filtering for categorical "
             f"slot indices; got {panel._labels_volume.interpolation!r}"
+        )
+    finally:
+        panel.close()
+
+
+@pytest.mark.skipif(not VISPY_AVAILABLE, reason="vispy not installed")
+def test_downsample_slider_debounces_rebuild_volumes(qapp, monkeypatch):
+    """Dragging the downsample slider must coalesce N rapid valueChanged
+    emissions into ONE ``_rebuild_volumes`` call, not N. On the GQR183
+    file (851 MB intensity) one rebuild is ~3 s; an undebounced slider
+    drag (5 ticks) freezes the UI for ~15 s — measured in the path
+    audit. The debounce delivers a single rebuild after the user stops
+    moving, so the final stride is what gets uploaded.
+    """
+    vol = np.zeros((4, 8, 9), dtype=np.uint16)
+    doc = _doc_with_volume("ds_debounce", vol)
+    panel = View3DPanel(None, channels=[("c", vol, (1.0, 1.0, 1.0))],
+                        documents=[doc])
+    try:
+        qapp.processEvents()
+        rebuild_calls = {'count': 0}
+        real_rebuild = panel._rebuild_volumes
+
+        def counting():
+            rebuild_calls['count'] += 1
+            real_rebuild()
+
+        monkeypatch.setattr(panel, '_rebuild_volumes', counting)
+
+        # Five rapid valueChanged emissions (simulates a slider drag).
+        for v in (2, 3, 4, 3, 2):
+            panel._on_downsample_changed(v)
+
+        # Immediately after the drag, the rebuild must NOT have fired —
+        # the debounce timer is still pending.
+        assert rebuild_calls['count'] == 0, (
+            "rapid slider changes must not each trigger a rebuild"
+        )
+        # ``_downsample_factor`` updates immediately so any UI label
+        # readout reflects intent.
+        assert panel._downsample_factor == 2
+
+        # Drain the QTimer (250 ms) — pump the event loop until it fires.
+        deadline = time.time() + 1.0
+        while time.time() < deadline and rebuild_calls['count'] == 0:
+            qapp.processEvents()
+            time.sleep(0.02)
+
+        assert rebuild_calls['count'] == 1, (
+            f"debounce must fire exactly one rebuild after the drag "
+            f"settles; got {rebuild_calls['count']}"
         )
     finally:
         panel.close()

@@ -350,21 +350,76 @@ class LayerPanel(QWidget):
         # For large ROI sets, use bbox area as proxy to avoid
         # O(n) RLE decodes just for the layer panel pixel counts.
         use_bbox_area = len(visible_rois) > 20
+
+        # 3D voxel-count batch: ``VolumeROILayer.voxel_count()`` and
+        # ``get_volume_bbox()`` each do ``labels_3d == lid`` (a full-
+        # volume mask allocation + scan, ~200 ms on a 350M-voxel
+        # uint16 file). Calling them per-ROI in the per-ROI loop blows
+        # up to ~40 s on the GQR183 file with 195 skeleton labels —
+        # the user-reported "open 3D viewer is slow" path. One
+        # ``np.bincount(labels_3d.ravel())`` pass gives counts for
+        # every label id at once. Computed lazily so 2D-only sessions
+        # pay nothing.
+        #
+        # Sparse uint32 guard: ``load_volume_labels`` preserves real
+        # uint32 ids; a single stray voxel value of 2_000_000_000
+        # would make bincount allocate 16 GB of int64. Switch to
+        # ``np.unique(..., return_counts=True)`` (sort-based, slower
+        # ~3 s but O(unique) memory) when the doc's meta-max suggests
+        # the dense bincount would be huge.
+        bincount_for_doc: dict[int, np.ndarray | dict[int, int] | None] = {}
+        BINCOUNT_MAX = 1 << 20  # 1M entries → 8 MB int64 array
+
+        def _voxel_count_3d(roi):
+            doc = roi._doc
+            doc_key = id(doc)
+            if doc_key not in bincount_for_doc:
+                lab = doc.labels_3d
+                if lab is None or lab.size == 0 or not doc.labels_meta:
+                    bincount_for_doc[doc_key] = None
+                else:
+                    # ``np.bincount`` allocates ``(max(arr.max()+1,
+                    # minlength)) * 8 bytes``. uint8/uint16 are bounded
+                    # (max 256 / 65536 entries). For uint32 a stray id
+                    # in the billions would OOM (16 GB int64); guard
+                    # via the ACTUAL ``arr.max()`` (one O(n) scan)
+                    # before deciding. Sparse uint32 falls back to
+                    # ``np.unique`` (sort-based, slower but bounded
+                    # memory).
+                    if lab.dtype == np.uint32:
+                        lbl_max = int(lab.max())
+                    else:
+                        lbl_max = int(np.iinfo(lab.dtype).max)
+                    meta_max = max(int(k) for k in doc.labels_meta.keys())
+                    # ``np.bincount(arr, minlength=N)`` allocates
+                    # ``max(arr.max()+1, minlength) * 8 bytes``. Both
+                    # bounds matter: a sparse bogus meta key (e.g.
+                    # imported sidecar with id 2_000_000_000) drives
+                    # ``minlength`` huge even when ``arr`` is dense.
+                    bincount_bound = max(lbl_max, meta_max)
+                    if bincount_bound <= BINCOUNT_MAX:
+                        bincount_for_doc[doc_key] = np.bincount(
+                            lab.ravel(), minlength=meta_max + 1,
+                        )
+                    else:
+                        vals, counts = np.unique(lab, return_counts=True)
+                        bincount_for_doc[doc_key] = dict(
+                            zip(vals.tolist(), counts.tolist())
+                        )
+            counts = bincount_for_doc[doc_key]
+            if counts is None:
+                return 0
+            lid = roi.label_id
+            if isinstance(counts, dict):
+                return int(counts.get(lid, 0))
+            return int(counts[lid]) if lid < counts.size else 0
+
         for display_idx, (i, roi) in enumerate(visible_rois):
             icon = self._color_icon(roi.color, number=display_idx + 1)
-            # 3D ROIs: report voxel count (whole volume), not current slice.
-            # Use the volume bbox as a proxy in bulk mode so we don't pay for
-            # a full labels_3d scan per layer.
+            # 3D ROIs: report whole-volume voxel count via the cached
+            # bincount above (single pass for the whole document).
             if getattr(roi, 'is_volume', False):
-                if use_bbox_area:
-                    vbbox = roi.get_volume_bbox()
-                    if vbbox is None:
-                        px_count = 0
-                    else:
-                        z1, z2, y1, y2, x1, x2 = vbbox
-                        px_count = (z2 - z1) * (y2 - y1) * (x2 - x1)
-                else:
-                    px_count = roi.voxel_count()
+                px_count = _voxel_count_3d(roi)
                 px_counts.append(px_count)
                 item = QListWidgetItem(roi.name)
                 item.setIcon(icon)

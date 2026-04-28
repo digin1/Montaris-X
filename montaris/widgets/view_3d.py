@@ -672,6 +672,11 @@ class View3DPanel(QWidget):
         self._canvas = None
         self._view = None
         self._downsample_factor = 1
+        # Debounce timer for the downsample slider: a real drag fires
+        # one valueChanged per pixel; each rebuild on the GQR183 file
+        # takes ~3 s. Coalesce into a single rebuild after the user
+        # stops moving the slider. Created lazily on first change.
+        self._downsample_debounce_timer = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1072,8 +1077,22 @@ class View3DPanel(QWidget):
             vol.method = method
 
     def _on_downsample_changed(self, val):
+        # Debounce: a single slider drag fires dozens of valueChanged
+        # emissions, each ~3 s of full intensity volume rebuild on the
+        # GQR183 file (path-audit showed 5 ticks = 15 s blocking).
+        # Coalesce into ONE rebuild 250 ms after the user stops moving.
+        # ``_downsample_factor`` is updated immediately so the label
+        # readout reflects intent without waiting for the rebuild.
         self._downsample_factor = int(val)
-        self._rebuild_volumes()
+        timer = self._downsample_debounce_timer
+        if timer is None:
+            from PySide6.QtCore import QTimer
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(250)
+            timer.timeout.connect(self._rebuild_volumes)
+            self._downsample_debounce_timer = timer
+        timer.start()
 
     def _set_visible(self, idx, on):
         if 0 <= idx < len(self._volumes):
@@ -2449,6 +2468,10 @@ class View3DPanel(QWidget):
                 for vol in self._volumes:
                     vol.method = method
         if 'downsample' in state and state['downsample'] != self._downsample_factor:
+            # Cancel any pending slider-debounce so a state-restore +
+            # immediate slider drag doesn't double-rebuild.
+            if self._downsample_debounce_timer is not None:
+                self._downsample_debounce_timer.stop()
             self._ds_slider.blockSignals(True)
             self._ds_slider.setValue(state['downsample'])
             self._ds_slider.blockSignals(False)
@@ -2475,6 +2498,11 @@ class View3DPanel(QWidget):
 
     def release_gl(self):
         """Free GPU resources held by this panel. Safe to call repeatedly."""
+        # Stop any pending debounce timer so it doesn't fire after the
+        # panel is torn down — ``_rebuild_volumes`` would AttributeError
+        # on ``self._view.scene`` (None after release).
+        if self._downsample_debounce_timer is not None:
+            self._downsample_debounce_timer.stop()
         for vol in self._volumes:
             vol.parent = None
         self._volumes = []
