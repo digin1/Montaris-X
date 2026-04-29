@@ -1688,6 +1688,25 @@ class MontarisApp(QMainWindow):
         from montaris.layers import VolumeROILayer
 
         labels_3d = doc.ensure_labels_3d()
+        # Shape-mismatch guard: ``ensure_labels_3d`` allocates against
+        # the doc's active 2D image_layer, but for volumes the user
+        # may have switched the doc's volume_data to a different
+        # z-stack while a stale labels_3d lingers (synced-mode swap,
+        # external mutation, undo replay). The wand path defends this
+        # invariant at view_3d.py; the conversion must too — without
+        # it, ``(labels != 0) & (labels_3d == 0)`` either broadcast-
+        # errors or silently produces wrong-shape masks that scramble
+        # downstream indexing.
+        if labels_3d.shape != labels.shape:
+            QMessageBox.warning(
+                self,
+                "Shape mismatch",
+                f"The displayed volume {labels.shape} does not match the "
+                f"document's existing labels volume {labels_3d.shape}. "
+                f"Close and reopen the document, or clear the existing "
+                f"3D ROIs, then retry.",
+            )
+            return True
         had_existing = bool(np.any(labels_3d != 0))
         assign_mask = (labels != 0) & (labels_3d == 0)
         value_blocks = [

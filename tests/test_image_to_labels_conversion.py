@@ -260,3 +260,209 @@ def test_convert_volume_avoids_full_volume_delta_buffer(app, monkeypatch):
 
     with patch.object(app.toast, "show"):
         app.convert_image_to_label_layers()
+
+
+
+def test_convert_volume_rejects_shape_mismatch(app):
+    """If ``doc.labels_3d`` is a stale shape (e.g. user swapped
+    ``volume_data`` mid-session), the conversion must surface a clear
+    error rather than broadcast-failing or silently scrambling indices.
+
+    Mirrors the wand path's shape-match guard in view_3d.py.
+    """
+    vol = np.zeros((3, 4, 4), dtype=np.uint16)
+    vol[1, 1:3, 1:3] = 1
+    doc = _attach_volume_doc(app, vol)
+    # Pre-allocate a labels_3d at the WRONG shape — different Z extent.
+    doc.labels_3d = np.zeros((5, 4, 4), dtype=np.uint8)
+    doc.labels_meta = {}
+    panel = MagicMock()
+    panel._primary_doc = doc
+    app._view3d_panel = panel
+    app.layer_panel.set_3d_mode(True)
+
+    with patch.object(QMessageBox, "warning") as warn:
+        app.convert_image_to_label_layers()
+
+    warn.assert_called_once()
+    args = warn.call_args.args
+    assert "Shape mismatch" in args[1] or "shape" in args[2].lower(), (
+        f"warning dialog should mention shape mismatch; got {args}"
+    )
+    # No ROI was created.
+    assert not [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer)
+    ]
+    # Stale labels_3d shape is preserved (not overwritten).
+    assert doc.labels_3d.shape == (5, 4, 4)
+
+
+def test_convert_volume_single_z_slice(app):
+    """Edge case: a depth-1 volume (one Z slice) — verifies the per-Z
+    loop doesn't choke when ``labels.shape[0] == 1``."""
+    vol = np.zeros((1, 4, 4), dtype=np.uint16)
+    vol[0, 1:3, 1:3] = 5
+    vol[0, 0, 3] = 9
+    doc = _attach_volume_doc(app, vol)
+    doc.ensure_labels_3d()
+    panel = MagicMock()
+    panel._primary_doc = doc
+    app._view3d_panel = panel
+    app.layer_panel.set_3d_mode(True)
+
+    with patch.object(app.toast, "show"):
+        app.convert_image_to_label_layers()
+
+    wrappers = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    assert {roi.name for roi in wrappers} == {"Label 5", "Label 9"}
+    assert set(doc.labels_meta.keys()) == {1, 2}
+
+
+def test_convert_volume_same_value_across_disconnected_z_slices(app):
+    """Same source value appearing on multiple Z slices must collapse
+    into ONE ROI id (one VolumeROILayer covering all matching voxels),
+    not N — the conversion is "one ROI per unique value", not per
+    connected component.
+    """
+    vol = np.zeros((4, 4, 4), dtype=np.uint16)
+    vol[0, 0:2, 0:2] = 7   # value 7 on slice 0
+    vol[3, 2:4, 2:4] = 7   # same value 7 on slice 3 (disconnected)
+    doc = _attach_volume_doc(app, vol)
+    doc.ensure_labels_3d()
+    panel = MagicMock()
+    panel._primary_doc = doc
+    app._view3d_panel = panel
+    app.layer_panel.set_3d_mode(True)
+
+    with patch.object(app.toast, "show"):
+        app.convert_image_to_label_layers()
+
+    wrappers = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    assert [roi.name for roi in wrappers] == ["Label 7"], (
+        "value 7 across two disconnected slices must collapse to ONE ROI"
+    )
+    # Both slabs got the same id.
+    lid = wrappers[0].label_id
+    np.testing.assert_array_equal(doc.labels_3d == lid, vol == 7)
+
+
+def test_convert_volume_handles_nan_inf_via_napari_coercion(app):
+    """Float volumes with NaN / +Inf / -Inf must be coerced to 0 (napari
+    rule) before unique-value extraction. ``_coerce_labels_source`` runs
+    ``np.nan_to_num(...)`` so these become 0 and don't appear as ROIs.
+    """
+    vol = np.zeros((2, 3, 3), dtype=np.float32)
+    vol[0, 0, 0] = 3.7              # truncates to 3
+    vol[0, 1, 1] = np.nan           # → 0
+    vol[1, 0, 1] = np.inf           # → 0
+    vol[1, 1, 0] = -np.inf          # → 0
+    vol[1, 2, 2] = 5.0              # → 5
+    doc = _attach_volume_doc(app, vol)
+    doc.ensure_labels_3d()
+    panel = MagicMock()
+    panel._primary_doc = doc
+    app._view3d_panel = panel
+    app.layer_panel.set_3d_mode(True)
+
+    with patch.object(app.toast, "show") as toast:
+        app.convert_image_to_label_layers()
+
+    wrappers = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    # Only 3 and 5 survived as labels (NaN/Inf collapsed to 0 → background).
+    assert {roi.name for roi in wrappers} == {"Label 3", "Label 5"}
+    # The toast must say "non-integer values truncated".
+    msg = toast.call_args.args[0]
+    assert "truncated" in msg
+
+
+def test_convert_volume_undo_restores_meta_and_voxels(app):
+    """Conversion's CompoundUndoCommand must, on undo, both remove the
+    new VolumeROILayer wrappers AND zero out the voxels they wrote into
+    ``labels_3d``. Redo must reapply both.
+    """
+    vol = np.zeros((2, 4, 4), dtype=np.uint16)
+    vol[0, 1:3, 1:3] = 1
+    vol[1, 2:4, 0:2] = 2
+    doc = _attach_volume_doc(app, vol)
+    doc.ensure_labels_3d()
+    panel = MagicMock()
+    panel._primary_doc = doc
+    app._view3d_panel = panel
+    app.layer_panel.set_3d_mode(True)
+
+    with patch.object(app.toast, "show"):
+        app.convert_image_to_label_layers()
+
+    # After conversion: 2 ROIs, voxels written.
+    wrappers = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    assert len(wrappers) == 2
+    assert int(doc.labels_3d.sum()) > 0
+    pre_undo_label_ids = {w.label_id for w in wrappers}
+
+    # Undo — ROIs must be gone AND voxels must be cleared.
+    app.undo_stack.undo()
+    remaining = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    assert remaining == [], "undo must remove the converted VolumeROILayers"
+    # All voxels must be zero again.
+    assert int((doc.labels_3d != 0).sum()) == 0, (
+        "undo must clear the voxels written by the conversion"
+    )
+
+    # Redo — restore both meta and voxels.
+    app.undo_stack.redo()
+    restored = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    assert len(restored) == 2
+    assert {w.label_id for w in restored} == pre_undo_label_ids
+    assert int(doc.labels_3d.sum()) > 0
+
+
+def test_convert_volume_handles_empty_z_slices(app):
+    """Volumes where some Z slices have NO labels (the ``not plane_mask.any():
+    continue`` branch) must still produce correct bboxes for the slices
+    that do contain labels.
+    """
+    vol = np.zeros((5, 4, 4), dtype=np.uint16)
+    # Label only on z=2; z=0,1,3,4 are empty.
+    vol[2, 1:3, 1:3] = 4
+    doc = _attach_volume_doc(app, vol)
+    doc.ensure_labels_3d()
+    panel = MagicMock()
+    panel._primary_doc = doc
+    app._view3d_panel = panel
+    app.layer_panel.set_3d_mode(True)
+
+    with patch.object(app.toast, "show"):
+        app.convert_image_to_label_layers()
+
+    wrappers = [
+        roi for roi in app.layer_stack.roi_layers
+        if isinstance(roi, VolumeROILayer) and roi._doc is doc
+    ]
+    assert [roi.name for roi in wrappers] == ["Label 4"]
+    # Voxels written only on z=2.
+    np.testing.assert_array_equal(doc.labels_3d == wrappers[0].label_id,
+                                   vol == 4)
+    # Volume bbox is restricted to z=2 (not the full 0..5).
+    bbox = wrappers[0].get_volume_bbox()
+    assert bbox is not None
+    z1, z2, _, _, _, _ = bbox
+    assert z1 == 2 and z2 == 3
