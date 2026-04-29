@@ -169,6 +169,7 @@ class LayerPanel(QWidget):
     roi_added = Signal()
     roi_removed = Signal(int)
     all_cleared = Signal()
+    convert_to_labels_requested = Signal()
 
     def __init__(self, layer_stack, parent=None):
         super().__init__(parent)
@@ -690,7 +691,19 @@ class LayerPanel(QWidget):
         if not item:
             return
         data = item.data(Qt.UserRole)
-        if not data or data[0] != "roi":
+        if not data:
+            return
+
+        if data[0] == "image":
+            menu = QMenu(self)
+            convert_action = QAction("Convert to Labels", self)
+            convert_action.triggered.connect(
+                lambda _checked=False: self.convert_to_labels_requested.emit()
+            )
+            menu.addAction(convert_action)
+            menu.exec(self.list_widget.mapToGlobal(pos))
+            return
+        if data[0] != "roi":
             return
 
         menu = QMenu(self)
@@ -1160,4 +1173,3 @@ class LayerPanel(QWidget):
             roi.visible = checked
         self.refresh()
         self.visibility_changed.emit()
-
