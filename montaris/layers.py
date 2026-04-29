@@ -807,14 +807,23 @@ class MontageDocument:
                          visible=True, fill_mode="solid"):
         """Allocate a new label ID and register its display metadata.
 
-        Returns the new integer ID. Promotes ``labels_3d`` to uint16 when the
-        ID would overflow uint8. Does NOT write into ``labels_3d`` — the
-        caller fills voxels after the ID is reserved (fill/paint tools do).
+        Returns the new integer ID. Promotes ``labels_3d`` to the narrowest
+        unsigned dtype that can hold the new id. Does NOT write into
+        ``labels_3d`` — the caller fills voxels after the ID is reserved
+        (fill/paint tools do).
         """
         lid = self.labels_next_id
         self.labels_next_id += 1
         if self.labels_3d is not None and lid > np.iinfo(self.labels_3d.dtype).max:
-            self.promote_labels_dtype(np.uint16)
+            if lid <= np.iinfo(np.uint16).max:
+                self.promote_labels_dtype(np.uint16)
+            elif lid <= np.iinfo(np.uint32).max:
+                self.promote_labels_dtype(np.uint32)
+            else:
+                raise ValueError(
+                    f"label id {lid} exceeds uint32 range "
+                    f"({np.iinfo(np.uint32).max})"
+                )
         self.labels_meta[lid] = {
             "name": name or f"3D ROI {lid}",
             "color": color or ROI_COLORS[0],

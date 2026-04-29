@@ -514,12 +514,44 @@ class TestShowContextMenu:
                         and hasattr(a, 'text')]
         assert "Merge Selected" in action_texts
 
-    def test_context_menu_on_image_row_noop(self, app):
-        """Right-clicking the image row does not produce a context menu."""
+    def test_context_menu_on_image_row_has_convert(self, app):
+        """Right-clicking the image row exposes the convert action."""
         panel = app.layer_panel
         captured = self._build_menu_actions(panel, 0)
-        # No menu should have been created for the image row
-        assert len(captured) == 0
+        assert len(captured) == 1
+        action_texts = [a.text() for a in captured[0].actions()
+                        if not getattr(a, 'isSeparator', lambda: False)()
+                        and hasattr(a, 'text')]
+        assert "Convert to Labels" in action_texts
+
+    def test_context_menu_on_image_row_keeps_convert_enabled_in_3d(self, app):
+        """The image-row convert action stays clickable in 3D mode."""
+        panel = app.layer_panel
+        panel.set_3d_mode(True)
+        captured = self._build_menu_actions(panel, 0)
+        action = next(
+            a for a in captured[0].actions()
+            if hasattr(a, 'text') and a.text() == "Convert to Labels"
+        )
+        assert action.isEnabled()
+
+    def test_image_context_menu_convert_emits_signal(self, app):
+        """Triggering the image-row convert action emits the panel signal."""
+        panel = app.layer_panel
+        try:
+            panel.convert_to_labels_requested.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        triggered = []
+        panel.convert_to_labels_requested.connect(lambda: triggered.append(True))
+        captured = self._build_menu_actions(panel, 0)
+        action = next(
+            a for a in captured[0].actions()
+            if hasattr(a, 'text') and a.text() == "Convert to Labels"
+        )
+        action.trigger()
+        QApplication.processEvents()
+        assert triggered == [True]
 
 
 # ── PlaceholderListWidget ───────────────────────────────────────────────

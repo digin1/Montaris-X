@@ -694,6 +694,9 @@ class MontarisApp(QMainWindow):
         self.layer_panel.roi_added.connect(self._on_roi_added)
         self.layer_panel.roi_removed.connect(self._on_roi_removed)
         self.layer_panel.all_cleared.connect(self._on_all_cleared)
+        self.layer_panel.convert_to_labels_requested.connect(
+            self.convert_image_to_label_layers
+        )
 
         # Grid cell switching
         self._canvas_grid.active_cell_changed.connect(self._on_active_cell_changed)
@@ -1623,6 +1626,304 @@ class MontarisApp(QMainWindow):
         current = getattr(self.canvas._tool, 'name', None)
         if current is None or current in self._NON_DRAWING_TOOLS:
             self.tool_panel._select_tool('Brush')
+
+    @staticmethod
+    def _coerce_labels_source(data):
+        """Return ``(labels, coerced)`` using napari-style integer coercion."""
+        data = np.asarray(data)
+        if np.issubdtype(data.dtype, np.integer):
+            return data, False
+        labels = np.nan_to_num(
+            data, nan=0.0, posinf=0.0, neginf=0.0,
+        ).astype(np.int64)
+        return labels, True
+
+    @staticmethod
+    def _labels_dtype_for_max_id(max_id):
+        """Return the narrowest unsigned dtype that can hold ``max_id``."""
+        max_id = int(max_id)
+        if max_id <= np.iinfo(np.uint8).max:
+            return np.uint8
+        if max_id <= np.iinfo(np.uint16).max:
+            return np.uint16
+        if max_id <= np.iinfo(np.uint32).max:
+            return np.uint32
+        raise ValueError(
+            f"label id {max_id} exceeds uint32 range "
+            f"({np.iinfo(np.uint32).max})"
+        )
+
+    def _convert_volume_image_to_label_layers(self, doc):
+        """Convert a volume doc into 3D ROI labels visible in the 3D viewer."""
+        volume = getattr(doc, 'volume_data', None)
+        if volume is None:
+            return False
+        data = np.asarray(volume)
+        if data.ndim != 3:
+            QMessageBox.information(
+                self,
+                "Unsupported image",
+                "Convert to Labels in 3D currently supports single-channel 3D images only.",
+            )
+            return True
+
+        labels, coerced = self._coerce_labels_source(data)
+        if not np.any(labels != 0):
+            QMessageBox.information(
+                self,
+                "No labels found",
+                "The displayed volume contains no non-zero integer labels to convert.",
+            )
+            return True
+
+        from montaris.core.undo import (
+            AddVolumeROIUndoCommand,
+            VolumeFillUndoCommand,
+        )
+        from montaris.core.multi_undo import CompoundUndoCommand
+        from montaris.layers import VolumeROILayer
+
+        labels_3d = doc.ensure_labels_3d()
+        had_existing = bool(np.any(labels_3d != 0))
+        assign_mask = (labels != 0) & (labels_3d == 0)
+        value_blocks = [
+            np.unique(labels[z][assign_mask[z]])
+            for z in range(labels.shape[0])
+            if assign_mask[z].any()
+        ]
+        values = (
+            np.unique(np.concatenate(value_blocks))
+            if value_blocks else
+            np.empty((0,), dtype=labels.dtype)
+        )
+
+        if values.size == 0:
+            msg = (
+                "Existing 3D ROIs already occupy every non-zero voxel in the "
+                "displayed volume."
+                if had_existing else
+                "The displayed volume contains no non-zero integer labels to convert."
+            )
+            QMessageBox.information(self, "No labels found", msg)
+            return True
+
+        if values.size > 512:
+            reply = QMessageBox.warning(
+                self,
+                "Large conversion",
+                f"This will create {int(values.size)} 3D ROI layers.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return True
+
+        existing = list(self.layer_stack.roi_layers)
+        added = []
+        commands = []
+
+        with busy_cursor(
+            "Converting volume to labels...", self, log_as="labels.convert_volume"
+        ):
+            max_new_id = int(doc.labels_next_id + values.size - 1)
+            try:
+                target_dtype = self._labels_dtype_for_max_id(max_new_id)
+            except ValueError as e:
+                QMessageBox.warning(self, "Unsupported labels", str(e))
+                return True
+            if max_new_id > np.iinfo(labels_3d.dtype).max:
+                doc.promote_labels_dtype(target_dtype)
+                labels_3d = doc.labels_3d
+
+            for value in values.tolist():
+                name = generate_unique_roi_name(
+                    f"Label {int(value)}", existing + added,
+                )
+                color = self.layer_stack.next_color()
+                lid = doc.reserve_label_id(
+                    name=name,
+                    color=color,
+                    opacity=128,
+                    visible=True,
+                    fill_mode="solid",
+                )
+                wrapper = VolumeROILayer(doc, lid)
+                added.append(wrapper)
+
+            new_ids = np.asarray(
+                [wrapper.label_id for wrapper in added], dtype=labels_3d.dtype,
+            )
+            group_count = len(added)
+            min_z = np.full(group_count, labels.shape[0], dtype=np.int32)
+            max_z = np.full(group_count, -1, dtype=np.int32)
+            min_y = np.full(group_count, labels.shape[1], dtype=np.int32)
+            max_y = np.full(group_count, -1, dtype=np.int32)
+            min_x = np.full(group_count, labels.shape[2], dtype=np.int32)
+            max_x = np.full(group_count, -1, dtype=np.int32)
+
+            for z in range(labels.shape[0]):
+                plane_mask = assign_mask[z]
+                if not plane_mask.any():
+                    continue
+                ys, xs = np.nonzero(plane_mask)
+                plane_vals = labels[z][plane_mask]
+                plane_idx = np.searchsorted(values, plane_vals)
+                touched = np.unique(plane_idx)
+                min_z[touched] = np.minimum(min_z[touched], z)
+                max_z[touched] = np.maximum(max_z[touched], z)
+                np.minimum.at(min_y, plane_idx, ys)
+                np.maximum.at(max_y, plane_idx, ys)
+                np.minimum.at(min_x, plane_idx, xs)
+                np.maximum.at(max_x, plane_idx, xs)
+                labels_3d[z][plane_mask] = new_ids[plane_idx]
+
+            for idx, wrapper in enumerate(added):
+                if max_z[idx] < 0:
+                    continue
+                bbox = (
+                    int(min_z[idx]), int(max_z[idx]) + 1,
+                    int(min_y[idx]), int(max_y[idx]) + 1,
+                    int(min_x[idx]), int(max_x[idx]) + 1,
+                )
+                z0, z1, y0, y1, x0, x1 = bbox
+                mask_crop = (
+                    assign_mask[z0:z1, y0:y1, x0:x1]
+                    & (labels[z0:z1, y0:y1, x0:x1] == values[idx])
+                )
+                self.layer_stack.roi_layers.append(wrapper)
+                add_cmd = AddVolumeROIUndoCommand(
+                    self.layer_stack, doc, wrapper.label_id, wrapper,
+                )
+                fill_cmd = VolumeFillUndoCommand(
+                    doc, bbox, mask_crop, 0, wrapper.label_id,
+                )
+                commands.append(CompoundUndoCommand([add_cmd, fill_cmd]))
+
+        self.undo_stack.push(CompoundUndoCommand(commands))
+        self.layer_stack.changed.emit()
+        self.layer_panel.refresh()
+        self.canvas.refresh_overlays()
+        if self._view3d_panel is not None:
+            self._view3d_panel.refresh_labels()
+        self._select_roi_layer(added[0])
+
+        msg = f"Converted image to {len(added)} 3D ROI layer(s)"
+        if coerced:
+            msg += " (non-integer values truncated)"
+        self.toast.show(msg, "success")
+        return True
+
+    def convert_image_to_label_layers(self):
+        """Convert the displayed image row into one ROI per non-zero label.
+
+        Mirrors napari's conversion rule by coercing non-integer image data
+        to integers first. Because Montaris doesn't have a standalone 2D
+        labels layer, each unique non-zero value becomes its own ``ROILayer``.
+        """
+        if self._view3d_panel is not None:
+            doc = getattr(self._view3d_panel, '_primary_doc', None)
+            if doc is not None and getattr(doc, 'volume_data', None) is not None:
+                if self._convert_volume_image_to_label_layers(doc):
+                    return
+
+        image_layer = self.layer_stack.image_layer
+        if image_layer is None:
+            QMessageBox.information(self, "No image", "Load an image first.")
+            return
+
+        data = np.asarray(image_layer.data)
+        if data.ndim != 2:
+            QMessageBox.information(
+                self,
+                "Unsupported image",
+                "Convert to Labels currently supports single-channel 2D images only.",
+            )
+            return
+
+        labels, coerced = self._coerce_labels_source(data)
+
+        values = np.unique(labels)
+        values = values[values != 0]
+        if values.size == 0:
+            QMessageBox.information(
+                self,
+                "No labels found",
+                "The displayed image contains no non-zero integer labels to convert.",
+            )
+            return
+
+        if values.size > 512:
+            reply = QMessageBox.warning(
+                self,
+                "Large conversion",
+                f"This will create {int(values.size)} ROI layers.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        from montaris.core.rle import rle_encode
+        from montaris.core.undo import AddROIUndoCommand
+        from montaris.core.multi_undo import CompoundUndoCommand
+
+        added = []
+        existing = list(self.layer_stack.roi_layers)
+        with busy_cursor(
+            "Converting image to labels...", self, log_as="labels.convert_image"
+        ):
+            for value in values.tolist():
+                mask = (labels == value)
+                if not mask.any():
+                    continue
+                rle_bytes, rle_shape = rle_encode(
+                    mask.astype(np.uint8, copy=False) * 255
+                )
+                roi = ROILayer.__new__(ROILayer)
+                roi.name = generate_unique_roi_name(
+                    f"Label {int(value)}", existing + added,
+                )
+                roi._mask = None
+                roi._rle_data = rle_bytes
+                roi._mask_shape = rle_shape
+                roi.color = self.layer_stack.next_color()
+                roi.opacity = 128
+                roi.visible = True
+                roi.fill_mode = "solid"
+                roi._dirty_rect = None
+                roi.offset_x = 0
+                roi.offset_y = 0
+                roi._cached_bbox = None
+                roi._bbox_valid = False
+                self.layer_stack.roi_layers.append(roi)
+                added.append(roi)
+
+        if not added:
+            QMessageBox.information(
+                self,
+                "No labels found",
+                "The displayed image contains no non-zero integer labels to convert.",
+            )
+            return
+
+        self.undo_stack.push(
+            CompoundUndoCommand(
+                [AddROIUndoCommand(self.layer_stack, roi) for roi in added]
+            )
+        )
+        self.layer_stack.changed.emit()
+        self.layer_panel.refresh()
+        self.canvas.refresh_overlays()
+        self._select_roi_layer(added[0])
+
+        current = getattr(self.canvas._tool, 'name', None)
+        if current is None or current in self._NON_DRAWING_TOOLS:
+            self.tool_panel._select_tool('Brush')
+
+        msg = f"Converted image to {len(added)} ROI layer(s)"
+        if coerced:
+            msg += " (non-integer values truncated)"
+        self.toast.show(msg, "success")
 
     def _add_volume_roi(self):
         """Create an empty 3D ROI and register it with the 3D viewer.
