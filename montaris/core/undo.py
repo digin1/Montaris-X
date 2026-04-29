@@ -136,6 +136,14 @@ class RemoveROIUndoCommand:
         self.roi_layer = entries[0][1] if len(entries) == 1 else None
         # Voxel snapshots keyed by roi_layer id(): (lid, bbox, packed, shape, meta_copy)
         self._volume_snapshots = {}
+        # Group volume ROIs by doc so we can bbox them all in ONE pass per
+        # doc via scipy.ndimage.find_objects. Per-ROI ``(labels_3d == lid)
+        # + np.where(mask)`` was ~750 ms × N — on the GQR neuron file
+        # (195 ids, 348M voxels) Clear All cost ~145 s of snapshot work
+        # alone. find_objects walks the array once and returns the bbox
+        # for every integer label.
+        from scipy.ndimage import find_objects
+        volume_rois_by_doc: dict[int, tuple[object, list]] = {}
         for _, roi in entries:
             if not getattr(roi, 'is_volume', False):
                 continue
@@ -143,21 +151,42 @@ class RemoveROIUndoCommand:
             lid = getattr(roi, '_label_id', None)
             if doc is None or lid is None or doc.labels_3d is None:
                 continue
-            mask = (doc.labels_3d == lid)
-            if not mask.any():
-                # Empty 3D ROI — still record meta so undo restores wrapper cleanly.
+            slot = volume_rois_by_doc.setdefault(id(doc), (doc, []))
+            slot[1].append(roi)
+
+        # Snapshot per-doc ``labels_next_id`` so undo can restore the
+        # allocator. ``_clear_all`` resets it to 1 — without this
+        # restoration, the next ``reserve_label_id()`` after undo would
+        # reuse 1 and silently overwrite restored ROIs.
+        self._labels_next_id_snapshots: dict[int, int] = {}
+        for doc_id, (doc, _) in volume_rois_by_doc.items():
+            self._labels_next_id_snapshots[doc_id] = int(
+                getattr(doc, 'labels_next_id', 1)
+            )
+
+        for doc, rois in volume_rois_by_doc.values():
+            # Single C-implemented pass returns slice tuples per label.
+            # ``find_objects`` indexes by ``lid - 1`` (label 0 = background).
+            slices = find_objects(doc.labels_3d)
+            for roi in rois:
+                lid = roi._label_id
+                idx = int(lid) - 1
                 meta = copy.deepcopy(doc.labels_meta.get(lid, {}))
-                self._volume_snapshots[id(roi)] = (doc, lid, None, None, None, meta)
-                continue
-            zs, ys, xs = np.where(mask)
-            bbox = (int(zs.min()), int(zs.max()) + 1,
-                    int(ys.min()), int(ys.max()) + 1,
-                    int(xs.min()), int(xs.max()) + 1)
-            z1, z2, y1, y2, x1, x2 = bbox
-            crop = mask[z1:z2, y1:y2, x1:x2]
-            packed = np.packbits(crop.reshape(-1).astype(np.uint8))
-            meta = copy.deepcopy(doc.labels_meta.get(lid, {}))
-            self._volume_snapshots[id(roi)] = (doc, lid, bbox, packed, crop.shape, meta)
+                if idx < 0 or idx >= len(slices) or slices[idx] is None:
+                    # Empty ROI — record meta only so undo restores wrapper.
+                    self._volume_snapshots[id(roi)] = (doc, lid, None, None, None, meta)
+                    continue
+                z_slice, y_slice, x_slice = slices[idx]
+                bbox = (z_slice.start, z_slice.stop,
+                        y_slice.start, y_slice.stop,
+                        x_slice.start, x_slice.stop)
+                # Crop is small (just this ROI's bbox); the per-ROI mask
+                # only scans this bbox-sized region, NOT the whole volume.
+                crop = (doc.labels_3d[z_slice, y_slice, x_slice] == lid)
+                packed = np.packbits(crop.reshape(-1).astype(np.uint8))
+                self._volume_snapshots[id(roi)] = (
+                    doc, lid, bbox, packed, crop.shape, meta,
+                )
 
     def _restore_volume(self, roi):
         import numpy as np
@@ -188,6 +217,17 @@ class RemoveROIUndoCommand:
             pos = min(idx, len(self.layer_stack.roi_layers))
             if roi not in self.layer_stack.roi_layers:
                 self.layer_stack.roi_layers.insert(pos, roi)
+        # Restore each affected doc's ``labels_next_id`` allocator so
+        # subsequent ``reserve_label_id()`` calls don't reuse ids that
+        # collide with restored ROIs.
+        for doc_id, next_id in getattr(
+            self, '_labels_next_id_snapshots', {}
+        ).items():
+            for _, roi in self._entries:
+                if (getattr(roi, 'is_volume', False)
+                        and id(getattr(roi, '_doc', None)) == doc_id):
+                    roi._doc.labels_next_id = next_id
+                    break
 
     def redo(self):
         for _, roi in reversed(self._entries):

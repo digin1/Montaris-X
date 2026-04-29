@@ -1441,6 +1441,16 @@ class View3DPanel(QWidget):
         it doesn't leak into the LayerPanel as an orphan.
         """
         self._drag_refresh_timer.stop()
+        # Flush any unflushed sub-region upload BEFORE clearing the
+        # dirty flags. A quick click + release that completes faster
+        # than the 33 ms drag-tick interval would otherwise leave the
+        # texture stale: ``_stamp_brush`` set ``_drag_dirty`` and
+        # ``_dirty_bbox`` but the timer never fired, and the
+        # ``refresh_labels_meta_only`` call below skips voxel
+        # re-upload when the keyset is stable. Calling the tick
+        # explicitly here uploads the final dirty subvolume.
+        if self._drag_dirty:
+            self._on_drag_refresh_tick()
         doc = self._primary_doc
         lid = self._drag_label_id
         mode = self._drag_mode
@@ -1461,9 +1471,20 @@ class View3DPanel(QWidget):
         if (rollback and doc is not None and mode == 'paint'
                 and lid and not extended):
             doc.release_label_id(int(lid))
-            self.refresh_labels()
+            # Rollback removed a meta key — full rebuild forced via
+            # the keyset check inside refresh_labels_meta_only.
+            self.refresh_labels_meta_only()
             return
-        self.refresh_labels()
+        # Use the meta-only fast path: erase + paint-extension don't
+        # change the meta keyset, so the texture (already updated
+        # voxel-by-voxel via the drag-tick sub-region uploads) stays
+        # current and we just trigger a paint event via the cmap-only
+        # path. New-id paint adds a meta key; the keyset check inside
+        # refresh_labels_meta_only detects that and falls back to a
+        # full rebuild so the new id gets a LUT slot. Without this,
+        # erase strokes paid a ~2.5 s full overlay rebuild on every
+        # release on the GQR neuron file (348M voxels).
+        self.refresh_labels_meta_only()
         # Emit label_added FIRST so MontarisApp can create the VolumeROILayer
         # wrapper synchronously. We then bundle the wrapper's Add undo with
         # the stroke's voxel undo into one Ctrl+Z.

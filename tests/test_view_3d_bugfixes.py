@@ -1689,6 +1689,9 @@ def test_clear_all_removes_volume_rois_and_is_undoable(app, qapp, monkeypatch):
 
     app._view3d_panel = MagicMock()
     try:
+        # Capture the allocator state BEFORE clear so we can verify undo
+        # restores it. ``_clear_all`` resets labels_next_id to 1.
+        next_id_before_clear = doc.labels_next_id
         app.layer_panel._clear_all()
         assert app.layer_stack.roi_layers == []
         assert lid not in doc.labels_meta
@@ -1701,6 +1704,21 @@ def test_clear_all_removes_volume_rois_and_is_undoable(app, qapp, monkeypatch):
         assert (doc.labels_3d == lid).sum() == 4
         # Wrapper + flat are back.
         assert len(app.layer_stack.roi_layers) == 2
+        # ``_clear_all`` resets ``labels_next_id`` to 1; undo MUST restore
+        # it so a subsequent ``reserve_label_id()`` doesn't reuse an id
+        # that collides with a now-restored ROI. Without this, the next
+        # paint stroke would either silently overwrite the restored
+        # voxels or raise on dtype promotion.
+        assert doc.labels_next_id == next_id_before_clear, (
+            f"labels_next_id must be restored after undo of Clear All; "
+            f"expected {next_id_before_clear}, got {doc.labels_next_id}"
+        )
+        # And reserving a new id now must NOT collide with the restored lid.
+        new_lid = doc.reserve_label_id(name="post-undo")
+        assert new_lid != lid, (
+            f"reserve_label_id after Clear All undo must not collide "
+            f"with restored ROI {lid}; got {new_lid}"
+        )
     finally:
         app._view3d_panel = None
 

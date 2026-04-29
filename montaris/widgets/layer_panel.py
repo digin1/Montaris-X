@@ -888,12 +888,27 @@ class LayerPanel(QWidget):
         if entries and hasattr(app, 'undo_stack'):
             from montaris.core.undo import RemoveROIUndoCommand
             undo_cmd = RemoveROIUndoCommand(self.layer_stack, entries)
+        # Bulk-clear 3D voxels + meta in ONE pass per doc instead of
+        # ``release_label_id`` per ROI. Each release_label_id does
+        # ``labels_3d == lid`` (a full 348M-voxel mask scan + write
+        # on the GQR neuron file) — 195 ROIs × ~150 ms = ~30 s freeze
+        # the user reported as "delete all is extremely slow". Since
+        # we're clearing EVERYTHING, a single ``labels_3d.fill(0)``
+        # is enough.
+        # MontageDocument is a dataclass (unhashable by default), so
+        # dedupe by id() — a single doc with N VolumeROILayers should
+        # only be cleared once.
+        volume_docs: dict[int, object] = {}
         for _i, roi in entries:
             if getattr(roi, 'is_volume', False):
                 doc = getattr(roi, '_doc', None)
-                lid = getattr(roi, 'label_id', None)
-                if doc is not None and lid is not None:
-                    doc.release_label_id(int(lid))
+                if doc is not None:
+                    volume_docs.setdefault(id(doc), doc)
+        for doc in volume_docs.values():
+            if doc.labels_3d is not None:
+                doc.labels_3d.fill(0)
+            doc.labels_meta.clear()
+            doc.labels_next_id = 1
         self.layer_stack.roi_layers.clear()
         self.layer_stack._color_index = 0
         if undo_cmd is not None:
@@ -908,6 +923,18 @@ class LayerPanel(QWidget):
             return
         self.layer_stack.duplicate_roi(data[1])
         self.refresh()
+        # ``duplicate_roi`` reserves a new label id in ``doc.labels_meta``;
+        # the 3D viewer's cached ``_labels_meta_keys`` is stale until we
+        # tell it. Without this, the next paint stroke into the new ROI
+        # would route through the cmap-only fast path with a LUT that
+        # has no slot for the new id — voxels would render as
+        # background (slot 0). For 2D duplicates the canvas refresh is
+        # enough; for 3D we need a labels-overlay rebuild to assign
+        # the new slot.
+        app = self.window()
+        if (getattr(app, '_view3d_panel', None) is not None
+                and hasattr(app._view3d_panel, 'refresh_labels')):
+            app._view3d_panel.refresh_labels()
         self.visibility_changed.emit()
 
     def _merge_selected(self):
