@@ -27,7 +27,9 @@
     "@docusaurus/types": "3.9.2"
   },
   "overrides": {
-    "serialize-javascript": ">=7.0.3"
+    "serialize-javascript": ">=7.0.5",
+    "uuid": ">=11.0.0",
+    "webpackbar": ">=7.0.0"
   },
   "browserslist": {
     "production": [
