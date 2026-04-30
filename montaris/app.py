@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QToolBar, QLabel, QSlider, QSpinBox, QHBoxLayout, QWidget, QPushButton,
     QComboBox, QInputDialog, QColorDialog, QFrame, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QSettings, QRectF, QTimer
+from PySide6.QtCore import Qt, QSettings, QRectF, QTimer, QEventLoop
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette, QColor, QTransform, QShortcut, QIcon
 
 from montaris.canvas import ImageCanvas
@@ -1672,14 +1672,11 @@ class MontarisApp(QMainWindow):
             return True
 
         labels, coerced = self._coerce_labels_source(data)
-        if not np.any(labels != 0):
-            QMessageBox.information(
-                self,
-                "No labels found",
-                "The displayed volume contains no non-zero integer labels to convert.",
-            )
-            return True
-
+        # Empty-source check is folded into the ``values.size == 0``
+        # path below — that path's ``had_any_source`` re-runs the
+        # scan only when ``assign_mask`` was empty, which is rare.
+        # Skipping the eager scan here saves ~150 ms on every
+        # convert call against the GQR neuron file.
         from montaris.core.undo import (
             AddVolumeROIUndoCommand,
             VolumeFillUndoCommand,
@@ -1707,7 +1704,10 @@ class MontarisApp(QMainWindow):
                 f"3D ROIs, then retry.",
             )
             return True
-        had_existing = bool(np.any(labels_3d != 0))
+        # ``assign_mask`` is the only full-volume scan we need (one
+        # combined ``(labels != 0) & (labels_3d == 0)`` pass, ~300 ms
+        # on the GQR file). The previous separate ``np.any(labels_3d != 0)``
+        # for ``had_existing`` was a redundant ~150 ms scan.
         assign_mask = (labels != 0) & (labels_3d == 0)
         value_blocks = [
             np.unique(labels[z][assign_mask[z]])
@@ -1721,10 +1721,15 @@ class MontarisApp(QMainWindow):
         )
 
         if values.size == 0:
+            # Distinguish "no labels at all in source" from "existing 3D
+            # ROIs already cover everything". Cheap because we already
+            # know ``assign_mask`` is empty — checking the source for
+            # any non-zero is one more scan but only on this rare path.
+            had_any_source = bool(np.any(labels != 0))
             msg = (
                 "Existing 3D ROIs already occupy every non-zero voxel in the "
                 "displayed volume."
-                if had_existing else
+                if had_any_source else
                 "The displayed volume contains no non-zero integer labels to convert."
             )
             QMessageBox.information(self, "No labels found", msg)
@@ -1758,7 +1763,17 @@ class MontarisApp(QMainWindow):
                 doc.promote_labels_dtype(target_dtype)
                 labels_3d = doc.labels_3d
 
-            for value in values.tolist():
+            # Pump events every ~32 reservations so the OS doesn't mark
+            # the app as Not Responding during the 6+ s conversion. The
+            # user reported a "force quit / keep waiting" dialog while
+            # converting the GQR neuron file. ``ExcludeUserInputEvents``
+            # is critical: ``busy_cursor`` only sets the cursor — it
+            # does NOT block clicks, so a plain ``processEvents()``
+            # would let a user click Delete/Clear All mid-loop and
+            # mutate ``roi_layers`` while we're still appending. The
+            # exclude flag drains paints + timers but blocks user
+            # input events.
+            for i, value in enumerate(values.tolist()):
                 name = generate_unique_roi_name(
                     f"Label {int(value)}", existing + added,
                 )
@@ -1772,6 +1787,8 @@ class MontarisApp(QMainWindow):
                 )
                 wrapper = VolumeROILayer(doc, lid)
                 added.append(wrapper)
+                if (i & 0x1F) == 0:  # every 32 iterations
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
             new_ids = np.asarray(
                 [wrapper.label_id for wrapper in added], dtype=labels_3d.dtype,
@@ -1799,6 +1816,8 @@ class MontarisApp(QMainWindow):
                 np.minimum.at(min_x, plane_idx, xs)
                 np.maximum.at(max_x, plane_idx, xs)
                 labels_3d[z][plane_mask] = new_ids[plane_idx]
+                if (z & 0x0F) == 0:  # every 16 z-planes
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
             for idx, wrapper in enumerate(added):
                 if max_z[idx] < 0:
@@ -1821,6 +1840,8 @@ class MontarisApp(QMainWindow):
                     doc, bbox, mask_crop, 0, wrapper.label_id,
                 )
                 commands.append(CompoundUndoCommand([add_cmd, fill_cmd]))
+                if (idx & 0x1F) == 0:  # every 32 ROIs
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
         self.undo_stack.push(CompoundUndoCommand(commands))
         self.layer_stack.changed.emit()
@@ -1895,7 +1916,7 @@ class MontarisApp(QMainWindow):
         with busy_cursor(
             "Converting image to labels...", self, log_as="labels.convert_image"
         ):
-            for value in values.tolist():
+            for i, value in enumerate(values.tolist()):
                 mask = (labels == value)
                 if not mask.any():
                     continue
@@ -1920,6 +1941,15 @@ class MontarisApp(QMainWindow):
                 roi._bbox_valid = False
                 self.layer_stack.roi_layers.append(roi)
                 added.append(roi)
+                # Pump events so the OS doesn't mark the app as Not
+                # Responding during long conversions (user reported
+                # a "force quit / keep waiting" dialog). Exclude
+                # user input events — busy_cursor only sets the
+                # cursor, it does NOT block clicks; without the
+                # exclude flag a Delete or Clear All click during
+                # the loop would mutate ``roi_layers`` mid-append.
+                if (i & 0x1F) == 0:
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
         if not added:
             QMessageBox.information(
